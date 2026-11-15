@@ -2489,7 +2489,20 @@ export class Superagent {
    * The cancelled input's own text stays authoritative: a resolution is not a retry.
    */
   private resolveControl(input: InputRecord, command: HeadCommand): void {
-    const target = command.argument.trim();
+    const binding = `head:resolve-target:${input.id}`;
+    const bound = this.store.getMeta(binding);
+    const target = bound ?? command.argument.trim();
+    const acknowledge = (selected: InputRecord) => {
+      this.controlReply(input, `Uncertain HEAD input ${JSON.stringify(selected.id)} is now cancelled and no longer holds the durable queue. Native work must still settle before later work runs. This is not a retry and not a completion claim. ${this.store.inputs("main").some(candidate => candidate.state === "uncertain" && candidate.id !== input.id) ? "Other uncertain inputs remain held." : "No uncertain HEAD input remains."}`, "done");
+      const head = this.live.get("main");
+      if (head) this.background(this.finish(head));
+      this.background(this.kick().catch(this.report));
+    };
+    const previous = bound ? this.store.input(bound) : null;
+    if (previous?.state === "cancelled" && this.store.output(`${previous.id}:resolved`)?.sourceId === previous.id) {
+      acknowledge(previous);
+      return;
+    }
     const held = this.store.inputs("main").filter(candidate => candidate.state === "uncertain" && candidate.id !== input.id);
     if (!target && !held.length) {
       this.controlReply(input, "No uncertain HEAD input to resolve. Nothing was cancelled or replayed.", "cancelled");
@@ -2514,6 +2527,9 @@ export class Superagent {
     }
     // Releasing the block is not progress on the cancelled work: the operator is
     // told to send a new request if they still want that work performed.
+    // Pin before the first effect: a recovered bare command must never select a
+    // different request if the process exits between the two settlements.
+    this.store.setMeta(binding, selected.id);
     if (!this.store.settle(selected.id, "cancelled", {
       id: `${selected.id}:resolved`,
       text: "이 요청은 운영자가 결과를 확인할 수 없는 상태로 종료 처리했습니다. 원래 작업은 다시 실행되지 않았고, 실제 수행·완료 여부를 주장하지 않습니다. 같은 작업이 필요하면 새 요청으로 보내 주세요.",
@@ -2521,10 +2537,7 @@ export class Superagent {
       this.controlReply(input, `Uncertain input ${JSON.stringify(selected.id)} could not be resolved; its state changed or already completed. Nothing was replayed.`, "uncertain");
       return;
     }
-    this.controlReply(input, `Uncertain HEAD input ${JSON.stringify(selected.id)} is now cancelled and no longer blocks later HEAD work. This is not a retry and not a completion claim. ${this.store.inputs("main").some(candidate => candidate.state === "uncertain" && candidate.id !== input.id) ? "Other uncertain inputs remain held." : "No uncertain HEAD input remains."}`, "done");
-    // The held-target set was computed before this resolution; re-drain so already
-    // queued ordinary work is dispatched now instead of at the next unrelated event.
-    this.background(this.kick().catch(this.report));
+    acknowledge(selected);
   }
 
   private async headControl(input: InputRecord, command: HeadCommand, earlierMain: boolean): Promise<void> {
@@ -2859,6 +2872,7 @@ export class Superagent {
   private canSteer(live: Live, input: InputRecord): boolean {
     const owner = live.input;
     if (this.restartFence() || !owner || !live.running || live.releasing || !this.current(live)
+      || this.store.input(owner.id)?.state !== "submitted"
       || input.state !== "pending" || input.target !== live.id || owner.workflow || input.workflow
       || routeKey(owner.route) !== routeKey(input.route) || this.headCommand(input)
       || input.text.trimStart().startsWith("/") || this.store.approvals(live.id).length
@@ -3143,22 +3157,24 @@ export class Superagent {
     live.lastActivity = Date.now();
     if (live.id !== "main") this.store.updateLane(live.id, live.generation, { runtimeState: "idle", lastActivityAt: live.lastActivity });
     const result = live.result;
-    if (input && result && admissions.every(admitted => admitted.result)) {
+    const cancelled = input && this.store.input(input.id)?.state === "cancelled";
+    if (input && (result || cancelled) && admissions.every(admitted => admitted.result
+      || this.store.input(admitted.input.id)?.state === "cancelled")) {
       // The originating command's result includes failures outside assistant
       // generation (for example admission/cost limits). Only an authoritative
       // later owned run can supersede it, including a successful native retry.
       // Goal resume only acknowledges activation: even its first run needs an
       // observed assistant outcome; a zero-run refusal is not completion.
-      const outcome = result.goalResume ? live.assistantOutcome?.status ?? "error"
-        : live.assistantOutcome && live.assistantOutcome.run > 1 ? live.assistantOutcome.status : result.status;
+      const outcome = cancelled ? "aborted" : result!.goalResume ? live.assistantOutcome?.status ?? "error"
+        : live.assistantOutcome && live.assistantOutcome.run > 1 ? live.assistantOutcome.status : result!.status;
       const completed = outcome === "completed";
       const state = completed ? "done" : outcome === "aborted" ? "cancelled" : "uncertain";
-      const text = completed ? (result.agentInvoked || result.goalResume && live.ownedRuns > 0 ? live.text : "") : outcome === "aborted"
+      const text = completed ? (result!.agentInvoked || result!.goalResume && live.ownedRuns > 0 ? live.text : "") : outcome === "aborted"
         ? "실행이 중단되었습니다. 작업 완료로 처리하지 않았습니다."
         : "실행이 실패했습니다. 작업 완료로 처리하지 않았습니다.";
       for (const admitted of admissions) {
         this.activity(admitted.input, false);
-        if (admitted.input.id === input.id) continue;
+        if (admitted.input.id === input.id || this.store.input(admitted.input.id)?.state === "cancelled") continue;
         const status = admitted.result!.status;
         this.store.settle(admitted.input.id, status === "completed" ? "done" : status === "aborted" ? "cancelled" : "uncertain");
       }
