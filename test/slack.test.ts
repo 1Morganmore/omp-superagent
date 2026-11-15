@@ -369,6 +369,7 @@ describe("Slack authenticated intake and durable ACK", () => {
     const f = await fixture();
     const commands = [
       "!new independent request", "!main", "!stop", "!resume",
+      "!resolve", "!resolve held-input", "!resolved", "quoted !resolve",
       "!model", "!model fixture/efficient", "!effort", "!effort high",
       "!newspaper", "!models", "!effortless",
       "quoted !new request", "quoted !model", " !main", " !effort high",
@@ -384,6 +385,7 @@ describe("Slack authenticated intake and durable ACK", () => {
     }
     const expected = [
       "/new independent request", "/main", "/stop", "/resume",
+      "/resolve", "/resolve held-input", "!resolved", "quoted !resolve",
       "/model", "/model fixture/efficient", "/effort", "/effort high",
       "!newspaper", "!models", "!effortless",
       "quoted !new request", "quoted !model", " !main", " !effort high",

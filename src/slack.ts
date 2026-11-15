@@ -50,7 +50,7 @@ const escapeText = (value: string): string => value.replaceAll("&", "&amp;").rep
 // including the head's bare query and argument forms of /model, /effort, /stop,
 // /compact, and the rest of the ordinary-text command surface.
 // Only an exact first token converts; lookalikes such as "!models" stay plain text.
-const controlText = (value: string): string => value.replace(/^!(new|main|stop|restart|resume|model|effort|help|status|context|compact|usage)(?=$|\s)/, "/$1");
+const controlText = (value: string): string => value.replace(/^!(new|main|stop|restart|resume|resolve|model|effort|help|status|context|compact|usage)(?=$|\s)/, "/$1");
 const tokenFor = (approval: Approval): string => hash(JSON.stringify([approval.id, approval.generation, approval.target, approval.requestId, routeKey(approval.route)]));
 const compare = (left: string, right: string): number => {
   const result = compareMessageIds("slack", left, right);

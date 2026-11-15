@@ -50,6 +50,7 @@ class HostTransport implements RuntimeHost {
   beforeCompact?: () => Promise<void> | void;
   beforeAbort?: () => Promise<void> | void;
   beforeGoalResume?: () => Promise<void> | void;
+  beforePrompt?: () => Promise<void> | void;
   beforeState?: () => Promise<void> | void;
   beforeEntries?: () => Promise<void> | void;
   afterEntries?: () => Promise<void> | void;
@@ -165,6 +166,7 @@ class HostTransport implements RuntimeHost {
       if (!id) throw new Error("Missing persisted request identity");
       this.prompts.push({ id, command });
       for (const waiter of this.promptWaiters) if (this.prompts.length >= waiter.count) waiter.resolve();
+      if (this.beforePrompt) await this.beforePrompt();
       if (!this.local) {
         this.state.isSettled = false;
         this.state.isStreaming = true;
@@ -2351,6 +2353,138 @@ describe("messenger head session controls", () => {
     expect(store.input("head-crashed-diagnostic")?.state).toBe("done");
     expect(store.input("head-crashed-later-work")?.state).toBe("pending");
     expect(main.commands.filter(command => command.type === "set_model")).toEqual([]);
+    expect(main.prompts).toEqual([]);
+  });
+
+  test("an uncertain HEAD input holds later work until /resolve names it, and resolving never replays it", async () => {
+    const { runtime, store, main, messenger } = fixture();
+    await runtime.start();
+    store.receive(message("head-blocking-request"), "main");
+    store.submit("head-blocking-request", "head-blocking-receipt", 0);
+    store.settle("head-blocking-request", "uncertain");
+    await admit(runtime, message("head-blocked-later-work"));
+    expect(store.input("head-blocked-later-work")?.state).toBe("pending");
+    expect(main.prompts).toEqual([]);
+    // The operator must be able to discover the exact held identity from HEAD.
+    await admit(runtime, message("head-blocked-status", route(), "/status"));
+    expect(messenger.sent.at(-1)!.text).toContain('"head-blocking-request"');
+    await runtime.receive(message("head-blocked-resolve", route(), '/resolve head-blocking-request'));
+    await main.whenPrompts(1);
+    expect(store.input("head-blocked-resolve")?.state).toBe("done");
+    expect(store.input("head-blocking-request")?.state).toBe("cancelled");
+    // Closure is announced on the original conversation without claiming outcome.
+    expect(messenger.sent.some(output => output.sourceId === "head-blocking-request" && /다시 실행되지 않았고/.test(output.text))).toBe(true);
+    expect(store.input("head-blocked-later-work")?.state).not.toBe("pending");
+    expect(main.prompts).toHaveLength(1);
+    expect(String(main.prompts[0]!.command.message)).toContain("Request ID: head-blocked-later-work");
+    // The cancelled original is never resubmitted by the resolution itself.
+    expect(main.prompts.filter(prompt => String(prompt.command.message).includes("head-blocking-request"))).toEqual([]);
+  });
+
+  test.each(["idle", "busy", "unknown"] as const)("resolve releases a lost prompt admission only after native settlement: %s", async state => {
+    const { runtime, store, main } = fixture();
+    await runtime.start();
+    main.beforePrompt = () => {
+      if (state === "busy") {
+        main.state.isSettled = false;
+        main.state.isStreaming = true;
+        main.emit({ type: "agent_start" });
+      }
+      throw new Error("lost native admission response");
+    };
+    await admit(runtime, message("lost-native-request"));
+    main.beforePrompt = undefined;
+    expect(store.input("lost-native-request")?.state).toBe("uncertain");
+    await admit(runtime, message("after-lost-native-request"));
+    if (state === "unknown") main.beforeState = () => { throw new Error("native state unavailable"); };
+    await admit(runtime, message("resolve-lost-native-request", route(), "/resolve"));
+    expect(store.input("lost-native-request")?.state).toBe("cancelled");
+    if (state !== "idle") {
+      expect(main.prompts).toHaveLength(1);
+      expect(store.input("after-lost-native-request")?.state).toBe("pending");
+      main.beforeState = undefined;
+      main.state.isSettled = true;
+      main.state.isStreaming = false;
+      main.emit({ type: "session_settled" });
+    }
+    await main.whenPrompts(2);
+    expect(main.prompts[1]!.command.message).toContain("Request ID: after-lost-native-request");
+    main.emit({ type: "prompt_result", id: main.prompts[0]!.id, status: "completed", agentInvoked: true });
+    expect(store.input("lost-native-request")?.state).toBe("cancelled");
+    expect(store.input("after-lost-native-request")?.state).toBe("submitted");
+  });
+
+  test("resolving a failed steering admission does not strand or cancel its running owner", async () => {
+    const { runtime, store, main } = fixture();
+    await runtime.start();
+    await admit(runtime, message("steering-owner"));
+    main.beforePrompt = () => { throw new Error("lost steering response"); };
+    await admit(runtime, message("lost-steering"));
+    main.beforePrompt = undefined;
+    expect(store.input("lost-steering")?.state).toBe("uncertain");
+    await admit(runtime, message("resolve-steering", route(), "/resolve lost-steering"));
+    expect(store.input("steering-owner")?.state).toBe("submitted");
+    main.complete("Owner finished", 0);
+    await admit(runtime, message("after-steering", route("another-thread")));
+    await main.whenPrompts(3);
+    expect(store.input("steering-owner")?.state).toBe("done");
+    expect(store.input("lost-steering")?.state).toBe("cancelled");
+  });
+
+  test.each([false, true])("a recovered bare resolve keeps its original target after cancellation=%s", async cancelled => {
+    const { runtime, store, main } = fixture();
+    store.receive(message("original-held"), "main");
+    store.submit("original-held", "original-receipt", 0);
+    store.settle("original-held", "uncertain");
+    store.receive(message("another-submitted"), "main");
+    store.submit("another-submitted", "another-receipt", 0);
+    const control = message("interrupted-resolve", route(), "/resolve");
+    store.receive(control, "main", { [`user-source:${control.id}`]: "true" });
+    store.setMeta(`head:resolve-target:${control.id}`, "original-held");
+    if (cancelled) store.settle("original-held", "cancelled", {
+      id: "original-held:resolved", text: "Previously closed by the owner.",
+    });
+    const settle = store.settle.bind(store);
+    store.settle = (id, state, output) => {
+      if (id === "original-held" && state === "cancelled") {
+        expect(store.getMeta(`head:resolve-target:${control.id}`)).toBe(id);
+      }
+      return settle(id, state, output);
+    };
+    await runtime.start();
+    await runtime.kick();
+    expect(store.input("original-held")?.state).toBe("cancelled");
+    expect(store.input("another-submitted")?.state).toBe("uncertain");
+    expect(store.input(control.id)?.state).toBe("done");
+    await admit(runtime, control);
+    expect(store.input("another-submitted")?.state).toBe("uncertain");
+    expect(main.prompts).toEqual([]);
+  });
+
+  test("ambiguous, unknown, and empty /resolve requests change nothing", async () => {
+    const { runtime, store, main } = fixture();
+    await runtime.start();
+    // Nothing held: an empty resolve is refused rather than cancelling anything.
+    await admit(runtime, message("head-resolve-empty", route(), "/resolve"));
+    expect(store.input("head-resolve-empty")?.state).toBe("cancelled");
+    for (const id of ["head-resolve-first", "head-resolve-second"]) {
+      store.receive(message(id), "main");
+      store.submit(id, `${id}-receipt`, 0);
+      store.settle(id, "uncertain");
+    }
+    // A bare /resolve with two held uncertainties must not choose for the operator.
+    await admit(runtime, message("head-resolve-ambiguous", route(), "/resolve"));
+    expect(store.input("head-resolve-ambiguous")?.state).toBe("cancelled");
+    expect(store.input("head-resolve-first")?.state).toBe("uncertain");
+    expect(store.input("head-resolve-second")?.state).toBe("uncertain");
+    // An unknown identity never cancels a held one.
+    await admit(runtime, message("head-resolve-unknown", route(), "/resolve head-resolve-missing"));
+    expect(store.input("head-resolve-unknown")?.state).toBe("cancelled");
+    expect(store.input("head-resolve-first")?.state).toBe("uncertain");
+    expect(store.input("head-resolve-second")?.state).toBe("uncertain");
+    await admit(runtime, message("head-resolve-exact", route(), "/resolve head-resolve-second"));
+    expect(store.input("head-resolve-second")?.state).toBe("cancelled");
+    expect(store.input("head-resolve-first")?.state).toBe("uncertain");
     expect(main.prompts).toEqual([]);
   });
 });

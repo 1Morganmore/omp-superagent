@@ -454,7 +454,7 @@ bun --no-env-file src/cli.ts discord-commands --config config.local.json --apply
 
 첫 명령은 읽기 전용 변경 확인이다. `--apply`는 **이 봇의 전역 명령 목록 전체를 교체**하므로
 전용 Superagent 앱에서만 사용한다. Hermes 전용 명령은 제거하고 지원되는
-`help/status/restart/context/usage/model/effort/compact/stop/resume/new/main`만 등록한다.
+`help/status/restart/context/usage/model/effort/compact/stop/resolve/resume/new/main`만 등록한다.
 별도 guild 명령이 전역 명령을 가리는 경우 몰래 삭제하지 않고 충돌을 알린다.
 등록은 모델·메신저 연결을 시작하지 않으며 setup·doctor·start의 부수 효과로 실행되지 않는다.
 인수가 있는 명령은 선택적인 `text` 필드를 사용한다. 예를 들어 `/model`의 `text`에
@@ -970,6 +970,7 @@ native transcript에서 복원하므로 과거 프리셋의 기본값으로 덮�
 | `/stop` | 연결된 레인이 있으면 그 레인 일시정지, 없으면 헤드 작업 중단 |
 | `/stop head` | 현재 주제와 무관하게 공유 헤드 작업 중단 |
 | `/stop <lane-id>` | 해당 instance에 등록되고 허가된 레인만 일시정지 |
+| `/resolve [input-id]` | 이미 `uncertain`이 된 헤드 입력 **하나**를 운영자가 취소로 확정해 뒤의 헤드 작업 차단을 해제. 원래 작업을 재실행하지 않으며 실제 수행·완료를 주장하지 않음 |
 
 `/restart`는 인수가 없다. Slack의 선택기는 `/superagent-restart`, 일반 메시지는 `!restart`다.
 접수 응답이 실제 전송된 뒤 Gateway가 정상 종료와 일회성 successor 기동을 맡고,
@@ -988,6 +989,17 @@ Gateway 앞에 불확실한 승인 답변이 남아 있어도 재시작·중지 
 통과할 수 있다. 일반 입력 순서는 바꾸지 않으며 원래 답변/효과는 격리한다. 아직 native에 남은
 질문 세대를 취소한 경우 늦은 답변은 거절한다. 이미 소비된 승인이나 외부 효과의 rollback은 아니다.
 불확실한 발송·종료·기동은 같은 요청으로 자동 반복하지 않고 상태와 원래 receipt를 확인한다.
+
+`uncertain` 입력은 같은 target의 뒤 입력을 계속 막는다(자동 재시도 금지). 해제는 운영자의
+명시적 `/resolve [input-id]`로만 한다. `/status`가 보류 중인 정확한 입력 ID를 보여주며,
+보류가 둘 이상이면 ID를 생략한 `/resolve`는 거부한다(최근 항목을 임의로 고르지 않는다).
+`/resolve`는 원래 작업을 다시 보내거나 수행 결과를 주장하지 않고, 해당 대화에 종료 처리
+사실만 알린 뒤 즉시 큐를 다시 비운다. 같은 작업이 여전히 필요하면 새 요청으로 보낸다.
+native 세션을 변경하지 않으므로 바쁜 헤드나 native 상태 미확인 시에도 처리된다.
+취소 대상은 효과를 적용하기 전에 영속 고정하므로 처리 도중 재시작되어도 다른 요청을
+선택하지 않는다. 저장된 보류 해제와 native 실행 종료는 별개다. 실제 native 유휴가 확인된
+뒤 취소된 접수의 메모리 상태도 정리하고 후속 작업을 실행하며, 다른 접수의 결과는 계속 확인한다.
+Slack 일반 메시지는 `!resolve [input-id]`를 사용한다.
 
 조회와 중단은 일반 모델 답변을 기다리지 않는다. 압축은 native 요약 모델을 호출할 수 있으며,
 일반 대화 실행·세션 초기화가 아니다. 실행·승인·goal·소유 서비스·미해결 제출이 있으면

@@ -106,7 +106,7 @@ interface DmCommandBoundary {
   topicId: string | null;
 }
 interface HeadCommand {
-  name: "help" | "status" | "stop" | "restart" | "context" | "compact" | "usage" | "model" | "effort";
+  name: "help" | "status" | "stop" | "restart" | "context" | "compact" | "usage" | "model" | "effort" | "resolve";
   argument: string;
 }
 interface HeadRestart extends GatewayRestartRequest {
@@ -1835,7 +1835,7 @@ export class Superagent {
   private headCommand(input: InputRecord): HeadCommand | null {
     if (input.target !== "main" || this.store.getMeta(`user-source:${input.id}`) !== "true"
       || this.store.getMeta(`handoff-source:${input.id}`)) return null;
-    const match = /^\/(help|status|stop|restart|context|compact|usage|model|effort)(?:\s+([\s\S]*))?$/.exec(input.text.trim());
+    const match = /^\/(help|status|stop|restart|context|compact|usage|model|effort|resolve)(?:\s+([\s\S]*))?$/.exec(input.text.trim());
     return match ? { name: match[1] as HeadCommand["name"], argument: (match[2] ?? "").trim() } : null;
   }
 
@@ -2382,7 +2382,9 @@ export class Superagent {
 
   private readOnlyHeadCommand(command: HeadCommand): boolean {
     const preset = this.headPresetCommand(command);
-    return ["help", "status", "context", "usage"].includes(command.name)
+    // /resolve mutates only the durable ledger, never native session state, so it
+    // must stay available while the HEAD is busy or its native state is unknown.
+    return command.name === "resolve" || ["help", "status", "context", "usage"].includes(command.name)
       || command.name === "effort" && !command.argument
       || !!preset && (!!preset.error || !preset.name)
       || command.name === "model" && ["", "list"].includes(command.argument);
@@ -2421,6 +2423,7 @@ export class Superagent {
         "/compact [instructions] — native shared HEAD compaction; multiline instructions allowed; requires idle, unambiguous state.",
         "/stop [head|lane-id] — head aborts current/admitted ordinary HEAD work and earlier pending changes, not historical uncertain effects or unrelated lanes; an actual managed lane-id pauses that lane. Bare /stop pauses this conversation's bound lane, otherwise HEAD.",
         "/restart — durably fence intake, confirm the original-route ACK, checkpoint/interrupt busy HEAD and cancel its original approval cards, then safely replace BOTH Gateway AND HEAD. Restore the same native session/model/effort/board and resume eligible previously active goals without prompt replay. Independent lanes stay running. Uncertain effects or unreconciled owned resources remain held; no forced kill. ACK/acceptance is not completion; explicit stop wins.",
+        "/resolve [input-id] — close ONE already-uncertain HEAD input as cancelled so later HEAD work is no longer held. Requires the exact ID when several are held; never replays the original work and never claims its native outcome. Send a new request if that work is still wanted.",
         "/resume — resume this conversation's bound lane only (no head resume mode).",
         "/new [request]; /main — logical DM topic selection; threads/forum topics already supply independent topics. Topic selection does not create a separate HEAD session.",
       ].join("\n")); return true;
@@ -2440,7 +2443,11 @@ export class Superagent {
         const current = this.requireLane(bound.id);
         laneStatus = `${JSON.stringify(bound.id)}; work: ${current.workState}; stored runtime: ${current.runtimeState}; ${counts(this.store.inputs(bound.id))}; approvals: ${this.store.approvals(bound.id).length}; actual: ${actual}\nRecorded lane observation (not verified acceptance or live-target proof): ${JSON.stringify(current.observation ?? null)}\nObservation ownership/ages: ${JSON.stringify(this.observationState(current, native))}`;
       }
-      reply(`Native HEAD: ${this.nativeStatus(state)}.\nPreset initialization: ${this.initialization ? `${this.initialization.state}; ${this.initialization.detail}` : "not managed by this runtime"}.\nLogical topic: ${JSON.stringify(input.route.topicId ?? input.route.threadId ?? "main")}; shared HEAD session: ${JSON.stringify(state.sessionId)}.\nHEAD inputs: ${counts(inputs)}; durable approvals: ${this.store.approvals("main").length}; stop pending: ${this.headStopping > 0}; managed compaction pending: ${!!this.headCompaction}.\nBound lane: ${laneStatus}.\nIdle/settled is not proof of task completion; uncertain effects are never automatically repeated.`);
+      const uncertainInputs = inputs.filter(candidate => candidate.state === "uncertain");
+      const uncertain = uncertainInputs.length
+        ? `\nUncertain HEAD inputs held (block later HEAD work until /resolve <input-id>): ${uncertainInputs.map(candidate => JSON.stringify(candidate.id)).join(", ")}.`
+        : "";
+      reply(`Native HEAD: ${this.nativeStatus(state)}.\nPreset initialization: ${this.initialization ? `${this.initialization.state}; ${this.initialization.detail}` : "not managed by this runtime"}.\nLogical topic: ${JSON.stringify(input.route.topicId ?? input.route.threadId ?? "main")}; shared HEAD session: ${JSON.stringify(state.sessionId)}.\nHEAD inputs: ${counts(inputs)}; durable approvals: ${this.store.approvals("main").length}; stop pending: ${this.headStopping > 0}; managed compaction pending: ${!!this.headCompaction}.${uncertain}\nBound lane: ${laneStatus}.\nIdle/settled is not proof of task completion; uncertain effects are never automatically repeated.`);
       return true;
     }
     if (command.name === "context") { reply(this.contextStatus(state)); return true; }
@@ -2601,6 +2608,64 @@ export class Superagent {
     await operation;
   }
 
+  /**
+   * Owner-declared closure of an already-uncertain request. This never replays the
+   * original work and never claims its native outcome; it only releases the durable
+   * uncertainty that would otherwise hold every later input for the same target.
+   * The cancelled input's own text stays authoritative: a resolution is not a retry.
+   */
+  private resolveControl(input: InputRecord, command: HeadCommand): void {
+    const binding = `head:resolve-target:${input.id}`;
+    const bound = this.store.getMeta(binding);
+    const target = bound ?? command.argument.trim();
+    const acknowledge = (selected: InputRecord) => {
+      this.controlReply(input, `Uncertain HEAD input ${JSON.stringify(selected.id)} is now cancelled and no longer holds the durable queue. Native work must still settle before later work runs. This is not a retry and not a completion claim. ${this.store.inputs("main").some(candidate => candidate.state === "uncertain" && candidate.id !== input.id) ? "Other uncertain inputs remain held." : "No uncertain HEAD input remains."}`, "done");
+      const head = this.live.get("main");
+      if (head) this.background(this.finish(head));
+      this.background(this.kick().catch(this.report));
+    };
+    const previous = bound ? this.store.input(bound) : null;
+    if (previous?.state === "cancelled" && this.store.output(`${previous.id}:resolved`)?.sourceId === previous.id) {
+      acknowledge(previous);
+      return;
+    }
+    const held = this.store.inputs("main").filter(candidate => candidate.state === "uncertain" && candidate.id !== input.id);
+    if (!target && !held.length) {
+      this.controlReply(input, "No uncertain HEAD input to resolve. Nothing was cancelled or replayed.", "cancelled");
+      return;
+    }
+    // An explicit request ID is required when several uncertainties are held; a
+    // bare /resolve is only unambiguous with exactly one. Never pick by recency.
+    let selected: InputRecord;
+    if (target) {
+      const match = held.find(candidate => candidate.id === target);
+      if (!match) {
+        this.controlReply(input, `No uncertain HEAD input matches ${JSON.stringify(target)}. Held uncertain inputs: ${held.length ? held.map(candidate => JSON.stringify(candidate.id)).join(", ") : "none"}. Nothing was resolved.`, "cancelled");
+        return;
+      }
+      selected = match;
+    } else {
+      if (held.length > 1) {
+        this.controlReply(input, `More than one uncertain HEAD input is held; name the exact one. Held: ${held.map(candidate => JSON.stringify(candidate.id)).join(", ")}. Nothing was resolved.`, "cancelled");
+        return;
+      }
+      selected = held[0]!;
+    }
+    // Releasing the block is not progress on the cancelled work: the operator is
+    // told to send a new request if they still want that work performed.
+    // Pin before the first effect: a recovered bare command must never select a
+    // different request if the process exits between the two settlements.
+    this.store.setMeta(binding, selected.id);
+    if (!this.store.settle(selected.id, "cancelled", {
+      id: `${selected.id}:resolved`,
+      text: "이 요청은 운영자가 결과를 확인할 수 없는 상태로 종료 처리했습니다. 원래 작업은 다시 실행되지 않았고, 실제 수행·완료 여부를 주장하지 않습니다. 같은 작업이 필요하면 새 요청으로 보내 주세요.",
+    })) {
+      this.controlReply(input, `Uncertain input ${JSON.stringify(selected.id)} could not be resolved; its state changed or already completed. Nothing was replayed.`, "uncertain");
+      return;
+    }
+    acknowledge(selected);
+  }
+
   private async headControl(input: InputRecord, command: HeadCommand, earlierMain: boolean): Promise<void> {
     if (command.name === "restart") {
       if (this.restartActive === input.id || this.admitRestart(input, command)) await this.runHeadRestart(input);
@@ -2616,6 +2681,7 @@ export class Superagent {
       this.store.settle(input.id, outcome, { id: `${input.id}:head-control`, text: `${scope} ${text}` });
     };
     if (command.name === "stop") { await this.stopControl(input, command); return; }
+    if (command.name === "resolve") { this.resolveControl(input, command); return; }
     if (presetCommand?.error) { reply(presetCommand.error, "cancelled"); return; }
     const mutation = !this.readOnlyHeadCommand(command);
     let submitted = false;
@@ -2939,6 +3005,7 @@ export class Superagent {
   private canSteer(live: Live, input: InputRecord): boolean {
     const owner = live.input;
     if (this.restartFence() || !owner || !live.running || live.releasing || !this.current(live)
+      || this.store.input(owner.id)?.state !== "submitted"
       || input.state !== "pending" || input.target !== live.id || owner.workflow || input.workflow
       || routeKey(owner.route) !== routeKey(input.route) || this.headCommand(input)
       || input.text.trimStart().startsWith("/") || this.store.approvals(live.id).length
@@ -3289,22 +3356,24 @@ export class Superagent {
     live.lastActivity = Date.now();
     if (live.id !== "main") this.store.updateLane(live.id, live.generation, { runtimeState: "idle", lastActivityAt: live.lastActivity });
     const result = live.result;
-    if (input && result && admissions.every(admitted => admitted.result)) {
+    const cancelled = input && this.store.input(input.id)?.state === "cancelled";
+    if (input && (result || cancelled) && admissions.every(admitted => admitted.result
+      || this.store.input(admitted.input.id)?.state === "cancelled")) {
       // The originating command's result includes failures outside assistant
       // generation (for example admission/cost limits). Only an authoritative
       // later owned run can supersede it, including a successful native retry.
       // Goal resume only acknowledges activation: even its first run needs an
       // observed assistant outcome; a zero-run refusal is not completion.
-      const outcome = result.goalResume ? live.assistantOutcome?.status ?? "error"
-        : live.assistantOutcome && live.assistantOutcome.run > 1 ? live.assistantOutcome.status : result.status;
+      const outcome = cancelled ? "aborted" : result!.goalResume ? live.assistantOutcome?.status ?? "error"
+        : live.assistantOutcome && live.assistantOutcome.run > 1 ? live.assistantOutcome.status : result!.status;
       const completed = outcome === "completed";
       const state = completed ? "done" : outcome === "aborted" ? "cancelled" : "uncertain";
-      const text = completed ? (result.agentInvoked || result.goalResume && live.ownedRuns > 0 ? live.text : "") : outcome === "aborted"
+      const text = completed ? (result!.agentInvoked || result!.goalResume && live.ownedRuns > 0 ? live.text : "") : outcome === "aborted"
         ? "실행이 중단되었습니다. 작업 완료로 처리하지 않았습니다."
         : "실행이 실패했습니다. 작업 완료로 처리하지 않았습니다.";
       for (const admitted of admissions) {
         this.activity(admitted.input, false);
-        if (admitted.input.id === input.id) continue;
+        if (admitted.input.id === input.id || this.store.input(admitted.input.id)?.state === "cancelled") continue;
         const status = admitted.result!.status;
         this.store.settle(admitted.input.id, status === "completed" ? "done" : status === "aborted" ? "cancelled" : "uncertain");
       }
