@@ -29,6 +29,7 @@ const headInstructions = [
   ...readHeadReferences(fileURLToPath(new URL("../skills/head/references/", import.meta.url))),
 ];
 const managerTools: Record<string, true> = {
+  head_recovery: true,
   lane_models: true, lane_init_presets: true, lane_set_model: true,
   lane_start: true, lane_inspect: true, lane_message: true,
   lane_pause: true, lane_resume: true, lane_close: true,
@@ -84,6 +85,34 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     const active = pi.getActiveTools();
     const scoped = active.filter(name => !Object.hasOwn(managerTools, name));
     if (scoped.length !== active.length) await pi.setActiveTools(scoped);
+  });
+  pi.on("tool_call", (event, ctx) => {
+    if (event.toolName === "head_recovery" && ctx.agent.kind !== "main")
+      return { block: true, reason: "HEAD recovery is restricted to the original main head" };
+    if (!runtime?.headRecoveryActive()) return;
+    if (ctx.agent.kind !== "main" || event.toolName !== "head_recovery") {
+      runtime.blockHeadRecoveryTool();
+      return { block: true, reason: "The isolated HEAD recovery turn permits only head_recovery; original work is not replayed" };
+    }
+  });
+  pi.on("turn_end", (_event, ctx) => {
+    // Abort after the hook has delivered its block/tool result, not inside
+    // tool_call: native abort can release an awaiting hook without its result.
+    // Native prompt bounds remain authoritative; no watchdog or turn budget.
+    if (ctx.agent.kind === "main" && runtime?.headRecoveryActive()) ctx.abort();
+  });
+  pi.registerTool({
+    name: "head_recovery", label: "Decide isolated HEAD recovery", approval: "write", loadMode: "essential",
+    description: "Only during the runtime's internal same-HEAD recovery turn: propose hold or evidence-backed release of its exact original request. Native code validates receipt/session/file/generation and stable original-run evidence. Never replays work, discards uncertainty, or claims user-task acceptance.",
+    parameters: Type.Object({
+      attemptId: Type.String({ minLength: 1 }),
+      decision: Type.Union([Type.Literal("release"), Type.Literal("hold")]),
+      evidenceEntryIds: Type.Array(Type.String({ minLength: 1 })),
+      reason: Type.String({ minLength: 1 }),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(await requireRuntime(ctx).decideHeadRecovery(params));
+    },
   });
   pi.registerTool({
     name: "lane_models", label: "Inspect lane model candidates", approval: "read", loadMode: "essential",

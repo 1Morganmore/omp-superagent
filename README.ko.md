@@ -149,6 +149,11 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
   `/compact [보존할 내용]`으로 유휴 헤드 맥락을 압축합니다. `/model preset`으로 목록을 보고
   `/model preset <name>`으로 native 프리셋을 적용합니다. `/stop head`는 Gateway 종료 없이 헤드 작업을 중단합니다.
   Slack에서는 같은 명령에 `!`를 씁니다.
+- **보류 자동 복구:** 결과가 불확실한 헤드 요청은 후속 작업을 막습니다. 같은 헤드가 제한된
+  복구 턴에서 native 근거를 검토하고, 확인된 처리 결과만 반영해 원본 재실행 없이 해제합니다.
+  결과를 확인할 수 없으면 보류를 유지합니다. `/status`에서 ID를 확인하고
+  `/resolve [input-id]`(Slack `!resolve`)로 요청 하나를 명시적으로 종료할 수 있습니다.
+  복구는 작업 성공의 검증이나 이미 일어난 효과의 취소를 뜻하지 않습니다.
 - **서비스 재시작:** `/restart`는 유휴 상태에서 Gateway와 헤드 프로세스를 모두 교체하며
   기존 세션·작업 기록을 유지합니다. 작업·비동기 실행·승인 등이 있으면 강제 종료하지 않고 거절합니다.
   Slack은 `!restart` 또는 등록된 `/superagent-restart`입니다.

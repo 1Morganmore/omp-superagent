@@ -174,6 +174,41 @@ export interface Approval {
   remoteId: string | null;
 }
 
+export interface HeadRecoveryDecision {
+  attemptId: string;
+  decision: "release" | "hold";
+  evidenceEntryIds: string[];
+  reason: string;
+}
+
+export interface HeadRecoveryAttempt {
+  attemptId: string;
+  inputId: string;
+  requestId: string;
+  generation: number;
+  sessionId: string;
+  sessionFile: string;
+  hostPid: number;
+  recoveryRequestId: string;
+  promptDigest: string;
+  stopBoundary: string | null;
+  cursor: string | null;
+  boundary: string;
+  evidenceEntryIds: string[];
+  evidenceFingerprint: string;
+  state: "prepared" | "submitted" | "decided" | "settled" | "held";
+  decision?: HeadRecoveryDecision;
+  outcome?: "done" | "cancelled";
+  blocked?: boolean;
+  abandonedByOwner?: true;
+}
+
+export interface HeadRecoveryEffect {
+  id: string;
+  kind: string;
+  state: string;
+}
+
 export interface StorePort {
   receive(input: Inbound, target: string | null, metadata?: Readonly<Record<string, string>>, workflow?: WorkflowActivation | null): boolean;
   input(id: string): InputRecord | null;
@@ -187,6 +222,9 @@ export interface StorePort {
   recordLaneReport(id: string, generation: number, sessionId: string, eventId: string, report: LaneReport, observedAt?: number): boolean;
   resolveLaneWaiting(id: string, generation: number, sessionId: string, kind: "tool" | "approval", nativeId: string): boolean;
   settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }): boolean;
+  headRecoveryEffects(inputId: string): HeadRecoveryEffect[];
+  prepareHeadRecovery(attempt: HeadRecoveryAttempt): boolean;
+  commitHeadRecovery(expected: HeadRecoveryAttempt, decided: HeadRecoveryAttempt): boolean;
   queueOutput(output: Omit<OutputRecord, "state" | "remoteId" | "error">): boolean;
   output(id: string): OutputRecord | null;
   outputs(): OutputRecord[];

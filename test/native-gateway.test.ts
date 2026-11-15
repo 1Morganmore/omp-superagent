@@ -13,7 +13,7 @@ async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T
   finally { clearTimeout(timer); }
 }
 
-for (const presetScenario of ["create", "valid", "failed", "skipped", "interrupted"]) {
+for (const presetScenario of ["create", "valid", "failed", "skipped", "interrupted", "recovery"]) {
 nativeTest(`production Gateway native preset startup (${presetScenario}) preserves setup state, queued input and actual head ownership`, async () => {
   // Native imports and subprocesses begin only after HOME/settings isolation.
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osg-"));

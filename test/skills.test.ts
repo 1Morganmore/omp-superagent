@@ -66,7 +66,8 @@ test.each(cases)("native packaged skills, scoped tools, and preserved selections
       if (kind === "sub" || selection === "narrow") expect(proof.active).not.toContain("lane_report");
       else expect(proof.active).toContain("lane_report");
     } else {
-      expect(Object.keys(proof.schemas).sort()).toEqual(["lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start"]);
+      expect(Object.keys(proof.schemas).sort()).toEqual(["head_recovery", "lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start"]);
+      if (kind === "sub") expect(proof.active).not.toContain("head_recovery");
       if (kind === "sub") expect(proof.active.some(name => name.startsWith("lane_"))).toBe(false);
       else if (selection === "narrow") expect(proof.active).not.toContain("lane_message");
       else expect(proof.active).toContain("lane_message");

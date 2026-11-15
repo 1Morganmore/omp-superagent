@@ -26,6 +26,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   physicalRouteKey, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
   type OutputRecord, type Route, type StorePort, type WorkflowActivation,
+  type HeadRecoveryAttempt, type HeadRecoveryEffect,
 } from "./contracts.ts";
 import { isLaneModel, sameLaneModel } from "./lane-models";
 import { workflowChoice } from "./workflow";
@@ -453,6 +454,78 @@ export class Store implements StorePort {
         this.queueOutput({ ...output, sourceId: id, route: input.route });
       }
       this.db.query("UPDATE inputs SET state = ? WHERE id = ?").run(state, id);
+      return true;
+    }).immediate();
+  }
+
+  headRecoveryEffects(inputId: string): HeadRecoveryEffect[] {
+    const input = this.requireInput(inputId);
+    const related = [inputId, ...this.inputs().filter(candidate =>
+      this.getMeta(`handoff-source:${candidate.id}`) === inputId).map(candidate => candidate.id)];
+    const outputs = (this.db.query("SELECT id,source_id,state FROM outputs ORDER BY sequence").all() as
+      Array<{ id: string; source_id: string; state: string }>).filter(row => related.includes(row.source_id));
+    const effects: HeadRecoveryEffect[] = outputs.map(row => ({ id: row.id, kind: "output", state: row.state }));
+    if (this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='gateway_effects'").get()) {
+      // Never select arguments/results into a model-visible snapshot. The SQL
+      // projection reads only identity and delivery certainty, not credentials.
+      const rows = this.db.query(`SELECT id,operation,state,
+        json_extract(arguments,'$[0].sourceId') AS source,
+        json_extract(arguments,'$[0].id') AS target,
+        json_extract(arguments,'$[2]') AS message,
+        json_extract(result,'$.certainty') AS certainty,
+        json_extract(result,'$.ok') AS ok
+        FROM gateway_effects WHERE operation IN ('send','createThread','showApproval','dismissApproval')`).all() as
+        Array<{ id: string; operation: string; state: string; source: string | null; target: string | null;
+          message: string | null; certainty: string | null; ok: number | null }>;
+      for (const row of rows) {
+        const relevant = related.includes(row.source ?? "") || outputs.some(output => output.id === row.target)
+          || row.operation === "createThread" && input.messageId !== null && row.message === input.messageId
+          || (row.operation === "showApproval" || row.operation === "dismissApproval")
+            && this.approval(row.target ?? "")?.target === "main";
+        if (relevant) effects.push({ id: row.id, kind: row.operation,
+          state: row.state === "attempted" || row.certainty === "uncertain" || row.ok === null ? "uncertain"
+            : row.ok === 0 ? "failed" : "sent" });
+      }
+    }
+    return effects;
+  }
+
+  prepareHeadRecovery(attempt: HeadRecoveryAttempt): boolean {
+    return this.db.transaction(() => {
+      const input = this.input(attempt.inputId);
+      if (attempt.state !== "prepared" || this.getMeta("head:recovery-active")
+        || this.getMeta(`head:recovery:${attempt.inputId}`) || input?.target !== "main" || input.state !== "uncertain"
+        || input.requestId !== attempt.requestId || input.generation !== attempt.generation
+        || this.getMeta("head:stop-boundary") !== attempt.stopBoundary) return false;
+      this.setMeta(`head:recovery:${attempt.inputId}`, JSON.stringify(attempt));
+      this.setMeta("head:recovery-active", attempt.inputId);
+      return true;
+    }).immediate();
+  }
+
+  commitHeadRecovery(expected: HeadRecoveryAttempt, decided: HeadRecoveryAttempt): boolean {
+    return this.db.transaction(() => {
+      const input = this.input(expected.inputId);
+      if (this.getMeta("head:recovery-active") !== expected.inputId
+        || this.getMeta(`head:recovery:${expected.inputId}`) !== JSON.stringify(expected)
+        || decided.decision?.decision === "release" && this.getMeta("head:stop-boundary") !== expected.stopBoundary
+        || input?.target !== "main" || input.state !== "uncertain"
+        || input.requestId !== expected.requestId || input.generation !== expected.generation
+        || decided.attemptId !== expected.attemptId || decided.inputId !== expected.inputId
+        || !decided.decision || !["decided", "settled"].includes(decided.state)) return false;
+      if (decided.decision.decision === "release") {
+        if (!decided.outcome || this.headRecoveryEffects(input.id).some(effect =>
+          !["sent", "complete", "failed"].includes(effect.state))) return false;
+        if (decided.state === "settled") this.settle(input.id, decided.outcome, { id: `${input.id}:recovery:${expected.attemptId}`,
+          text: decided.outcome === "done"
+            ? "원래 세션의 정확한 요청 접수 기록과 마지막 실행 근거로 native 처리 종료를 확인했습니다. 사용자 작업의 완료·수락 기준 충족을 주장하지 않으며 원래 작업을 다시 실행하지 않았습니다."
+            : "원래 세션에 기록된 native 실행 중단을 확인했습니다. 작업 완료나 외부 효과 취소를 주장하지 않으며 원래 작업을 다시 실행하지 않았습니다." });
+      } else {
+        if (decided.outcome) return false;
+        if (decided.state === "settled") this.queueOutput({ id: `${input.id}:recovery:${expected.attemptId}`, sourceId: input.id, route: input.route,
+          text: "격리된 헤드 복구 판단이 이 요청을 계속 보류했습니다. 근거·결과 또는 도구 권한을 확정할 수 없어 원래 작업이나 불확실한 외부 효과를 다시 실행하지 않았습니다. 원래 native 세션을 확인하거나 /resolve <input-id>로 운영자가 불확실 상태를 종료할 수 있습니다. 작업 완료를 주장하지 않습니다." });
+      }
+      this.setMeta(`head:recovery:${expected.inputId}`, JSON.stringify(decided));
       return true;
     }).immediate();
   }

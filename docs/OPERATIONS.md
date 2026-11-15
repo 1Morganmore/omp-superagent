@@ -990,8 +990,9 @@ Gateway 앞에 불확실한 승인 답변이 남아 있어도 재시작·중지 
 질문 세대를 취소한 경우 늦은 답변은 거절한다. 이미 소비된 승인이나 외부 효과의 rollback은 아니다.
 불확실한 발송·종료·기동은 같은 요청으로 자동 반복하지 않고 상태와 원래 receipt를 확인한다.
 
-`uncertain` 입력은 같은 target의 뒤 입력을 계속 막는다(자동 재시도 금지). 해제는 운영자의
-명시적 `/resolve [input-id]`로만 한다. `/status`가 보류 중인 정확한 입력 ID를 보여주며,
+`uncertain` 입력은 같은 target의 뒤 입력을 계속 막는다(자동 재시도 금지). 헤드는 아래의
+근거 기반 자동 복구를 먼저 수행할 수 있고, 결과를 확인할 수 없는 요청을 버리는 결정은
+운영자의 명시적 `/resolve [input-id]`로만 한다. `/status`가 보류 중인 정확한 입력 ID를 보여주며,
 보류가 둘 이상이면 ID를 생략한 `/resolve`는 거부한다(최근 항목을 임의로 고르지 않는다).
 `/resolve`는 원래 작업을 다시 보내거나 수행 결과를 주장하지 않고, 해당 대화에 종료 처리
 사실만 알린 뒤 즉시 큐를 다시 비운다. 같은 작업이 여전히 필요하면 새 요청으로 보낸다.
@@ -1000,6 +1001,33 @@ native 세션을 변경하지 않으므로 바쁜 헤드나 native 상태 미확
 선택하지 않는다. 저장된 보류 해제와 native 실행 종료는 별개다. 실제 native 유휴가 확인된
 뒤 취소된 접수의 메모리 상태도 정리하고 후속 작업을 실행하며, 다른 접수의 결과는 계속 확인한다.
 Slack 일반 메시지는 `!resolve [input-id]`를 사용한다.
+
+#### 헤드의 근거 기반 자동 복구
+
+요청 결과가 불확실해지면 코드가 먼저 native 근거와 실행 신원을 대조하고, 판단 가능한 근거가
+있을 때 같은 헤드가 기존 native 세션에서 별도의 복구 판단 턴을 수행한다.
+다른 AI 감독자나 새 세션을 만들지 않으며 원래 요청도 다시 제출하지 않는다. 실행·goal·비동기
+작업·소유 서비스·승인 등이 남아 있거나 native 상태를 확인할 수 없으면 복구 턴도 시작하지 않는다.
+재연결·native 종료 등 실제 사건에 반응하며, 같은 근거로 반복 모델 호출을 하지 않는다.
+자동 판단 턴은 원본 입력당 한 번만 제출한다. 근거 부족으로 아직 제출하지 않은 입력은
+새 native receipt가 도착하면 판단 대상이 될 수 있지만, 제출한 복구 턴을 맹목 재전송하지 않는다.
+
+헤드는 원래 요청 ID와 세션·실행 세대에 연결된 receipt, 해당 실행의 마지막 결과, 관련 효과의
+상태를 보고 `head_recovery`로 해제 또는 보류를 판단한다. 코드가 근거 ID와 최신 상태를 다시
+대조하므로 모델의 설명만으로 해제되지 않는다. 실제 native 처리 완료 또는 기록된 native 중단은
+조율 상태에 반영할 수 있지만, 작업 수용 기준을 검증했다고 주장하지 않는다. receipt가 없거나
+실패·외부 효과가 불확실한 경우에는 보류를 유지한다. 원본 receipt나 실행 소유권 근거가
+없으면 추측을 위한 모델 호출도 하지 않는다. 복구 판단 결과는 원래 대화에 알린다.
+
+복구 턴에서는 `head_recovery` 이외의 도구 실행을 차단한다. 파일 수정, shell/eval, 레인 실행,
+승인 우회, 원본 재실행은 허용하지 않는다. 일반 헤드의 작업 도구를 영구 제거하는 것은 아니다.
+복구 판단 자체의 native 종료까지 일반 큐는 막혀 있으며, 중간 재시작·중복 이벤트·늦은 결과가
+새 판단이나 다른 요청의 취소로 바뀌지 않도록 원래 신원을 보존한다. 운영자 중단·수동 해제는
+오래된 복구 판단보다 우선한다. 해결할 수 없는 건은 `/status`의 ID와 `/resolve`로 처리한다.
+모델의 결정은 먼저 제안으로 저장하고, 복구 턴 자신의 정확한 receipt와 유휴 상태를 확인한 뒤
+원본 상태와 통지를 함께 확정한다. 그 사이 종료되면 원본은 계속 `uncertain`이므로 수동
+`/resolve`가 가능하며, 복구 receipt가 없어도 운영자 종료 의도와 실제 native 유휴를 확인하면
+해당 복구 시도를 재실행 없이 정리한다. 아직 실행 중인 원본의 승인 알림·goal 신원은 보존한다.
 
 조회와 중단은 일반 모델 답변을 기다리지 않는다. 압축은 native 요약 모델을 호출할 수 있으며,
 일반 대화 실행·세션 초기화가 아니다. 실행·승인·goal·소유 서비스·미해결 제출이 있으면
@@ -1231,6 +1259,8 @@ managed extension 중복/disabled 처리, 비차단 updater startup과 native bi
 
 | 검증 항목 | 현재 결과 |
 | --- | --- |
+| 2026-11-15 근거 기반 same-HEAD 자동 복구 | 최종 Bun 1.4.4 타입 검사와 runtime/store/skills/Gateway/Discord commands/Slack/Telegram 7파일 546개·4,591 assertion 통과. 격리된 실제 Gateway·native HEAD `recovery` 시나리오 1개·3.12초 통과: 동일 PID·세션·모델, 원본 native write 1회, 복구 판단 중 후속 보류, 실제 `head_recovery` 호출 뒤 native receipt 확인·후속 실행, receipt 없는 제출의 무재실행 보류, 금지 write의 실제 native 거절, 운영자 `/resolve`, 중복 무재전송과 network 0을 확인했다. 초기 스킬 fixture 도구목록·시작 시 통지 전달 순서·native 해제 거부를 수정했고, 결정 제안과 native 종료 후 최종 확정을 분리했다. 제안 이후 종료·재연결·외부 효과 불확실성·늦은 다른 실행·운영자 중단·원래 승인/goal 신원은 회귀로 검증했다. 독립 최종 리뷰의 기존 두 발견 사항을 해소했다. 전체 root suite·운영 메신저 계정·유료 제공자·실서비스 배포/재시작은 실행하지 않았다. |
+| 2026-11-15 PR #1 수동 보류 해제 보완 | 보완 커밋 `731dab9892`를 포함해 PR #1을 `85da9e7`로 병합했다. 최신 main과 통합한 상태에서 Bun 1.4.4 타입 검사, runtime/Slack/Discord commands/store/Telegram 5파일 448개·3,967 assertion 통과. 취소 후 live 접수 정리, busy/미확인 native 보존, steering 소유자 취소, 중간 재시작의 대상 고정, Slack 명령 정규화를 검증했다. 운영 메신저·배포·재시작은 하지 않았으며 뒤의 자동 복구 기능 검증과 별개다. |
 | 2026-11-15 Dori PR 비교 후 버그·높음 후보 반영 | Bun 1.4.4에서 대상 8파일을 서로 겹치지 않는 2묶음으로 실행: Discord/Telegram 122개·1,248 assertion, repository/Slack/runtime/store/Gateway/managed-ULW 431개·3,531 assertion 통과. 타입 검사 통과. 실제 native Gateway `valid` 시나리오 1개·2.73초에서 원래 head와 명시적 lane의 journal에 답장 스냅샷이 남고 인용된 `/restart`·ULW 이름이 권한을 얻지 않는 것을 확인했다. 공식 immutable ULW `22a8cfe89447a1cd55f2fd004d81e164372738a5`의 별도 offline 합성에서 일반·명시적 활성화 각 2턴, 메모리 세션·network 0 확인. 최초 native 실행은 기존 command의 Bun 경로 누락으로 실패했으며 기존 lockfile의 로컬 toolchain을 `npm ci --ignore-scripts`로 준비한 뒤 실제 패키지 binary로 검증했다. 최초 타입 오류는 probe narrowing과 SDK/native fixture 타입을 수정했다. 앞선 Bun 1.4.2 예비 실행은 이 지원 런타임 결과에 합산하지 않는다. 실제 메신저 계정·유료 제공자·운영 Gateway/HEAD 재시작·프로덕션 active pointer 변경은 수행하지 않음 |
 | 2026-11-14 자율 재개 회귀 3건 수정 | `0004`는 기존 native `RpcUserInputGate`에서 serial 대기 중인 goal resume을 뒤늦은 abort로 무효화한다. 별도 resume receipt가 일반 source handoff/첨부와 충돌하지 않으며, source가 있는 completed/unloaded 재개도 기존 세션·middle preset을 보존한다. runtime/store 257개·2,299 assertion, native input-order/input-frame/goal 61개·229 assertion 통과. 의도적 원인 복원에서 correction identity 충돌·completed 복원 거절 2개와 실제 native queued resume 재활성화 1개가 각각 실패했고, 소스를 바이트 단위로 복원한 뒤 해당 2개·11 assertion과 native autonomy 1개·30 assertion이 통과했다. 최종 typecheck 통과. native model-selection도 source `103`·같은 세션·preset을 유지한 실제 완료/unload/reopen 흐름으로 통과했다. 최초 native barrier는 작은 transcript 기본 compaction 정책 때문에 미진입했고, 다음 시도는 held compaction 정리를 기다리는 abort ACK를 먼저 기다려 timeout됐다. fixture만 수정했다. 기존 model fixture의 kickoff 누락 기대값도 실제 durable kickoff receipt를 정확히 포함하도록 고쳤다. 실패 진단은 보존했고 남은 격리 fixture Host 1개는 신원 확인 후 barrier 해제·native 정상 종료했다. 운영 서비스·메신저 계정·전역 설정 변경이나 재시작은 하지 않음 |
 | 2026-11-14 목표 기반 자율 실행 | Bun 1.4.4에서 `tsc --noEmit` 통과. Host/runtime/store/default-steering/skills 5파일 294개·2,575 assertion 통과·10.62초. native RPC goal/default tool 2파일 31개·122 assertion 통과·8.11초(관리 세션의 marker를 물려받지 않는 격리 환경). 실제 managed Host·production lane role·native goal·결정적 로컬 제공자·기록용 Messenger에서 1개·19 assertion 통과·5.14초: 목표 생성→첫 yield→native continuation→완료, 실제 `/stop` 후 paused 상태·추가 실행 없음, `/resume`의 동일 topic/source-bound durable report, `goal.enabled=false`와 명시적 `--tools read` 제외·전역 설정 무변경 확인. resume ACK만으로 성공 처리하지 않는 첫 run 실패/중단·zero-run 및 뒤늦은 pause·ACK 경합·unloaded 복원은 runtime 회귀로 확인했다. 첫 native 활성 도구 누락은 SDK 초기 선택에서 수정했으며 fixture ID·리소스·중복 관측 오류를 고친 뒤 위 결과를 얻었다. 실제 모델의 자율 판단 품질·실계정·운영 재시작 검증은 아니며 실행 중인 Gateway/head는 변경하지 않음 |

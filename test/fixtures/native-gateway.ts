@@ -11,6 +11,7 @@ import { startGateway, gatewayPaths, type GatewayService, type GatewayStatus } f
 import { HostConnection } from "../../src/host";
 import { nativeDisabledProviders } from "./native-extension";
 import { runNativeUlwProof } from "./native-ulw-proof";
+import { runNativeRecoveryProof } from "./native-recovery-proof";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 type Handlers = Parameters<Messenger["start"]>[0];
@@ -111,7 +112,7 @@ function nativeToolResults(entries: readonly FileEntry[], name: string) {
 const root = process.env.OMP_NATIVE_GATEWAY_ROOT;
 assert(root && path.isAbsolute(root), "Native Gateway proof needs a private absolute root");
 const presetScenario = process.env.OMP_NATIVE_GATEWAY_PRESETS ?? "create";
-assert(["create", "valid", "failed", "skipped", "interrupted"].includes(presetScenario));
+assert(["create", "valid", "failed", "skipped", "interrupted", "recovery"].includes(presetScenario));
 assert.equal(process.env.HOME, path.join(root, "home"));
 const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
 assert(Array.isArray(parsed) && parsed.length && parsed.every(value => typeof value === "string" && value), "OMP_TEST_COMMAND must explicitly name the patched native CLI argv");
@@ -137,17 +138,22 @@ const settings = {
   // Explicitly grant only the native keyword settings this proof exercises;
   // native task capability requirements still control orchestration notices.
   ...(ulwEntrypoint ? { magicKeywords: { enabled: true, ultrathink: true, orchestrate: true } } : {}),
-  ...(presetScenario === "valid" || ulwEntrypoint ? {
+  ...(["valid", "recovery"].includes(presetScenario) || ulwEntrypoint ? {
     modelPresets: Object.fromEntries(["high", "middle", "low"].map(name => [name, { modelRoles: { default: model, judge: model } }])),
   } : {}),
 };
 await fs.writeFile(path.join(agent, "config.yml"), JSON.stringify(settings), { mode: 0o600 });
 await fs.writeFile(path.join(agent, "models.yml"), "providers: {}\n", { mode: 0o600 });
 const settingsBytes = new Map(await Promise.all(["config.yml", "models.yml"].map(async name => [name, await fs.readFile(path.join(agent, name))] as const)));
+const recoveryProvider = path.resolve(import.meta.dir, "recovery-provider-extension.ts");
+const nativeCommand = presetScenario === "recovery"
+  ? parsed.flatMap((argument, index) => index === 0 ? [argument, "--preload", recoveryProvider] : [argument])
+  : parsed;
 const config: Config = {
   path: path.join(root, "superagent.json"), stateDir: root, headCwd,
-  command: [...parsed, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
-    path.resolve(import.meta.dir, ulwEntrypoint ? "native-ulw-provider-extension.ts" : "gateway-provider-extension.ts")],
+  command: [...nativeCommand, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
+    presetScenario === "recovery" ? recoveryProvider
+      : path.resolve(import.meta.dir, ulwEntrypoint ? "native-ulw-provider-extension.ts" : "gateway-provider-extension.ts")],
   maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model,
   discord: { tokenEnv: "ISOLATED_GATEWAY_DISCORD_TOKEN", ownerId: "1", allowedGuildIds: ["3"], allowedChannelIds: ["4"] },
 };
@@ -202,6 +208,7 @@ function cleanup(): Promise<void> {
     await fs.writeFile(path.join(root!, "release-bootstrap"), "cleanup", { mode: 0o600 });
     await fs.writeFile(path.join(root!, "release-observation"), "cleanup", { mode: 0o600 });
     await fs.writeFile(path.join(root!, "release-observation-final"), "cleanup", { mode: 0o600 });
+    await fs.writeFile(path.join(root!, "release-recovery"), "cleanup", { mode: 0o600 });
     if (starting) {
       try { gateway = await within(starting, 40_000, "Native Gateway startup exceeded signal cleanup deadline"); }
       catch (error) { console.error(String(error)); }
@@ -307,7 +314,7 @@ try {
     await until(() => !!db.query("SELECT id FROM inputs WHERE id='201' AND state='pending'").get(), "input retained after failed setup");
   } else if (presetScenario !== "interrupted") await until(() => gateway!.status().head.ready, "production head Gateway handshake and verified native presets");
   assert.equal((await fs.lstat(gatewayPaths(config).socketPath)).mode & 0o777, 0o600);
-  if (!ulwEntrypoint && presetScenario !== "create") {
+  if (!ulwEntrypoint && !["create", "recovery"].includes(presetScenario)) {
     const status = gateway.status();
     assert.equal(status.head.ready, presetScenario === "valid");
     assert.equal(status.gateway.admissionReady, true);
@@ -329,6 +336,11 @@ try {
     assert.deepEqual(errors, []);
     await gateway.stop();
     gateway = undefined;
+  } else if (presetScenario === "recovery") {
+    await runNativeRecoveryProof({ root, config, db, gateway, messenger, connections, owned, until });
+    gateway = undefined;
+    for (const [name, bytes] of settingsBytes) assert.deepEqual(await fs.readFile(path.join(agent, name)), bytes);
+    assert.deepEqual(errors, []);
   } else if (ulwEntrypoint) {
     await runNativeUlwProof({ root, config, db, gateway, messenger, connections, owned, until });
     gateway = undefined;

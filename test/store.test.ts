@@ -8,6 +8,7 @@ import { physicalRouteKey, routeKey, type Approval, type Inbound, type Lane, typ
 import { DiscordMessenger } from "../src/discord.ts";
 import { Store } from "../src/store.ts";
 import type { LaneReport } from "../src/lane-report";
+import type { HeadRecoveryAttempt } from "../src/contracts";
 
 const stores: Store[] = [];
 const directories: string[] = [];
@@ -71,6 +72,95 @@ function storedOutput(path: string, id: string): { state: string; remote_id: str
 }
 
 describe("durable coordination store", () => {
+  function recovery(store: Store): HeadRecoveryAttempt {
+    store.receive(inbound("recovery-original"), "main");
+    store.submit("recovery-original", "original-rpc", 0);
+    store.settle("recovery-original", "uncertain");
+    return { attemptId: "recovery-attempt", inputId: "recovery-original", requestId: "original-rpc", generation: 0,
+      sessionId: "original-session", sessionFile: "/sessions/original.jsonl", hostPid: process.pid,
+      recoveryRequestId: "recovery-rpc", promptDigest: "prompt-digest", cursor: null, boundary: "native-receipt",
+      stopBoundary: null, evidenceEntryIds: ["native-receipt", "native-assistant"],
+      evidenceFingerprint: "exact-original-evidence", state: "prepared" };
+  }
+  function released(expected: HeadRecoveryAttempt, state: "decided" | "settled" = "decided"): HeadRecoveryAttempt {
+    return { ...expected, state, outcome: "done", decision: { attemptId: expected.attemptId,
+      decision: "release", evidenceEntryIds: expected.evidenceEntryIds, reason: "Observed native processing outcome only" } };
+  }
+
+  test("recovery decision, exact target settlement and original-route output are one durable transaction", () => {
+    const { store, path } = fixture();
+    let expected = recovery(store);
+    expect(store.prepareHeadRecovery(expected)).toBe(true);
+    const proposed = released(expected);
+    expect(store.commitHeadRecovery(expected, proposed)).toBe(true);
+    expect(store.input(expected.inputId)?.state).toBe("uncertain");
+    expect(store.outputs()).toEqual([]);
+    expected = proposed;
+    const db = new Database(path);
+    try {
+      db.run(`CREATE TRIGGER fail_recovery_output BEFORE INSERT ON outputs
+        BEGIN SELECT RAISE(ABORT, 'crash before output binding'); END`);
+      expect(() => store.commitHeadRecovery(expected, released(expected, "settled"))).toThrow("crash before output binding");
+      expect(store.input(expected.inputId)?.state).toBe("uncertain");
+      expect(JSON.parse(store.getMeta(`head:recovery:${expected.inputId}`)!)).toEqual(expected);
+      db.run("DROP TRIGGER fail_recovery_output");
+      expect(store.commitHeadRecovery(expected, released(expected, "settled"))).toBe(true);
+      expect(store.input(expected.inputId)?.state).toBe("done");
+      expect(store.output(`${expected.inputId}:recovery:${expected.attemptId}`)).toMatchObject({
+        sourceId: expected.inputId, route: route(), state: "pending",
+      });
+      expect(store.getMeta("head:recovery-active")).toBe(expected.inputId);
+      expect(store.commitHeadRecovery(expected, released(expected, "settled"))).toBe(false);
+      store.close();
+      const reopened = open(path);
+      expect(JSON.parse(reopened.getMeta(`head:recovery:${expected.inputId}`)!)).toEqual(released(expected, "settled"));
+      expect(reopened.input(expected.inputId)?.state).toBe("done");
+      expect(reopened.outputs()).toHaveLength(1);
+    } finally { db.close(); }
+  });
+
+  test.each(["stop", "owner-resolve", "identity", "ambiguous-output"] as const)(
+    "%s prevents a stale recovery commit without partial effects", race => {
+      const { store } = fixture();
+      const expected = recovery(store);
+      expect(store.prepareHeadRecovery(expected)).toBe(true);
+      if (race === "stop") store.setMeta("head:stop-boundary", JSON.stringify({ inputId: "new-stop", cancelledInputIds: [] }));
+      if (race === "owner-resolve") store.settle(expected.inputId, "cancelled");
+      if (race === "identity") store.setMeta(`head:recovery:${expected.inputId}`, JSON.stringify({ ...expected, attemptId: "new-attempt" }));
+      if (race === "ambiguous-output") {
+        store.queueOutput({ id: "uncertain-original-effect", sourceId: expected.inputId, route: route(), text: "Original output" });
+        store.claimOutput("uncertain-original-effect");
+        store.finishOutput("uncertain-original-effect", "uncertain");
+      }
+      expect(store.commitHeadRecovery(expected, released(expected))).toBe(false);
+      expect(store.output(`${expected.inputId}:recovery:${expected.attemptId}`)).toBeNull();
+      expect(store.input(expected.inputId)?.state).toBe(race === "owner-resolve" ? "cancelled" : "uncertain");
+    });
+
+  test("interrupted preparation is durable and evidence snapshots expose no gateway arguments, result or token", () => {
+    const { store, path } = fixture();
+    const expected = recovery(store);
+    expect(store.prepareHeadRecovery(expected)).toBe(true);
+    expect(store.prepareHeadRecovery({ ...expected, attemptId: "duplicate" })).toBe(false);
+    const db = new Database(path);
+    try {
+      db.run("CREATE TABLE gateway_effects(id TEXT PRIMARY KEY,operation TEXT,arguments TEXT,state TEXT,result TEXT)");
+      db.query("INSERT INTO gateway_effects VALUES (?,?,?,?,?)").run("ambiguous-gateway-effect", "send",
+        JSON.stringify([{ sourceId: expected.inputId, text: "SECRET_TOKEN_DO_NOT_PROJECT" }]), "attempted", null);
+      db.query("INSERT INTO gateway_effects VALUES (?,?,?,?,?)").run("unrelated-effect", "send",
+        JSON.stringify([{ sourceId: "different-request", text: "UNRELATED_PRIVATE_PAYLOAD" }]), "attempted", null);
+      expect(store.headRecoveryEffects(expected.inputId)).toEqual([
+        { id: "ambiguous-gateway-effect", kind: "send", state: "uncertain" },
+      ]);
+      expect(JSON.stringify(store.headRecoveryEffects(expected.inputId))).not.toContain("SECRET_TOKEN");
+      expect(store.commitHeadRecovery(expected, released(expected))).toBe(false);
+      store.close();
+      const reopened = open(path);
+      expect(reopened.getMeta("head:recovery-active")).toBe(expected.inputId);
+      expect(JSON.parse(reopened.getMeta(`head:recovery:${expected.inputId}`)!)).toEqual(expected);
+    } finally { db.close(); }
+  });
+
   test("structured observations separate new evidence from repeated reports and waiting", () => {
     const { store } = fixture();
     const managed = admitLane(store);

@@ -18,6 +18,7 @@ import { compareMessageIds } from "../src/message-order";
 import { Superagent, type RuntimeAdapters, type RuntimeHost, type RuntimeState } from "../src/runtime";
 import { Store } from "../src/store";
 import type { LaneReport } from "../src/lane-report";
+import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "../src/contracts";
 
 const executionModel: LaneModel = { provider: "fixture", id: "capable" };
 const otherModel: LaneModel = { provider: "fixture", id: "efficient" };
@@ -68,6 +69,7 @@ class HostTransport implements RuntimeHost {
   levels: unknown[] = ["off", "minimal", "high"];
   levelsSuccess = true;
   entries: unknown[] = [];
+  journalLeaf = false;
   effortClamp?: string;
   modelEffort?: string | null;
   state: RuntimeState;
@@ -110,7 +112,8 @@ class HostTransport implements RuntimeHost {
     if (command.type === "get_session_stats") return { success: true, data: { sessionId: this.state.sessionId, sessionFile: this.state.sessionFile, ...structuredClone(this.stats) } };
     if (command.type === "get_entries") {
       if (this.beforeEntries) await this.beforeEntries();
-      const response = { success: true, data: { entries: structuredClone(this.entries), leafId: null } };
+      const leaf = this.journalLeaf ? (this.entries.at(-1) as { id?: string } | undefined)?.id ?? null : null;
+      const response = { success: true, data: { entries: structuredClone(this.entries), leafId: leaf } };
       const after = this.afterEntries?.();
       if (after) await after;
       return response;
@@ -168,6 +171,10 @@ class HostTransport implements RuntimeHost {
       for (const waiter of this.promptWaiters) if (this.prompts.length >= waiter.count) waiter.resolve();
       if (this.beforePrompt) await this.beforePrompt();
       if (!this.local) {
+        if (this.journalLeaf) this.entries.push({
+          id: `start-${id}`, type: "custom", customType: "rpc_agent_start",
+          data: { sessionId: this.state.sessionId, sessionFile: this.state.sessionFile },
+        }, { id: `user-${id}`, type: "message", message: { role: "user", content: command.message } });
         this.state.isSettled = false;
         this.state.isStreaming = true;
         this.emit({ type: "agent_start" });
@@ -406,6 +413,356 @@ function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], pre
   fixtures.push({ runtime, directory });
   return { runtime, config, directory, store, messenger, main, hosts, launched, errors, launchBehavior, nativePresets, persistedPresets, presetPersistence };
 }
+
+describe("same-HEAD evidence recovery", () => {
+  const nativeEntry = (main: HostTransport, id: string, customType: string, extra: Record<string, unknown> = {}) => ({
+    id, type: "custom", customType,
+    data: { sessionId: main.state.sessionId, sessionFile: main.state.sessionFile, ...extra },
+  });
+  function journal(main: HostTransport, requestId: string, outcome = "completed") {
+    return [
+      nativeEntry(main, "original-start", "rpc_agent_start"),
+      { id: "original-user", type: "message", message: { role: "user", content: "Original authorized work" } },
+      { id: "original-assistant", type: "message", message: { role: "assistant",
+        stopReason: outcome === "completed" ? "stop" : outcome, content: [{ type: "text", text: "Not an acceptance receipt" }] } },
+      nativeEntry(main, "original-receipt", "rpc_prompt_result", { frame: { id: requestId, status: outcome, agentInvoked: true } }),
+    ];
+  }
+  function saved(instance: ReturnType<typeof fixture>, id = "held-original") {
+    const { store, main } = instance;
+    store.receive(message(id, route("original-recovery-route")), "main", { [`user-source:${id}`]: "true" });
+    store.submit(id, `native-${id}`, 0);
+    store.setMeta(`head-native-owner:${id}`, JSON.stringify({ requestId: `native-${id}`, generation: 0,
+      sessionId: main.state.sessionId, sessionFile: main.state.sessionFile, cursor: null }));
+    main.entries = journal(main, `native-${id}`);
+    main.journalLeaf = true;
+    return id;
+  }
+  function attempt(instance: ReturnType<typeof fixture>, id = "held-original"): HeadRecoveryAttempt {
+    return JSON.parse(instance.store.getMeta(`head:recovery:${id}`)!);
+  }
+  function decision(value: HeadRecoveryAttempt, choice: "release" | "hold" = "release"): HeadRecoveryDecision {
+    return { attemptId: value.attemptId, decision: choice, evidenceEntryIds: value.evidenceEntryIds,
+      reason: "Exact native receipt and latest attributable run were inspected." };
+  }
+  function settleControl(instance: ReturnType<typeof fixture>, value: HeadRecoveryAttempt) {
+    instance.main.state.isSettled = true;
+    instance.main.state.isStreaming = false;
+    instance.main.entries.push(nativeEntry(instance.main, `recovery-receipt-${value.attemptId}`, "rpc_prompt_result", {
+      frame: { id: value.recoveryRequestId, status: "aborted", agentInvoked: true },
+    }));
+    instance.main.emit({ type: "prompt_result", id: value.recoveryRequestId, status: "aborted", agentInvoked: true });
+    instance.main.emit({ type: "session_settled" });
+  }
+
+  test("actual prompt acknowledgement loss uses durable receipts once, fences queued work, and notifies only the original route", async () => {
+    const instance = fixture();
+    const { runtime, main, store, messenger } = instance;
+    main.journalLeaf = true;
+    const recoveryStarted = Promise.withResolvers<void>();
+    main.onFrame(frame => {
+      if (frame.type === "agent_start" && main.prompts.at(-1)?.id.startsWith("sg-recovery-")) recoveryStarted.resolve();
+    });
+    main.beforePrompt = () => {
+      const prompt = main.prompts.at(-1)!;
+      if (prompt.id.startsWith("sg-recovery-")) return;
+      main.entries = journal(main, prompt.id);
+      throw new Error("The original native result was durable before the transport acknowledgement was lost");
+    };
+    await runtime.start();
+    await admit(runtime, message("lost-original", route("original-recovery-route")));
+    await recoveryStarted.promise;
+    const value = attempt(instance, "lost-original");
+    const snapshot = JSON.parse(String(main.prompts[1]!.command.message).split("\n").find(line =>
+      line.startsWith("HEAD recovery snapshot: "))!.slice("HEAD recovery snapshot: ".length));
+    expect(snapshot).toMatchObject({ attemptId: value.attemptId, inputId: "lost-original",
+      evidenceEntryIds: value.evidenceEntryIds, evidence: { outcome: "done", receiptStatus: "completed" } });
+    expect(store.input("lost-original")?.state).toBe("uncertain");
+    await admit(runtime, message("queued-after-loss", route("later-route")));
+    expect(store.input("queued-after-loss")?.state).toBe("pending");
+    expect(main.prompts).toHaveLength(2);
+    const result = await runtime.decideHeadRecovery(decision(value));
+    expect(result.outcome).toBe("done");
+    expect(runtime.headRecoveryActive()).toBe(true);
+    expect(store.input("lost-original")?.state).toBe("uncertain");
+    expect(store.output(`lost-original:recovery:${value.attemptId}`)).toBeNull();
+    // Delayed uncorrelated frames cannot overwrite original work with recovery text.
+    main.emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "INTERNAL RECOVERY ONLY" }] } });
+    main.emit({ type: "prompt_result", id: value.requestId, status: "aborted", agentInvoked: true });
+    expect(store.input("queued-after-loss")?.state).toBe("pending");
+    main.beforePrompt = undefined;
+    settleControl(instance, value);
+    await main.whenPrompts(3);
+    await runtime.kick();
+    expect(runtime.headRecoveryActive()).toBe(false);
+    expect(store.input("lost-original")?.state).toBe("done");
+    expect(store.input("queued-after-loss")?.state).toBe("submitted");
+    const recovered = messenger.sent.filter(output => output.id === `lost-original:recovery:${value.attemptId}`);
+    expect(recovered).toMatchObject([{ sourceId: "lost-original", route: route("original-recovery-route") }]);
+    expect(messenger.sent.map(output => output.text).join("\n")).not.toContain("INTERNAL RECOVERY ONLY");
+    main.emit({ type: "session_settled" });
+    await runtime.kick();
+    expect(main.prompts.filter(prompt => prompt.id.startsWith("sg-recovery-"))).toHaveLength(1);
+  });
+
+  test.each(["missing", "wrong-request", "wrong-session", "wrong-file", "latest-error", "foreign-user", "missing-owner"] as const)(
+    "%s evidence stays held without model speculation or replay", async scenario => {
+      const instance = fixture();
+      const id = saved(instance);
+      const { main, runtime, store } = instance;
+      if (scenario === "missing") main.entries.pop();
+      if (scenario === "wrong-request") main.entries = journal(main, "another-native-request");
+      if (scenario === "wrong-session" || scenario === "wrong-file") {
+        const data = (main.entries.at(-1) as { data: Record<string, unknown> }).data;
+        data[scenario === "wrong-session" ? "sessionId" : "sessionFile"] = "other-native-identity";
+      }
+      if (scenario === "latest-error") main.entries.push(nativeEntry(main, "later-start", "rpc_agent_start"),
+        { id: "later-failure", type: "message", message: { role: "assistant", stopReason: "error" } });
+      if (scenario === "foreign-user") main.entries.push({ id: "other-user", type: "message", message: { role: "user", content: "Unowned native work" } });
+      if (scenario === "missing-owner") store.setMeta(`head-native-owner:${id}`, "");
+      await runtime.start();
+      await runtime.kick();
+      expect(store.input(id)?.state).toBe("uncertain");
+      expect(main.prompts).toEqual([]);
+      expect(main.abortCount).toBe(0);
+      expect(runtime.headRecoveryActive()).toBe(false);
+    });
+
+  test.each([
+    { isSettled: false, isStreaming: true }, { isCompacting: true }, { queuedMessageCount: 1 },
+    { hasPendingAsyncWork: true }, { hasPendingAsyncWork: undefined }, { hasOwnedRunningWork: true },
+    { goal: { enabled: true, goal: { id: "other-goal", status: "active" } } },
+    { goal: { enabled: false, goal: { id: "paused-goal", status: "paused" } } },
+    { pendingUiRequests: [{ id: "native-owner-ui", method: "confirm" }] },
+  ] as Partial<RuntimeState>[])("native guard %j prevents any recovery turn", async patch => {
+    const instance = fixture();
+    const id = saved(instance);
+    Object.assign(instance.main.state, patch);
+    await instance.runtime.start();
+    expect(instance.store.input(id)?.state).toBe("uncertain");
+    expect(instance.main.prompts).toEqual([]);
+    expect(instance.main.abortCount).toBe(0);
+  });
+
+  test("a still-running uncertain original retains its approval route and goal owner", async () => {
+    const { runtime, main, store, messenger } = fixture();
+    await runtime.start();
+    main.beforePrompt = () => {
+      main.state.isSettled = false;
+      main.state.isStreaming = true;
+      main.emit({ type: "agent_start" });
+      throw new Error("Original admission acknowledgement was lost while work continued");
+    };
+    await admit(runtime, message("uncertain-approval-owner", route("original-approval")));
+    main.beforePrompt = undefined;
+    expect(store.input("uncertain-approval-owner")?.state).toBe("uncertain");
+    const request = { type: "extension_ui_request", method: "confirm", id: "original-dialog", title: "Original owner decision" };
+    main.state.pendingUiRequests = [request];
+    main.emit(request);
+    await messenger.whenApproval();
+    const approval = [...messenger.shown.values()][0]!;
+    expect(approval).toMatchObject({ target: "main", requestId: "original-dialog", route: route("original-approval") });
+    expect(main.responses).toEqual([]);
+    main.emit({ type: "goal_updated", state: { goal: { id: "original-goal" } } });
+    expect(JSON.parse(store.getMeta(`head:goal-source:${main.state.sessionId}:original-goal`)!))
+      .toMatchObject({ inputId: "uncertain-approval-owner", requestId: main.prompts[0]!.id });
+    await admit(runtime, message("after-uncertain-approval"));
+    expect(store.input("after-uncertain-approval")?.state).toBe("pending");
+    expect(main.prompts).toHaveLength(1);
+    expect(runtime.headRecoveryActive()).toBe(false);
+  });
+
+  test.each(["hold", "blocked", "invalid-evidence", "native-abort", "no-decision"] as const)(
+    "one isolated %s decision never replays original work", async scenario => {
+      const instance = fixture();
+      const id = saved(instance);
+      if (scenario === "native-abort") instance.main.entries = journal(instance.main, `native-${id}`, "aborted");
+      await instance.runtime.start();
+      const value = attempt(instance);
+      expect(instance.main.prompts).toHaveLength(1);
+      if (scenario === "blocked") {
+        instance.runtime.blockHeadRecoveryTool();
+        await expect(instance.runtime.decideHeadRecovery(decision(value))).rejects.toThrow("unchanged exact native evidence");
+      } else if (scenario === "invalid-evidence") {
+        await expect(instance.runtime.decideHeadRecovery({ ...decision(value), evidenceEntryIds: ["fabricated"] })).rejects.toThrow("unchanged exact native evidence");
+      } else if (scenario !== "no-decision") {
+        await instance.runtime.decideHeadRecovery(decision(value, scenario === "hold" ? "hold" : "release"));
+      }
+      settleControl(instance, value);
+      await instance.runtime.kick();
+      // Receipt settlement is an event-driven background drain. Joining the
+      // original-route outbox send proves its commit without polling.
+      await instance.messenger.whenSent(2);
+      expect(instance.store.input(id)?.state).toBe(scenario === "native-abort" ? "cancelled" : "uncertain");
+      expect(instance.store.output(`${id}:recovery:${value.attemptId}`)).toMatchObject({
+        sourceId: id, route: route("original-recovery-route"), state: "sent",
+      });
+      instance.main.emit({ type: "session_settled" });
+      await instance.runtime.kick();
+      expect(instance.main.prompts).toHaveLength(1);
+    });
+
+  test.each(["resolve", "stop", "changed-run"] as const)("a concurrent %s wins over a stale decision", async race => {
+    const instance = fixture();
+    const id = saved(instance);
+    await instance.runtime.start();
+    const value = attempt(instance);
+    if (race === "changed-run") {
+      instance.main.beforeEntries = () => {
+        instance.main.beforeEntries = undefined;
+        instance.main.entries.push(nativeEntry(instance.main, "foreign-run", "rpc_agent_start"));
+        instance.main.emit({ type: "agent_start" });
+      };
+    } else {
+      await admit(instance.runtime, message(`manual-${race}`, route("control-route"),
+        race === "resolve" ? `/resolve ${id}` : "/stop head"));
+    }
+    await expect(instance.runtime.decideHeadRecovery(decision(value))).rejects.toThrow();
+    expect(instance.store.input(id)?.state).toBe(race === "resolve" ? "cancelled" : "uncertain");
+    expect(instance.store.output(`${id}:recovery:${value.attemptId}`)).toBeNull();
+    expect(instance.main.prompts).toHaveLength(1);
+  });
+
+  test.each(["foreign-run", "stop", "effect"] as const)("a %s after the proposal prevents final release", async change => {
+    const instance = fixture();
+    const id = saved(instance);
+    await instance.runtime.start();
+    const value = attempt(instance);
+    await instance.runtime.decideHeadRecovery(decision(value));
+    expect(instance.store.input(id)?.state).toBe("uncertain");
+    if (change === "foreign-run") {
+      instance.main.entries.push(nativeEntry(instance.main, "later-native-start", "rpc_agent_start"),
+        { id: "later-native-error", type: "message", message: { role: "assistant", stopReason: "error" } });
+    } else if (change === "stop") {
+      await admit(instance.runtime, message("stop-after-proposal", route("owner-control"), "/stop head"));
+    } else {
+      instance.store.queueOutput({ id: "late-ambiguous-effect", sourceId: id, route: route("original-recovery-route"), text: "Original effect" });
+      instance.store.claimOutput("late-ambiguous-effect");
+      instance.store.finishOutput("late-ambiguous-effect", "uncertain");
+    }
+    settleControl(instance, value);
+    await instance.messenger.whenSent(change === "stop" ? 3 : 2);
+    expect(instance.store.input(id)?.state).toBe("uncertain");
+    expect(attempt(instance)).toMatchObject({ state: "settled", decision: { decision: "hold" } });
+    expect(instance.runtime.headRecoveryActive()).toBe(false);
+    expect(instance.main.prompts).toHaveLength(1);
+  });
+
+  test("an interrupted prepared/submitted recovery binding is never resent without its exact receipt", async () => {
+    const instance = fixture();
+    const id = saved(instance);
+    const prepared: HeadRecoveryAttempt = {
+      attemptId: "interrupted-attempt", inputId: id, requestId: `native-${id}`, generation: 0,
+      sessionId: instance.main.state.sessionId, sessionFile: instance.main.state.sessionFile!,
+      hostPid: process.pid, recoveryRequestId: "lost-recovery-rpc", stopBoundary: null, cursor: null,
+      promptDigest: "interrupted-prompt-digest",
+      boundary: "original-receipt", evidenceEntryIds: ["original-receipt"], evidenceFingerprint: "persisted-before-send",
+      state: "prepared",
+    };
+    instance.store.settle(id, "uncertain");
+    expect(instance.store.prepareHeadRecovery(prepared)).toBe(true);
+    await instance.runtime.start();
+    expect(instance.runtime.headRecoveryActive()).toBe(true);
+    expect(instance.main.prompts).toEqual([]);
+    instance.main.emit({ type: "prompt_result", id: "not-the-recovery", status: "completed", agentInvoked: true });
+    await instance.runtime.kick();
+    expect(instance.runtime.headRecoveryActive()).toBe(true);
+    settleControl(instance, prepared);
+    await instance.runtime.kick();
+    expect(instance.main.prompts).toEqual([]);
+    expect(instance.store.input(id)?.state).toBe("uncertain");
+  });
+
+  test("a newly journaled original receipt triggers recovery, while duplicate unchanged events dispatch only once", async () => {
+    const instance = fixture();
+    const id = saved(instance);
+    const receipt = instance.main.entries.pop();
+    await instance.runtime.start();
+    expect(instance.main.prompts).toEqual([]);
+    instance.main.entries.push(receipt);
+    instance.main.emit({ type: "prompt_result", id: `native-${id}`, status: "completed", agentInvoked: true });
+    instance.main.emit({ type: "session_settled" });
+    await instance.main.whenPrompts(1);
+    instance.main.emit({ type: "prompt_result", id: `native-${id}`, status: "completed", agentInvoked: true });
+    await instance.runtime.kick();
+    expect(instance.main.prompts).toHaveLength(1);
+    expect(instance.store.input(id)?.state).toBe("uncertain");
+  });
+
+  test("lost recovery transport after decision binding reconciles its exact durable receipt on reconnect without resending", async () => {
+    const instance = fixture();
+    const id = saved(instance);
+    const { runtime, main, store, hosts, config } = instance;
+    main.beforePrompt = async () => {
+      const prompt = main.prompts.at(-1)!;
+      const value = attempt(instance);
+      main.entries.push(nativeEntry(main, "recovery-start", "rpc_agent_start"),
+        { id: "recovery-user", type: "message", message: { role: "user", content: prompt.command.message } });
+      main.state.isSettled = false;
+      main.state.isStreaming = true;
+      await runtime.decideHeadRecovery(decision(value));
+      main.state.isSettled = true;
+      main.state.isStreaming = false;
+      throw new Error("Recovery decision and native receipt were durable before connection loss");
+    };
+    await runtime.start();
+    expect(store.input(id)?.state).toBe("uncertain");
+    expect(runtime.headRecoveryActive()).toBe(true);
+    await admit(runtime, message("after-recovery-reconnect"));
+    expect(store.input("after-recovery-reconnect")?.state).toBe("pending");
+    const replacement = new HostTransport(main.state.sessionFile!, main.state.sessionId);
+    replacement.entries = structuredClone(main.entries);
+    replacement.entries.push(nativeEntry(main, "recovery-durable-receipt", "rpc_prompt_result", {
+      frame: { id: attempt(instance).recoveryRequestId, status: "aborted", agentInvoked: true },
+    }));
+    replacement.journalLeaf = true;
+    hosts.set(hostPaths(config, "main").socketPath, replacement);
+    await main.close();
+    await replacement.whenPrompts(1);
+    expect(runtime.headRecoveryActive()).toBe(false);
+    expect(store.input(id)?.state).toBe("done");
+    expect(store.input("after-recovery-reconnect")?.state).toBe("submitted");
+    expect(main.prompts).toHaveLength(1);
+    expect(replacement.prompts.some(prompt => prompt.id.startsWith("sg-recovery-"))).toBe(false);
+    expect(attempt(instance).state).toBe("settled");
+  });
+
+  test.each(["unadmitted", "proposed"] as const)("owner resolve abandons a receipt-less %s recovery only after native quiescence", async stage => {
+    const instance = fixture();
+    const id = saved(instance);
+    instance.main.beforePrompt = async () => {
+      if (stage === "proposed") {
+        const prompt = instance.main.prompts.at(-1)!;
+        instance.main.entries.push(nativeEntry(instance.main, "recovery-start", "rpc_agent_start"),
+          { id: "recovery-user", type: "message", message: { role: "user", content: prompt.command.message } });
+        instance.main.state.isSettled = false;
+        instance.main.state.isStreaming = true;
+        await instance.runtime.decideHeadRecovery(decision(attempt(instance)));
+        instance.main.state.isSettled = true;
+        instance.main.state.isStreaming = false;
+      }
+      throw new Error("Recovery control has no observable native receipt");
+    };
+    await instance.runtime.start();
+    const value = attempt(instance);
+    expect(instance.runtime.headRecoveryActive()).toBe(true);
+    expect(instance.store.input(id)?.state).toBe("uncertain");
+    expect(instance.main.entries.some(entry => (entry as { id?: string }).id === `start-${value.recoveryRequestId}`)).toBe(false);
+    instance.main.state.hasOwnedRunningWork = true;
+    await admit(instance.runtime, message("resolve-receiptless", route("owner-route"), `/resolve ${id}`));
+    expect(instance.store.input(id)?.state).toBe("cancelled");
+    expect(instance.runtime.headRecoveryActive()).toBe(true);
+    instance.main.state.hasOwnedRunningWork = false;
+    instance.main.beforePrompt = undefined;
+    instance.main.emit({ type: "session_settled" });
+    await admit(instance.runtime, message("work-after-abandonment"));
+    await instance.main.whenPrompts(2);
+    expect(instance.runtime.headRecoveryActive()).toBe(false);
+    expect(attempt(instance)).toMatchObject({ attemptId: value.attemptId, state: "held", abandonedByOwner: true });
+    expect(instance.store.input("work-after-abandonment")?.state).toBe("submitted");
+    expect(instance.main.prompts.filter(prompt => prompt.id.startsWith("sg-recovery-"))).toHaveLength(1);
+  });
+});
 
 describe("event-driven nonterminal progress", () => {
   test("structured lane observations reach inspect/status without repeated chatter resetting evidence or waiting clocks", async () => {

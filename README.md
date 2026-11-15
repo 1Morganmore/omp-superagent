@@ -175,6 +175,11 @@ Windows service installation are not supported.
   compacts the idle head. `/model preset` lists native presets and `/model preset <name>`
   applies one to the head session. `/stop head` interrupts head work without stopping the Gateway.
   Slack uses the same commands with `!`.
+- Uncertain HEAD requests hold later work. The same head can inspect native evidence in
+  a restricted recovery turn and release a proven processing outcome without replaying
+  the original request. Unknown outcomes stay held. Use `/status` for held IDs and
+  `/resolve [input-id]` (Slack `!resolve`) to explicitly discard one unresolved request.
+  Recovery is not verification that the requested task succeeded or rollback of its effects.
 - `/restart` checkpoints busy HEAD work, then replaces Gateway and HEAD after a confirmed
   original-route ACK and safe native shutdown. It restores the same session/model and
   resumes eligible active goals without replaying prompts. Independent lanes stay running;
