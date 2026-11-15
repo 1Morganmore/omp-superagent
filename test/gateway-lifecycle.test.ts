@@ -243,21 +243,19 @@ test("duplicate accepted restart cannot adopt the old endpoint and explicit stop
   expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
 });
 
-test("shutdown busy refusal restores intake; ambiguous shutdown never launches or revives a HEAD", async () => {
-  for (const mode of ["busy-shutdown", "ambiguous-shutdown"]) {
-    const f = await fixture();
-    const pid = f.service.status().head.pid!;
-    const request = seedRestart(f.root, pid);
-    expect((await f.service.restart(request)).state).toBe("accepted");
-    await writeFile(join(f.root, mode), mode);
-    f.service.runRestart(request.requestId);
-    f.service.runRestart(request.requestId);
-    await until(() => restartRecord(f.root, request.requestId)?.state === (mode === "busy-shutdown" ? "refused" : "uncertain"));
-    expect(processAlive(pid)).toBe(true);
-    expect(f.service.status().gateway.stopping).toBe(mode === "ambiguous-shutdown");
-    expect((await readFile(join(f.root, "shutdowns.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-    expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-  }
+test.each(["busy-shutdown", "ambiguous-shutdown"])("%s preserves intake state without launching or reviving a HEAD", async mode => {
+  const f = await fixture();
+  const pid = f.service.status().head.pid!;
+  const request = seedRestart(f.root, pid);
+  expect((await f.service.restart(request)).state).toBe("accepted");
+  await writeFile(join(f.root, mode), mode);
+  f.service.runRestart(request.requestId);
+  f.service.runRestart(request.requestId);
+  await until(() => restartRecord(f.root, request.requestId)?.state === (mode === "busy-shutdown" ? "refused" : "uncertain"));
+  expect(processAlive(pid)).toBe(true);
+  expect(f.service.status().gateway.stopping).toBe(mode === "ambiguous-shutdown");
+  expect((await readFile(join(f.root, "shutdowns.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
+  expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
 });
 
 test("definite successor spawn failure refuses while the original HEAD remains able to deliver the outcome", async () => {
