@@ -338,8 +338,8 @@ credential을 만들지 않는다. 특정 레인에서 high를 선택하는 일�
 
 ```sh
 bun scripts/prepare-omp.ts
-bun install --frozen-lockfile
 bun --cwd=.upstream/omp run build:native
+bun install --frozen-lockfile
 ```
 
 prepare는 고정 OMP를 `.upstream/omp`에 준비하고 `patches/omp` 패치를 적용한 뒤
@@ -365,8 +365,9 @@ export PATH="$PWD/.upstream/toolchain/node_modules/.bin:$PATH"
 ### 필수 관리형 omp-ulw 설치와 갱신
 
 설치에는 공식 [dbc-hbin/omp-ulw](https://github.com/dbc-hbin/omp-ulw)가 항상 포함된다.
-`bun scripts/prepare-omp.ts`는 OMP와 함께 ULW를 준비하고, 루트 `bun install`의 postinstall도
-ULW 준비를 수행한다. ULW만 명시적으로 준비하거나 다시 확인할 때는 다음을 사용한다.
+`bun scripts/prepare-omp.ts`는 고정 OMP 소스·패치·상위 의존성만 준비한다. native addon을
+빌드한 뒤 루트 `bun install`의 postinstall이 ULW를 준비한다. ULW 활성화 검사는 실제 native
+모듈을 사용하므로 이 순서를 지킨다. ULW만 다시 준비하거나 확인할 때는 다음을 사용한다.
 
 ```sh
 bun run prepare:ulw
@@ -816,6 +817,12 @@ high/middle/low는 명시적 `start`의 전용 초기 설정 턴에서 기존 �
 
 ## 4. 명령과 일상 사용
 
+CLI 실행 이름은 `omp-sa`다. 준비한 저장소 루트에서 `bun link`로 등록하고 Bun의 전역
+bin 디렉터리를 `PATH`에 포함하면 `omp-sa --help`나
+`omp-sa status --config config.local.json`처럼 실행할 수 있다. 프로젝트·패키지 이름은
+`omp-superagent`로 유지한다. 아래 소스 호출 방식도 같은 CLI이며, 두 방식 모두 `.env`
+자동 로딩을 끈다.
+
 모든 관리 명령에 `--config FILE`이 필요하다. 먼저 봇을 시작하지 않는 진단을 실행한다.
 
 ```sh
@@ -1227,6 +1234,30 @@ cold detached process-group 생존·운영 메신저 왕복은 검증하지 않�
   유휴 회수·모델 턴 종료는 사용자 작업의 완료·검증 통과를 뜻하지 않는다.
 
 ## 6. 개발자 검증
+
+일반 회귀는 `bun run check`와 `bun test test`로 실행한다. 준비된 checkout에서
+`bun run test:ci`는 타입 검사 후 native Host/Gateway/TUI·setup PTY·관리형 ULW 조합을
+포함한 전체 로컬 suite를 실행한다. `scripts/ci.ts`가 `upstream/omp.json`의 CLI와
+현재 활성 ULW entrypoint를 지정한다. `python3`와 native addon이 필요하며, launchd
+검증은 macOS에서만 실행한다. 실제 봇 계정이나 유료 제공자는 이 검증의 대상이 아니다.
+GitHub Actions는 Linux와 macOS에서 같은 준비·검증 경로를 사용한다.
+
+### 소스 릴리즈
+
+0.1.0은 Bun으로 실행하는 GitHub 소스 배포다. npm 패키지나 단일 실행 파일이 아니며,
+OMP·ULW·node_modules·native addon·사용자 설정·세션은 아카이브에 포함하지 않는다.
+`package.json`의 버전과 `docs/releases/<version>.md`를 준비하고 의도한 변경을 커밋한 뒤:
+
+```sh
+bun run release
+```
+
+`scripts/release.ts`는 깨끗한 Git checkout의 HEAD만 `git archive`로 내보내고
+`dist/omp-superagent-<version>.tar.gz`와 `.sha256`을 만든다. 이 명령 자체는 게시하지 않는다.
+승인받은 버전 태그를 원격에 푸시하면 `.github/workflows/ci.yml`이 양쪽 플랫폼 검증 후
+`bun run release --publish`로 GitHub Release를 게시한다. 버전과 태그·commit이 일치해야 하며
+기존 릴리즈를 덮어쓰거나 실패한 검증을 우회하지 않는다.
+외부 게시, 태그 푸시, 운영 Gateway 재시작은 로컬 테스트 성공과 별개의 명시적 작업이다.
 
 관리형 ULW의 새 revision 활성화는 격리된 HOME에서 pinned OMP의 실제 prompt renderer와
 ExtensionRunner를 사용하는 유한 offline 합성 검사도 통과해야 한다. 일반 모델 프로필과

@@ -2,18 +2,25 @@
   "name": "omp-superagent",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "author": "dbc-hbin",
   "type": "module",
   "bin": {
-    "omp-superagent": "src/cli.ts"
+    "omp-sa": "src/cli.ts"
   },
   "scripts": {
     "check": "tsc --noEmit",
     "test": "bun test test",
+    "test:ci": "bun --no-env-file scripts/ci.ts",
+    "release": "bun --no-env-file scripts/release.ts",
     "start": "bun --no-env-file src/cli.ts start",
     "setup": "bash scripts/setup.sh",
     "prepare:omp": "bun scripts/prepare-omp.ts",
     "prepare:ulw": "bun scripts/prepare-ulw.ts",
     "postinstall": "bun scripts/prepare-ulw.ts"
+  },
+  "engines": {
+    "bun": ">=1.4.4"
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "link:.upstream/omp/packages/coding-agent",

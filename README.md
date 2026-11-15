@@ -16,6 +16,13 @@ the results back to your conversation.
 
 [Design](DESIGN.md) · [Setup & operations](docs/OPERATIONS.md) · [Configuration](config.example.json)
 
+## Distribution
+
+**0.1.0 is a Bun source distribution:** download the source tarball from the
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.0)
+and follow the preparation steps below. There is no npm package or standalone
+binary. The archive does not include built OMP native modules or managed dependencies.
+
 ## Why superagent?
 
 - **A head that works, not just delegates.** Keep straightforward work in the main session.
@@ -47,7 +54,7 @@ head; the head replies to the original conversation.
 ## Quick start
 
 Requires Git, **Bun >= 1.4.4**, local Unix sockets, and Rust/Cargo with your platform's
-native build tools. Use this repository's pinned, patched OMP source.
+native build tools. Windows is unsupported. Use this repository's pinned, patched OMP source.
 
 ### 1. Prepare
 
@@ -55,54 +62,48 @@ From the repository root:
 
 ```sh
 bun scripts/prepare-omp.ts
-bun install --frozen-lockfile
 bun --cwd=.upstream/omp run build:native
+bun install --frozen-lockfile
 ```
 
-Preparation installs the pinned OMP source, its patches, and the managed `omp-ulw` integration.
-It does not start a bot or replace your global OMP installation.
+The prepare script checks out and patches pinned OMP. Build its native modules before
+the root install, whose postinstall prepares the managed `omp-ulw` integration.
+These steps need network access for sources and dependencies; they do not start a bot
+or replace your global OMP installation.
+
+The CLI command is **`omp-sa`**; the project/package name remains `omp-superagent`.
+Register it from the prepared repository with `bun link` and ensure Bun's global
+bin directory is on `PATH`:
+
+```sh
+bun link
+omp-sa --help
+```
+
+The source invocation `bun --no-env-file src/cli.ts` used below runs the same CLI
+without registering it. The `omp-sa` executable also disables automatic `.env` loading.
 
 ### 2. Configure
 
-Run the terminal setup wrapper after preparing the platform apps:
+Prepare your platform apps using the [operations guide](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위),
+then run:
 
 ```sh
 bash scripts/setup.sh
 ```
 
-It creates `config.local.json`, asks for platform/owner/channel settings, and accepts
-tokens without echoing them. Tokens go into owner-only `config.local.json.env` (`0600`),
-not JSON or command arguments. Existing valid JSON is preserved; credential changes
-require confirmation. No bot is started.
+Setup creates `config.local.json` and stores hidden-input tokens in owner-only
+`config.local.json.env` (`0600`). That file is plaintext, not a vault; nonempty shell
+credentials take precedence. Configure model authentication through OMP.
 
-Saving setup also replaces configured Discord/Telegram bot profile pictures with
-the repository mascot (`assets/superagent-avatar.jpg`). The final save prompt
-covers this REST-only change; cancellation before saving makes no profile calls.
-Setup reports upload/readback failures without retrying and keeps saved local files.
-Slack's bot/app tokens cannot set the app icon; setup prints the same mascot file
-and the app-settings step for manual upload instead.
+Setup does not start a bot or model session. Its final save confirmation includes
+replacing configured Discord/Telegram bot avatars with the mascot. Enabling the
+recommended Mnemopi memory backend requires a separate explicit `yes` and final save;
+it changes OMP's global memory backend. Setup recommends configuring a missing native
+judge role but does not choose or call a model.
 
-First-time setup recommends Mnemopi persistent memory. Only explicit `yes` plus
-final save confirmation sets native OMP's global `memory.backend` to `mnemopi`;
-declining or refreshing credentials leaves it untouched. Existing memory options
-remain unchanged and may involve model processing/downloads when OMP uses memory.
-Setup itself does not start the memory backend.
-
-After a new setup is saved, missing native `judge` role configuration triggers a
-recommendation to configure it through ordinary OMP's `/models` → Roles → Judge UI. Existing
-roles are preserved; setup does not choose a judge, modify its settings, or call a model.
-Unresolved legacy settings and read errors are reported as unknown, not missing.
-
-`doctor` and explicit `start` load only the configured credential names from that file.
-Nonempty shell environment values take precedence. The file is plaintext—not a vault.
-The wrapper and commands below disable Bun's automatic working-directory `.env` loading.
-Configure model authentication through OMP as before.
-
-Use `bash scripts/setup.sh --config /absolute/path/to/config.json` for another location.
-Manual configuration from `config.example.json` and environment-only credentials remain supported.
-
-See the [platform setup guide](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위) and
-[configuration guide](docs/OPERATIONS.md#3-설정) for permissions and field details.
+See [configuration and setup effects](docs/OPERATIONS.md#3-설정) for permissions,
+memory behavior, alternative config paths, and manual configuration.
 
 ### 3. Start
 
@@ -130,97 +131,27 @@ Attach a read-only native TUI to the same head:
 bun --no-env-file src/cli.ts attach main --config config.local.json --read-only
 ```
 
-### Optional: start automatically after macOS login
-
-```sh
-bun --no-env-file src/cli.ts install --config config.local.json
-bun --no-env-file src/cli.ts status --config config.local.json
-bun --no-env-file src/cli.ts uninstall --config config.local.json
-```
-
-`install` registers a per-instance LaunchAgent for the **next login after reboot**;
-it does not start a bot now. Required messenger credentials must be in the private
-`config.local.json.env`, not only your shell environment. The one-shot launcher uses
-the existing `start`; it does not supervise or automatically respawn the Gateway.
-`status` separates autostart registration from live Gateway/head readiness.
-`uninstall` disables future login startup without stopping existing work. Use
-`stop main` separately to stop the current Gateway/head. Pre-login boot, Linux and
-Windows service installation are not supported.
+For status, shutdown, macOS login startup, and recovery, use the
+[operations guide](docs/OPERATIONS.md). Login startup is a one-shot launch, not a
+crash supervisor; Linux service installation is not provided.
 
 ## Working from chat
 
-- Received messages get an eyes reaction. Native processing adds a temporary thought
-  balloon on Discord/Slack; Telegram uses a thinking face, then restores eyes.
-  Slack requires `reactions:write`; Discord requires Add Reactions.
-- Questions and connection tests get direct replies. For work instructions, the head
-  first opens a work topic and posts a brief concrete approach before starting execution.
-- Long-running work gets concise intermediate progress in that topic: findings,
-  current steps, and blockers. Updates follow meaningful execution events, not a
-  fixed heartbeat; the lane keeps working while the head relays progress.
-- Bound-topic `/status` also shows recorded selected evidence and concrete waits,
-  including their original times and whether the native owner is still current.
-  Repeated reports do not count as new evidence. These observations are not verified
-  completion and never automatically resume or close work.
-- Ask for work normally. The head creates a supported native
-  thread/topic and binds its work session; private chats without native topics use
-  logical topics. `/new` (Slack `!new`) remains an explicit DM topic control.
-- Follow up in the same conversation. The head receives the message, coordinates any
-  lane work, and returns the result. Separate repository work keeps its own lane context.
-  Discord/Telegram replies retain the referenced message as untrusted context, including
-  Telegram's selected quote. Voice attachments retain their voice/duration metadata;
-  this does not add automatic transcription.
-  Ordinary same-topic follow-ups steer active work by default; no `/steer` is needed.
-  Different conversations, controls, and workflow selections remain separate.
-- Work continues within the entrusted project objective until acceptance or a real
-  approval, scope, uncertainty, or owner-decision boundary. `/stop` pauses the bound lane;
-  `/resume` explicitly authorizes its continuation, including an existing paused native
-  goal. Previously resume only reopened eligible queues; it never clears uncertain effects
-  or promises replay of an interrupted prompt. Slack uses `!stop` and `!resume`.
-- Inspect the shared head with `/model` or `/effort`; use `/model list`, then
-  `/model <provider/model>` or `/effort <level>` to change its idle session.
-  Slack uses `!model` and `!effort`. Global defaults and existing lanes stay unchanged.
-- Use `/help`, `/status`, `/context`, and `/usage` for native state; `/compact [instructions]`
-  compacts the idle head. `/model preset` lists native presets and `/model preset <name>`
-  applies one to the head session. `/stop head` interrupts head work without stopping the Gateway.
-  Slack uses the same commands with `!`.
-- Uncertain HEAD requests hold later work. The same head can inspect native evidence in
-  a restricted recovery turn and release a proven processing outcome without replaying
-  the original request. Unknown outcomes stay held. Use `/status` for held IDs and
-  `/resolve [input-id]` (Slack `!resolve`) to explicitly discard one unresolved request.
-  Recovery is not verification that the requested task succeeded or rollback of its effects.
-- `/restart` checkpoints busy HEAD work, then replaces Gateway and HEAD after a confirmed
-  original-route ACK and safe native shutdown. It restores the same session/model and
-  resumes eligible active goals without replaying prompts. Independent lanes stay running;
-  uncertain effects and unreconciled owned resources remain held, never force-killed.
-  Slack supports `!restart` and the registered `/superagent-restart`.
-- Discord also supports the registered slash-command picker. Preview registration with
-  `bun --no-env-file src/cli.ts discord-commands --config config.local.json`; add `--apply`
-  to replace this bot's global command list with supported Superagent commands.
-  This removes obsolete Hermes commands; setup, doctor, and start never register implicitly.
-  Commands with arguments use the optional `text` field. The private receipt confirms admission;
-  the actual result is delivered to the original conversation through the normal outbox.
-- Telegram command menus use the same controls, including `/status@BotUsername` in groups.
-  Preview with `telegram-commands --config config.local.json` and add `--apply` to update
-  owner-scoped menus; `--language CODE` selects a language-specific list.
-- Slack's registered picker uses `/superagent-status`, `/superagent-model`, and the other
-  `/superagent-*` controls to avoid built-in command collisions. Existing `!` messages remain valid.
-  Register with `slack-commands --config config.local.json --manifest-token-env NAME [--apply]`
-  through the same CLI. `NAME` identifies a separate Slack app-configuration credential;
-  bot/app connection tokens are not substitutes. Review any reported reinstall requirement.
-- Add `--global` only to `/model preset <name>` when you explicitly want to save native
-  default roles and effort too. The change reply reports the actual model/effort and scope.
+- Ask normally. Questions get direct answers; work instructions open a topic with a
+  brief approach, followed by meaningful progress and results.
+- Follow up in the same topic to steer active work through the head. Repositories and
+  topics keep independent lane context; voice metadata does not imply transcription.
+- Use `/help` and `/status` for controls and state. `/model` and `/effort` manage the
+  idle head session, not existing lanes or global defaults. Global preset changes
+  require explicit `--global`. Slack's message commands use `!`.
+- `/stop` pauses the bound lane; `/resume` authorizes continuation. Approvals,
+  cancellations, tool exclusions, and uncertain-effect holds remain binding.
+  Neither progress reports nor recovery prove task completion or undo external effects.
+  Saved goals do not guarantee crash replay or execution while unloaded.
 
-[Commands, approvals, and everyday use](docs/OPERATIONS.md#4-명령과-일상-사용)
-
-Managed Host launches use project-scoped native goal settings with `rpc` in
-`goal.continuationModes`, without changing global OMP settings. Continuing executable
-work reuses one native goal/workflow owner; questions, status, and preset bootstrap do
-not each create goals. The head yields for durable lane reports rather than running a
-waiting goal; workers use native tasks/jobs. Pause/cancel, approvals, and tool exclusions
-still bind. Saved goals do not guarantee crash replay or continuation while unloaded.
-An enabled goal still blocks shutdown, even when paused, until explicitly resolved.
-New launches pick launch settings; existing role bundles need a separately authorized
-Host restart. Editing this repository does not mean the live service has applied it.
+See [commands, approvals, and everyday use](docs/OPERATIONS.md#4-명령과-일상-사용)
+for command registration, restart and recovery semantics, and platform differences.
+Repository changes alone do not update a running service.
 
 ## ULW included
 
@@ -228,18 +159,39 @@ Host restart. Editing this repository does not mean the live service has applied
 Use a workflow explicitly, or let the head select one when the authorized task genuinely
 benefits from it. Ordinary work can stay in a direct session, native task, or regular lane.
 
-The Gateway checks upstream commits at startup and hourly. New Hosts use the prepared
-revision; running heads and lanes keep theirs. Failed updates leave the previous active
-revision in place.
-Activation checks actual offline native prompt composition for both the model profile
-and an explicitly activated workflow, not just successful extension loading.
+Updates apply to new Hosts, not running heads or lanes. See
+[managed integration operations](docs/OPERATIONS.md#필수-관리형-omp-ulw-설치와-갱신)
+for update and activation behavior.
+
+## Development
+
+After the same source preparation:
+
+```sh
+bun run check
+bun test test
+bun run test:ci
+```
+
+`check` runs the typecheck. The default `bun test test` suite excludes opt-in native/PTY
+scenarios. `test:ci`, configured by `scripts/ci.ts`, runs all local native/PTY scenarios
+and the typecheck using offline fixtures, not real account or provider calls. It also
+requires Python 3; the launchd scenario runs only on macOS.
+These checks do not establish production or live-account readiness.
+
+`bun run release` packages committed source and a SHA256 checksum in `dist` locally.
+It does not publish; tag-triggered GitHub Actions publishes the GitHub Release after CI.
 
 ## Documentation & credits
 
 - [Design](DESIGN.md): routing, roles, sessions, and lifecycle.
 - [Operations guide](docs/OPERATIONS.md): platform setup, recovery, and verification records.
-- [Third-party notices](THIRD_PARTY_NOTICES.md): source attribution and licensing.
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-ulw](https://github.com/dbc-hbin/omp-ulw) workflow integration.
 The mascot reimagines OMP's pi mark as a little superhero.
+
+## License
+
+Project code is licensed under [MIT](LICENSE). Third-party components retain their
+separate terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

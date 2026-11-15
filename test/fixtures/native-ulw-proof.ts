@@ -172,8 +172,13 @@ export async function runNativeUlwProof(options: {
     assert.equal(messenger.sent.filter(output => output.text === `HEAD:${id}:delegated`).length, 1,
       "Head acknowledges its actual handoff without provoking native empty-stop recovery");
   }
-  assert.equal(messenger.sent.length, inputs.length + 2);
-  assert(messenger.sent.every(output => output.text.startsWith("HEAD:")));
+  const kickoff = messenger.sent.filter(output => output.id === "303:kickoff");
+  assert.deepEqual(kickoff.map(output => ({ id: output.id, sourceId: output.sourceId, route: output.route, text: output.text })), [{
+    id: "303:kickoff", sourceId: firstHandoff, route: thread,
+    text: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.",
+  }], "The initial lane handoff delivers its exact authorized kickoff once in the work topic");
+  assert.equal(messenger.sent.length, inputs.length + 2 + kickoff.length);
+  assert(messenger.sent.filter(output => output.id !== "303:kickoff").every(output => output.text.startsWith("HEAD:")));
   for (const connection of [head, actualLane]) {
     await until(async () => (await connection.client.getState()).isSettled, "native ULW workflow settlement");
     assert.equal((await connection.client.getState()).hasOwnedRunningWork, false);

@@ -572,23 +572,21 @@ describe("deferred native judge inspection", () => {
     }
   }, 120_000);
 
-  test("global, project and overlay selectors, aliases and native fallback arrays count without resolution", async () => {
-    for (const [layer, write] of [["global", "writeConfig"], ["project", "writeProject"], ["overlay", "writeOverlay"]]) {
-      for (const selector of ["private-selector/judge", "@private-selector", "pi/private-selector", "*",
-        "@private-selector,private-selector/unavailable", ["@private-selector", "private-selector/unavailable"],
-        " , private-selector/judge, ", ["", "private-selector/judge", " "]]) {
-        expect(await nativeJudgeCase(`await ${write}({ modelRoles: { judge: ${JSON.stringify(selector)} } });`))
-          .toEqual({ status: "configured", source: layer });
-      }
+  // Layer precedence, legacy state, and null/empty overrides are covered above
+  // and below. Native selector normalization is shared by all effective layers.
+  test("selectors, aliases and native fallback arrays count without resolution", async () => {
+    for (const selector of ["private-selector/judge", "@private-selector", "pi/private-selector", "*",
+      "@private-selector,private-selector/unavailable", ["@private-selector", "private-selector/unavailable"],
+      " , private-selector/judge, ", ["", "private-selector/judge", " "]]) {
+      expect(await nativeJudgeCase(`await writeConfig({ modelRoles: { judge: ${JSON.stringify(selector)} } });`))
+        .toEqual({ status: "configured", source: "global" });
     }
   }, 120_000);
 
-  test("delimiter-only strings and arrays contain no configured selector at any native layer", async () => {
-    for (const [layer, write] of [["global", "writeConfig"], ["project", "writeProject"], ["overlay", "writeOverlay"]]) {
-      for (const selector of [",", " , , \t", ["", " "], [",", " , "]]) {
-        expect(await nativeJudgeCase(`await ${write}({ modelRoles: { judge: ${JSON.stringify(selector)} } });`))
-          .toEqual({ status: "missing", source: layer });
-      }
+  test("delimiter-only strings and arrays contain no configured selector", async () => {
+    for (const selector of [",", " , , \t", ["", " "], [",", " , "]]) {
+      expect(await nativeJudgeCase(`await writeConfig({ modelRoles: { judge: ${JSON.stringify(selector)} } });`))
+        .toEqual({ status: "missing", source: "global" });
     }
   }, 90_000);
 

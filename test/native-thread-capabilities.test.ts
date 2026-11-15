@@ -19,6 +19,7 @@ const telegramRoute: Route = { platform: "telegram", accountId: "900", authority
 const telegramDm: Route = { ...telegramRoute, guildId: null, channelId: "42" };
 const slackRoute: Route = { platform: "slack", accountId: "TOWN:UBOT", authorityId: "UOWNER", guildId: "TOWN", channelId: "CALLOWED", threadId: null };
 const slackDm: Route = { ...slackRoute, guildId: null, channelId: "DOWNER" };
+const slackAppId = "AAPP";
 
 class DiscordChannel {
   type: ChannelType = ChannelType.GuildText;
@@ -354,7 +355,11 @@ describe("Telegram native topic capability", () => {
 });
 
 class SlackSocket extends EventEmitter {
-  async start() { return { ok: true }; }
+  async start() {
+    this.emit("ws_message", JSON.stringify({ type: "hello", connection_info: { app_id: slackAppId } }), false);
+    this.emit("connected");
+    return { ok: true };
+  }
   async disconnect() {}
 }
 
@@ -375,6 +380,7 @@ class SlackHTTP {
     if (this.failure) return Response.json({ ok: false, ...this.failure });
     let result: Data;
     if (method === "auth.test") result = { team_id: "TOWN", user_id: "UBOT", bot_id: "BBOT" };
+    else if (method === "bots.info") result = { bot: { id: "BBOT", user_id: "UBOT", app_id: slackAppId, team_id: "TOWN" } };
     else if (method === "users.info") result = { user: { id: "UOWNER", team_id: "TOWN", is_bot: false, deleted: false } };
     else if (method === "conversations.info") result = { channel: this.channels.get(args.channel!) };
     else if (method === "conversations.history") result = { messages: [this.sources.get(`${args.channel}:${args.oldest}`)].filter(Boolean) };

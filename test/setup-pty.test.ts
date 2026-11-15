@@ -1231,7 +1231,7 @@ ptyTest("setup help works without a terminal while secret entry fails closed wit
         expect(terminal.transcript()).not.toContain(judgeUnknown);
         const help = context.terminal([...command, "--help"], false);
         await help.finished(true, false);
-        expect(help.transcript()).toContain("omp-superagent setup --config FILE");
+        expect(help.transcript()).toContain("omp-sa setup --config FILE");
         if (original) {
           expect(await fs.readFile(context.config, "utf8")).toBe(original.config);
           expect(await fs.readFile(`${context.config}.env`, "utf8")).toBe(original.env);

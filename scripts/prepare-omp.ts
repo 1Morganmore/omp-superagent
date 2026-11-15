@@ -2,7 +2,6 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { updateManagedUlw } from "../src/managed-ulw";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = await Bun.file(join(root, "upstream", "omp.json")).json() as {
@@ -32,5 +31,5 @@ for (const patch of patches) {
   await run(["git", "apply", path], upstream);
 }
 await run([process.execPath, "install", "--frozen-lockfile"], upstream);
-await updateManagedUlw();
 console.log(`Prepared ${upstream} at ${revision}. Installed system omp was not replaced.`);
+console.log("Next: build the OMP native addon, then run bun install --frozen-lockfile to prepare this project and managed ULW.");

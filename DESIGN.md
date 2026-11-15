@@ -118,7 +118,7 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 
 | 소스 | 구현 책임 |
 | --- | --- |
-| `src/cli.ts`, `src/config.ts` | `--config` 필수 CLI, 명시적 start, 설정·소유 경로 검증, doctor/status/attach/stop |
+| `src/cli.ts`, `src/config.ts` | `omp-sa` 실행 이름과 `--config` 필수 CLI, 명시적 start, 설정·소유 경로 검증, doctor/status/attach/stop |
 | `src/autostart.ts` | macOS의 인스턴스별 일회성 LaunchAgent install/uninstall·등록 상태 조회. 기존 start를 다음 로그인에 호출하며 별도 Gateway 실행·복구 엔진 없음 |
 | `scripts/setup.sh`, `src/setup.ts`, `src/credentials.ts` | controlling-terminal 셋업·토큰 숨김 입력, 기존 config 검증 재사용, owner-only sibling 환경 파일과 start/doctor의 제한된 로딩. 봇 활성화 없음 |
 | `src/gateway*.ts` | detached Gateway 기동·소유권·영속 수신/receipt·헤드 감독·로컬 transport 효과 proxy |
@@ -135,7 +135,7 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 | `src/telegram.ts` | grammY `Api` 기반 getMe/getWebhookInfo/getUpdates long polling·영속 offset·native forum topic·inline 승인·토큰 없는 file 참조 |
 | `src/slack.ts` | 공식 SocketModeClient/WebClient 기반 workspace 인증·메시지/Block Kit 수신·history·thread·외부 파일 업로드 |
 | `src/host.ts` | 로컬 소켓 RpcClient와 분리된 세션별 OMP 프로세스의 시작·접속·소유권 확인 |
-| `scripts/prepare-omp.ts`, `upstream/omp.json`, `patches/omp` | OMP v18.20.0 `c308970263ae13744ea15ab67302e3dac840e266` 준비와 실제 코어 패치, 필수 관리형 ULW 준비 연동 |
+| `scripts/prepare-omp.ts`, `upstream/omp.json`, `patches/omp` | OMP v18.20.0 `c308970263ae13744ea15ab67302e3dac840e266` 소스·의존성 준비와 실제 코어 패치 |
 | `upstream/ulw.json`, `.upstream/ulw/` | 공식 ULW 원격·1시간 갱신 간격과 프로젝트 소유 immutable revision package·원자적 활성 pointer·업데이트 상태 |
 
 설치·준비·doctor는 Gateway나 봇을 활성화하지 않는다. `start`만 Gateway를 백그라운드로
@@ -156,8 +156,9 @@ Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서
 
 `omp-ulw`는 선택적 사용자 checkout이 아니라 설치에 항상 포함되는 관리형 의존성이다.
 공식 원격은 `https://github.com/dbc-hbin/omp-ulw.git`이며 `upstream/ulw.json`에 기록한다.
-`bun scripts/prepare-omp.ts`, 루트 postinstall, 명시적인 `bun run prepare:ulw`가 같은 준비 경로를
-사용한다. 설치 때 원격 기본 브랜치 HEAD를 확인한다. production Gateway 시작에는 이미 유효한
+`bun scripts/prepare-omp.ts`로 OMP 소스·의존성을 준비하고 native addon을 빌드한 뒤,
+루트 postinstall 또는 명시적인 `bun run prepare:ulw`로 ULW를 준비한다.
+설치 때 원격 기본 브랜치 HEAD를 확인한다. production Gateway 시작에는 이미 유효한
 active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startup 원격 확인은 백그라운드로
 진행하고 이후 `checkIntervalMs: 3600000`에 따라 매시간 확인한다. 느리거나 불가한 upstream이
 정상 active를 가진 Gateway 시작을 막지 않는다. 업데이트 확인/준비는 일반 코드이며 새로운
@@ -1340,7 +1341,8 @@ commit SHA를 만들어 pin된 검증 근거로 제시하지 않는다.
 - SUL 코드를 MIT 코드처럼 취급하지 않는다. 프로젝트 배포 조건과 맞지 않으면 구현 아이디어만 참고한다.
 - 공개 저장소라는 이유만으로 라이선스가 없는 코드를 복사하지 않는다.
 - `tickernelz`는 package에 MIT를 선언하지만 조사 시 루트 LICENSE가 없었다. 코드 도입 전에 정리한다.
-- 이 저장소 자체의 배포 라이선스는 아직 정하지 않았다. 의존 코드의 조건을 확인한 뒤 결정한다.
+- 이 프로젝트의 직접 작성 코드에는 루트 `LICENSE`의 MIT 라이선스를 적용한다.
+  제3자 코드·자산·의존성의 별도 조건과 출처는 영문 `THIRD_PARTY_NOTICES.md`에 보존한다.
 
 ## 10. 구현 확인 범위와 운영 완료 기준
 

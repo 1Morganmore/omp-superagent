@@ -136,7 +136,7 @@ try {
   });
   if (role === "head" && kind === "main") {
     assert.equal(errors.length, 1);
-    assert.match(errors[0]!.error, /Start this extension with omp-superagent start/);
+    assert.match(errors[0]!.error, /Start this extension with omp-sa start/);
   } else {
     assert.deepEqual(errors, [], "Task/lane sessions must never attempt head startup");
   }

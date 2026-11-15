@@ -234,7 +234,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     if (ctx.agent.kind !== "main" || loading || closed) return;
     const configPath = process.env.OMP_SUPERAGENT_CONFIG;
     if (!configPath || !process.env.OMP_RPC_SOCKET)
-      throw new Error("Start this extension with omp-superagent start and its pinned socket-enabled OMP host");
+      throw new Error("Start this extension with omp-sa start and its pinned socket-enabled OMP host");
     // The host's RPC command queue opens only after session_start returns.
     timer = setTimeout(() => {
       loading = (async () => {
@@ -259,7 +259,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
           runtime = candidate;
           await candidate.start();
           if (closed) { await candidate.stop(); return; }
-          ctx.ui.setStatus("superagent", `Gateway: ${configuredPlatforms(config).join(", ")}; preset readiness: omp-superagent status`);
+          ctx.ui.setStatus("superagent", `Gateway: ${configuredPlatforms(config).join(", ")}; preset readiness: omp-sa status`);
         } catch (error) {
           runtime = undefined;
           await candidate.stop().catch(() => {});

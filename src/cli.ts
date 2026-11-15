@@ -9,20 +9,20 @@ import { setup } from "./setup";
 
 // Lifecycle imports below must stay lazy: static Gateway/Host imports execute
 // OMP's dotenv loader before setup/doctor/command registration select credential sources.
-const HELP = `omp-superagent — messenger-connected OMP head and independent topic sessions
+const HELP = `omp-sa — messenger-connected OMP head and independent topic sessions
 
 Usage:
-  omp-superagent setup --config FILE
-  omp-superagent start --config FILE
-  omp-superagent install --config FILE
-  omp-superagent uninstall --config FILE
-  omp-superagent status --config FILE
-  omp-superagent attach [main|LANE_ID] --config FILE [--read-only]
-  omp-superagent stop [main|LANE_ID] --config FILE
-  omp-superagent doctor --config FILE
-  omp-superagent discord-commands --config FILE [--apply]
-  omp-superagent telegram-commands --config FILE [--language CODE] [--apply]
-  omp-superagent slack-commands --config FILE --manifest-token-env NAME [--apply]
+  omp-sa setup --config FILE
+  omp-sa start --config FILE
+  omp-sa install --config FILE
+  omp-sa uninstall --config FILE
+  omp-sa status --config FILE
+  omp-sa attach [main|LANE_ID] --config FILE [--read-only]
+  omp-sa stop [main|LANE_ID] --config FILE
+  omp-sa doctor --config FILE
+  omp-sa discord-commands --config FILE [--apply]
+  omp-sa telegram-commands --config FILE [--language CODE] [--apply]
+  omp-sa slack-commands --config FILE --manifest-token-env NAME [--apply]
 
 setup interactively saves configuration and a private FILE.env, then sets Discord/Telegram bot profile pictures to the repository mascot through REST APIs; it never starts messenger connections or services.
 start explicitly launches a detached Gateway and its native head, activating configured messenger connections. No install/autostart is performed.

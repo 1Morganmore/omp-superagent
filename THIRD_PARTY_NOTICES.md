@@ -1,54 +1,34 @@
-# 제3자 코드·의존성 및 출처
+# Third-Party Notices and Provenance
 
-이 문서는 선택적으로 재사용한 코드와 의존성의 고지다. **이 저장소 전체의 배포 라이선스는
-아직 정하지 않았으며**, 아래 MIT/Apache 고지가 프로젝트 전체를 해당 라이선스로 바꾸지 않는다.
-의존 패키지를 재배포할 때는 각 패키지와 전이 의존성에 포함된 LICENSE/NOTICE도 보존해야 한다.
+Original contributions to this project are licensed under the MIT License in
+[`LICENSE`](LICENSE), Copyright (c) 2026 dbc-hbin. Third-party code, artwork,
+dependencies, and separately managed packages retain their own licenses and
+copyright notices; the project license does not replace or relicense them.
+When redistributing dependencies, preserve their LICENSE/NOTICE files and those
+of their transitive dependencies. This document also identifies conceptual
+references separately from copied or adapted material.
 
-## README 로고 — oh-my-pi 시각 자산의 변형
+## Artwork adapted from oh-my-pi
 
-- 참조 원본: [oh-my-pi README hero](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/hero.png).
-- 적용 파일: `assets/superagent-mascot.webp`와 이 파일을 흰 배경 JPG로 변환한 봇 프로필용
-  `assets/superagent-avatar.jpg`(`sips -s format jpeg`로 원본 크기 유지). 원본 hero를 이미지 생성 모델
-  `gpt-image-2`의 참조 이미지로 사용해 π 실루엣·핑크/보라 색상을 살린 마스코트를 생성했다.
-  바이저·눈·짧은 망토를 추가하고,
-  [원본 icon.svg](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/icon.svg)의
-  플러그 모티프를 작은 주황색 장식으로 반영했다. 기존 연결 노드형 SVG 로고를 대체한다.
-- 독립 프로젝트의 변형 로고이며 원 프로젝트의 공식 제품·보증을 의미하지 않는다.
-- 원본 [LICENSE](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/LICENSE):
+- Source: [README hero](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/hero.png)
+  and [icon.svg](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/icon.svg).
+- `assets/superagent-mascot.webp` was generated with `gpt-image-2` using the hero
+  as a reference, retaining its pi silhouette and pink/purple palette while adding
+  a visor, eyes, and short cape. The icon's plug motif became a small orange
+  ornament. This replaced the former connected-node SVG logo.
+- `assets/superagent-avatar.jpg` is a white-background JPEG conversion of that
+  mascot, made with `sips -s format jpeg` at the original dimensions.
+- This is an independent project's adapted logo, not an official upstream product
+  or endorsement. The upstream MIT license and copyright notices are reproduced
+  in the OMP section below and apply to the source artwork.
 
-```text
-MIT License
+## ompbot: adapted SQLite ledger patterns
 
-Copyright (c) 2025 Mario Zechner
-Copyright (c) 2025-2026 Can Bölük
-Copyright (c) 2026 Stencil Labs, Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-## ompbot — SQLite 장부 패턴의 수정·재사용
-
-- 원본: [gimso2x/ompbot](https://github.com/gimso2x/ompbot/tree/ddd0f854e8e8d395b7ed43104ec541f909a52ad4)
-- revision: `ddd0f854e8e8d395b7ed43104ec541f909a52ad4`
-- 원본 파일: `src/store/db.ts`, `src/lanes/manager.ts`
-- 적용 파일: `src/store.ts`의 SQLite 장부 패턴. 해당 파일 헤더에도 전체 MIT 고지를 보존한다.
-- 원본 [LICENSE](https://github.com/gimso2x/ompbot/blob/ddd0f854e8e8d395b7ed43104ec541f909a52ad4/LICENSE):
+- Source: [gimso2x/ompbot](https://github.com/gimso2x/ompbot/tree/ddd0f854e8e8d395b7ed43104ec541f909a52ad4),
+  revision `ddd0f854e8e8d395b7ed43104ec541f909a52ad4`.
+- Original files: `src/store/db.ts`, `src/lanes/manager.ts`.
+- Adapted in `src/store.ts`, whose header also retains the full MIT notice.
+- Original [LICENSE](https://github.com/gimso2x/ompbot/blob/ddd0f854e8e8d395b7ed43104ec541f909a52ad4/LICENSE):
 
 ```text
 MIT License
@@ -76,67 +56,79 @@ SOFTWARE.
 
 ## Discord transport
 
-- Gateway/REST·컴포넌트는 직접 복사한 클라이언트 대신
-  [discord.js](https://github.com/discordjs/discord.js)를 의존 패키지로 사용한다.
-  직접 선언 범위는 `^14.25.1`이며 실제 고정 버전은 `bun.lock`을 따른다.
-  설치 시 확인한 패키지 `14.28.1`은 **Apache-2.0**이다(MIT로 간주하지 않는다).
-  전체 라이선스는 `node_modules/discord.js/LICENSE`와
-  [해당 버전 LICENSE](https://github.com/discordjs/discord.js/blob/14.28.1/packages/discord.js/LICENSE)에 있다.
-  저작권 고지는 `Copyright 2021 Noel Buechler`, `Copyright 2015 Amish Shah`다.
-  배포에 패키지를 포함하면 Apache-2.0 전문과 해당 고지를 함께 제공한다.
-- `src/discord.ts`는
-  [ompbot `4d2eb28d0bf66644892dc0fc333580d0eb7e7780`](https://github.com/gimso2x/ompbot/tree/4d2eb28d0bf66644892dc0fc333580d0eb7e7780)의
-  `src/discord/{adapter,attachments,channel,transport}.ts` 동작 의미를 참고했다.
-  이 revision의 ompbot은 MIT이며 해당 파일들을 복사한 것은 아니다.
-- `src/setup-profiles.ts`는 같은 설치 버전 `14.28.1`의 공개 `REST.get/patch`와 `Routes.user`
-  API를 사용한다. [Modify Current User](https://docs.discord.com/developers/resources/user#modify-current-user)의
-  image-data 업로드와 User 응답 계약을 2026-11-15에 확인했다. 외부 avatar 구현을 복사하지 않았다.
-- 라이선스 없는 poke 코드는 복사하지 않았다. Dori의 SUL 적용 코드도 가져오지 않았다.
-  운영 개념을 참고한 사실은 코드의 재라이선스나 복사 허가를 뜻하지 않는다.
+- Gateway/REST and component support use the
+  [discord.js](https://github.com/discordjs/discord.js) dependency, not a copied
+  client. The declared range is `^14.25.1`; `bun.lock` records the resolved version.
+  The inspected installed version, `14.28.1`, is **Apache-2.0, not MIT**.
+- The full license is in `node_modules/discord.js/LICENSE` and the
+  [versioned upstream LICENSE](https://github.com/discordjs/discord.js/blob/14.28.1/packages/discord.js/LICENSE).
+  It includes `Copyright 2021 Noel Buechler` and `Copyright 2015 Amish Shah`.
+  Distributions containing the package must include its Apache-2.0 license and
+  applicable notices; the project MIT license does not replace these terms.
+- `src/discord.ts` independently implements behavior compared with
+  [ompbot `4d2eb28d0bf66644892dc0fc333580d0eb7e7780`](https://github.com/gimso2x/ompbot/tree/4d2eb28d0bf66644892dc0fc333580d0eb7e7780),
+  `src/discord/{adapter,attachments,channel,transport}.ts`. That revision is MIT;
+  those files were not copied.
+- `src/setup-profiles.ts` uses public `REST.get/patch` and `Routes.user` APIs from
+  `14.28.1`. The [Modify Current User](https://docs.discord.com/developers/resources/user#modify-current-user)
+  image-data upload and User response contracts were checked on 2026-11-15.
+  No external avatar implementation was copied.
+- No unlicensed poke code or SUL-covered Dori code was imported. Referencing
+  operational concepts does not relicense code or grant permission to copy it.
 
-## 운영 스킬 — 개념 참고, 독립 작성
+## Operational skills: conceptual references, independently written
 
-`skills/head/`, `skills/lane/`의 역할 계약과 상세 절차는 현재 OMP 도구·세션 계약과
-이 저장소 설계에 맞춰 독립 작성했다. Dori의 스킬 문구나 실행 스크립트를 복사한 이식이 아니다.
+`skills/head/` and `skills/lane/` were written for this repository's design and
+current OMP tool/session contracts, not copied from Dori skill text or scripts.
 
-- 참고: [vntrevx/omp-dori `3b5487df12540cdd428ebcf7455375d72921e2dc`](https://github.com/vntrevx/omp-dori/tree/3b5487df12540cdd428ebcf7455375d72921e2dc), 2026-11-13 확인.
-- 검토 대상: `skills/dori-mode/SKILL.md`, `prompts/lead.md`, `prompts/lane-footer.md`,
-  `skills/dori-mode/references/sessions.md`, `skills/dori-mode/references/done-protocol.md`.
-- 참고한 개념: 명확한 인계·완료 조건, 보고 후 사실 확인, 중단된 외부 효과의 증거 확인,
-  작업자의 완료 주장과 관리자의 검증된 종료 구분.
-- 채택하지 않은 구현: `dori`/`herdr`/`hc` 실행 명령, 별도 상태·감독 레지스트리,
-  상주 duty LLM, 모든 요청의 강제 위임, 시간 경과에 따른 자동 승인·종료·worktree 제거.
-- 해당 upstream 유래 자료는 [SUL 및 NOTICE](https://github.com/vntrevx/omp-dori/blob/3b5487df12540cdd428ebcf7455375d72921e2dc/NOTICE)의 적용을 받는다.
-  `LICENSE.omp-dori`를 전체 저장소에 대한 MIT 허가로 해석하지 않는다.
+- Reference: [vntrevx/omp-dori `3b5487df12540cdd428ebcf7455375d72921e2dc`](https://github.com/vntrevx/omp-dori/tree/3b5487df12540cdd428ebcf7455375d72921e2dc),
+  reviewed on 2026-11-13.
+- Reviewed: `skills/dori-mode/SKILL.md`, `prompts/lead.md`,
+  `prompts/lane-footer.md`, `skills/dori-mode/references/sessions.md`, and
+  `skills/dori-mode/references/done-protocol.md`.
+- Concepts: explicit handoff/completion conditions, checking reported facts and
+  interrupted external effects, and distinguishing a worker's completion claim
+  from verified closure.
+- Not adopted: `dori`/`herdr`/`hc` commands, separate state/supervision registries,
+  a resident duty LLM, mandatory delegation, or elapsed-time-based automatic
+  approval, closure, or worktree deletion.
+- The referenced upstream-derived material is governed by its
+  [SUL and NOTICE](https://github.com/vntrevx/omp-dori/blob/3b5487df12540cdd428ebcf7455375d72921e2dc/NOTICE).
+  `LICENSE.omp-dori` is not treated as an MIT grant for that entire repository.
 
-## Dori PR 동작 비교 — 독립 구현
+### Dori pull-request comparisons: independent implementation
 
-- 조사 snapshot: [vntrevx/omp-dori `dc7402efce8adc87aeac808a1b1f50100f9f53d9`](https://github.com/vntrevx/omp-dori/tree/dc7402efce8adc87aeac808a1b1f50100f9f53d9).
-- [#9](https://github.com/vntrevx/omp-dori/pull/9)의 Git 환경 격리,
-  [#32/#41](https://github.com/vntrevx/omp-dori/pull/41)의 답장·음성 문맥,
-  [#8/#27](https://github.com/vntrevx/omp-dori/pull/27)·[#31](https://github.com/vntrevx/omp-dori/pull/31)의
-  native prompt 호환성 회귀 사례를 비교했다.
-- 같은 snapshot의 [#45](https://github.com/vntrevx/omp-dori/pull/45)·
-  [#46](https://github.com/vntrevx/omp-dori/pull/46)의 근거 기반 진척·구조화 대기·시각 보존 개념도
-  비교했다. 기존 native custom journal·도구 결과·SQLite 레인·progress receipt에 독립 구현하며,
-  별도 supervisor·상태 레지스트리·타이머나 Dori 실행 코드는 가져오지 않았다.
-- 기존 SQLite/Gateway 입력 계약, discord.js·grammY API, pinned OMP renderer·ExtensionRunner로
-  독립 구현했다. Dori 코드·스킬·프롬프트·테스트를 복사하지 않았으며 SUL 고지를 재해석하지 않는다.
+- Snapshot: [vntrevx/omp-dori `dc7402efce8adc87aeac808a1b1f50100f9f53d9`](https://github.com/vntrevx/omp-dori/tree/dc7402efce8adc87aeac808a1b1f50100f9f53d9).
+- Compared Git environment isolation in [#9](https://github.com/vntrevx/omp-dori/pull/9),
+  reply/voice context in [#32/#41](https://github.com/vntrevx/omp-dori/pull/41), and
+  native prompt compatibility regressions in
+  [#8/#27](https://github.com/vntrevx/omp-dori/pull/27) and
+  [#31](https://github.com/vntrevx/omp-dori/pull/31).
+- Also compared evidence-based progress, structured waiting, and visual
+  preservation concepts in [#45](https://github.com/vntrevx/omp-dori/pull/45) and
+  [#46](https://github.com/vntrevx/omp-dori/pull/46).
+- Implemented independently using existing SQLite/Gateway contracts, native custom
+  journals, tool results, lanes, progress receipts, discord.js/grammY APIs, and the
+  pinned OMP renderer/ExtensionRunner. No Dori code, skills, prompts, tests,
+  supervisor, separate state registry, or timers were copied; its SUL notices are
+  not reinterpreted.
 
-## Telegram transport — grammY
+## Telegram transport: grammY
 
-- 재사용 API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553)
-- 패키지 출처 git revision: `055a5a440f04d0b9fd5fd75a6d14dac4c2b83553`.
-  실제 설치 버전은 `node_modules/grammy/package.json`, 고정 의존성은 `bun.lock`을 따른다.
-- `src/telegram.ts`와 `src/setup-profiles.ts`에서 `Api`·`InputFile`을 사용한다. 별도 Telegram
-  봇/SUL 구현을 복사하지 않았다. `1.46.0`의 `Api.setMyProfilePhoto` 구현과
-  [공식 메서드](https://core.telegram.org/bots/api#setmyprofilephoto)·
-  [JPG multipart 계약](https://core.telegram.org/bots/api#inputprofilephotostatic)을
-  2026-11-15에 확인했다. 별도 raw Bot API client나 이미지 변환 의존성을 추가하지 않았다.
-- 공식 문서: [grammY API](https://grammy.dev/guide/api),
+- API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553),
+  source revision `055a5a440f04d0b9fd5fd75a6d14dac4c2b83553`.
+  Installed metadata is in `node_modules/grammy/package.json`; dependency pins
+  are in `bun.lock`.
+- `src/telegram.ts` and `src/setup-profiles.ts` use `Api` and `InputFile`, not a
+  copied Telegram bot or SUL implementation. Version `1.46.0`'s
+  `Api.setMyProfilePhoto`, the [official method](https://core.telegram.org/bots/api#setmyprofilephoto),
+  and [JPEG multipart contract](https://core.telegram.org/bots/api#inputprofilephotostatic)
+  were checked on 2026-11-15. No separate raw Bot API client or image-conversion
+  dependency was added.
+- Documentation: [grammY API](https://grammy.dev/guide/api),
   [Telegram Bot API](https://core.telegram.org/bots/api).
-- 설치 패키지의 `node_modules/grammy/LICENSE`는 다음 MIT 전문이다. 패키지를 포함해 배포할 때
-  해당 저작권·허가 고지를 보존한다.
+- `node_modules/grammy/LICENSE` contains this MIT license. Preserve it when
+  redistributing the package:
 
 ```text
 MIT License
@@ -162,22 +154,24 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Slack transport — 공식 Node Slack SDK
+## Slack transport: official Node Slack SDK
 
-| 패키지 | 설치 버전 | 출처 git revision | 라이선스 |
+| Package | Installed version | Source revision | License |
 | --- | --- | --- | --- |
 | `@slack/web-api` | `8.3.0` | [`d8df118652c5749e56e00bb4f614b344993a24e4`](https://github.com/slackapi/node-slack-sdk/tree/d8df118652c5749e56e00bb4f614b344993a24e4) | MIT |
 | `@slack/socket-mode` | `3.2.0` | [`5e8d3f08c16144a2d700c38389bf94cbcc4d5f0f`](https://github.com/slackapi/node-slack-sdk/tree/5e8d3f08c16144a2d700c38389bf94cbcc4d5f0f) | MIT |
 
-- `src/slack.ts`에서 공식 `WebClient`·`SocketModeClient`를 재사용한다. 별도 Slack 봇이나
-  SUL 적용 봇 구현을 복사하지 않았다. 전송·라우팅·승인 조율은 이 저장소의 어댑터가 담당한다.
-- 공식 문서: [Web API SDK](https://docs.slack.dev/tools/node-slack-sdk/web-api/),
+- `src/slack.ts` uses the official `WebClient` and `SocketModeClient`.
+  Transport, routing, and approval coordination are implemented by this
+  repository's adapter, not copied from another Slack bot or SUL-covered bot.
+- Documentation: [Web API SDK](https://docs.slack.dev/tools/node-slack-sdk/web-api/),
   [Socket Mode SDK](https://docs.slack.dev/tools/node-slack-sdk/socket-mode/),
-  [Socket Mode 설정](https://docs.slack.dev/apis/events-api/using-socket-mode),
-  [외부 업로드 시작](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/),
-  [업로드 게시 완료](https://docs.slack.dev/reference/methods/files.completeUploadExternal/).
-- 설치된 두 패키지의 `node_modules/@slack/{web-api,socket-mode}/LICENSE`를 확인했으며
-  모두 아래 동일한 MIT 전문과 저작권 고지를 포함한다. 각 패키지를 재배포할 때 보존한다.
+  [Socket Mode setup](https://docs.slack.dev/apis/events-api/using-socket-mode),
+  [starting external uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/),
+  and [completing uploads](https://docs.slack.dev/reference/methods/files.completeUploadExternal/).
+- Both installed `node_modules/@slack/{web-api,socket-mode}/LICENSE` files contain
+  the following identical MIT license and copyright notice. Preserve it when
+  redistributing either package:
 
 ```text
 MIT License
@@ -204,48 +198,79 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## Hermes 셋업 — UX 참고, 독립 구현
+## Hermes setup: UX reference, independent implementation
 
-- 참고 revision: [`NousResearch/hermes-agent` `4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5`](https://github.com/NousResearch/hermes-agent/tree/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5).
-- 확인한 구현: [`scripts/install.sh`](https://github.com/NousResearch/hermes-agent/blob/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5/scripts/install.sh)의
-  `/dev/tty` 셋업 인계·`0600` 환경 파일,
-  [`hermes_cli/secret_prompt.py`](https://github.com/NousResearch/hermes-agent/blob/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5/hermes_cli/secret_prompt.py)의
-  비밀 입력·터미널 복원,
-  [`hermes_cli/setup_platforms.py`](https://github.com/NousResearch/hermes-agent/blob/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5/hermes_cli/setup_platforms.py)의
-  플랫폼별 자격 증명 질문·기존 구성 유지 흐름.
-- 적용: `scripts/setup.sh`와 CLI setup/credential 로딩의 UX를 이 저장소의 OMP·Gateway 계약에
-  맞춰 독립 작성했다. 해당 Python·설치기 코드는 복사하지 않았다.
-- Bash builtin·Node 표준 `readline`/dotenv parser와 기존 config 검증을 사용한다.
-  셋업에 Hermes의 자동 봇 생성·로그인·Gateway 서비스 설치/재시작·allow-all 정책을 넣지 않는다.
-  정확한 호환 범위는 Unix terminal과 이 저장소가 준비한 Bun/패치 OMP이며 Hermes 실행 의존성은 없다.
+- Reference: [`NousResearch/hermes-agent` `4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5`](https://github.com/NousResearch/hermes-agent/tree/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5).
+- Reviewed [`scripts/install.sh`](https://github.com/NousResearch/hermes-agent/blob/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5/scripts/install.sh)
+  for `/dev/tty` setup handoff and `0600` environment files,
+  [`hermes_cli/secret_prompt.py`](https://github.com/NousResearch/hermes-agent/blob/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5/hermes_cli/secret_prompt.py)
+  for secret input and terminal restoration, and
+  [`hermes_cli/setup_platforms.py`](https://github.com/NousResearch/hermes-agent/blob/4b40ffb0ad6d7da5d3260f5e499e1691508dd4d5/hermes_cli/setup_platforms.py)
+  for platform credential prompts and preservation of existing configuration.
+- `scripts/setup.sh` and CLI setup/credential loading were independently written
+  for this project's OMP/Gateway contracts using Bash builtins, Node's standard
+  `readline`/dotenv parser, and existing configuration validation. No Python or
+  installer code was copied, and Hermes is not a runtime dependency.
+- Scope is Unix terminals and this project's prepared Bun/patched OMP.
+  Hermes automatic bot creation, login, Gateway service installation/restart,
+  and allow-all policies were not adopted.
 
-## Hermes Gateway — 로그인 자동 시작 UX 참고, 독립 구현
+## Hermes Gateway: login-autostart UX reference, independent implementation
 
-- 참고 revision: [`NousResearch/hermes-agent` `fa1aab3187fa9951fa7c3620e0aa6f922d6636f6`](https://github.com/NousResearch/hermes-agent/tree/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6).
-- 확인한 구현: [`hermes_cli/gateway.py`](https://github.com/NousResearch/hermes-agent/blob/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6/hermes_cli/gateway.py)의
-  install/uninstall 명령 dispatch와
-  [`hermes_cli/gateway_launchd.py`](https://github.com/NousResearch/hermes-agent/blob/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6/hermes_cli/gateway_launchd.py)의
-  인스턴스별 LaunchAgent, `ProgramArguments`, `RunAtLoad`, no-start 설치 및 소유권 확인 흐름.
-- 원본 라이선스: [MIT, Copyright (c) 2025 Nous Research](https://github.com/NousResearch/hermes-agent/blob/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6/LICENSE).
-  Python 구현을 복사하지 않고 Node/Bun 표준 API와 macOS `launchctl`·`plutil`을 사용해
-  `src/autostart.ts` 및 CLI install/uninstall/status를 독립 구현했다.
-- 의도적인 차이: macOS 로그인 시 기존 `start`만 실행하는 일회성 등록이며 Hermes의
-  KeepAlive 감독자·프로세스 강제 교체·detached fallback·sudo/system 서비스·Windows backend는
-  가져오지 않는다. 설치 즉시 봇을 켜지 않고 준비·doctor·setup에서 자동 등록하지 않는다.
-- 호환 가정: 현재 계정의 macOS GUI 로그인, 접근 가능한 절대 Bun·저장소·config 경로,
-  비공개 sibling credential 파일, 프로젝트가 준비한 patched OMP. 등록 상태와 실제 Gateway
-  준비 상태는 구분하며, 등록만으로 재부팅·운영 계정 왕복 검증을 주장하지 않는다.
+- Reference: [`NousResearch/hermes-agent` `fa1aab3187fa9951fa7c3620e0aa6f922d6636f6`](https://github.com/NousResearch/hermes-agent/tree/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6).
+- Reviewed install/uninstall dispatch in
+  [`hermes_cli/gateway.py`](https://github.com/NousResearch/hermes-agent/blob/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6/hermes_cli/gateway.py)
+  and per-instance LaunchAgents, `ProgramArguments`, `RunAtLoad`, no-start
+  installation, and ownership checks in
+  [`hermes_cli/gateway_launchd.py`](https://github.com/NousResearch/hermes-agent/blob/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6/hermes_cli/gateway_launchd.py).
+- Upstream license: [MIT, Copyright (c) 2025 Nous Research](https://github.com/NousResearch/hermes-agent/blob/fa1aab3187fa9951fa7c3620e0aa6f922d6636f6/LICENSE).
+  `src/autostart.ts` and CLI install/uninstall/status were independently
+  implemented with Node/Bun APIs and macOS `launchctl`/`plutil`, not copied Python.
+- Registration runs the existing `start` once at macOS login. It does not import
+  Hermes KeepAlive supervision, forced process replacement, detached fallback,
+  sudo/system services, or a Windows backend. Installation does not start the bot;
+  prepare/doctor/setup do not register it automatically.
+- Assumptions: the current account's macOS GUI login, accessible absolute
+  Bun/repository/config paths, private sibling credentials, and prepared patched
+  OMP. Registration is distinct from Gateway readiness and does not establish
+  successful reboot or operational-account round-trip verification.
 
-## OMP — 상위 소스와 코어 패치
+## Managed ULW: separately licensed package and bundled skills
 
-- 원본: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266)
-- 기준: `v18.20.0`, revision `c308970263ae13744ea15ab67302e3dac840e266`
-- 로컬 소스: `.upstream/omp`; 재현 패치: `patches/omp`; pin 기록: `upstream/omp.json`.
-- 의존 패키지: 로컬 `@oh-my-pi/pi-coding-agent` 및 상위 workspace 패키지.
-  로컬 RPC Host·동일 Host attach·수명 관리 변경은 실제 상위 소스의 패치이며
-  미수정 OMP가 제공하는 기능으로 표시하지 않는다.
-- 상위 소스와 그 수정 패치는 다음 MIT 고지를 보존한다.
-  원본 [LICENSE](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/LICENSE):
+- Source: [dbc-hbin/omp-ulw](https://github.com/dbc-hbin/omp-ulw);
+  management configuration: `upstream/ulw.json`. Packages are prepared separately
+  under `.upstream/ulw/revisions/<revision>/package`; `active.json` identifies the
+  selected revision. The inspected snapshot was
+  [`22a8cfe89447a1cd55f2fd004d81e164372738a5`](https://github.com/dbc-hbin/omp-ulw/tree/22a8cfe89447a1cd55f2fd004d81e164372738a5).
+- This project's MIT license does not grant a license to that separate package or
+  override its per-file licenses and attribution. The inspected snapshot has no
+  root LICENSE or `package.json` license declaration; no blanket package license
+  is asserted here.
+- Bundled `skills/{browser,coding-agent-sessions,ultimate-browsing}/LICENSE.md`
+  retain the Sustainable Use License. `skills/computer-use/LICENSE.md` retains
+  SUL terms for OMO-derived portions and MIT terms for OMP-derived guidance.
+  These are actual bundled materials, not merely conceptual references.
+- Other retained notices include `skills/frontend/LICENSE-Apache-2.0.txt`,
+  the MIT license in `skills/frontend/references/designpowers/vendor/LICENSE`
+  (`Copyright (c) 2026 MC Dean`), and the MIT license in
+  `skills/programming/scripts/typescript/oxc/lint/oxlint-plugin/LICENSE`
+  (`Copyright (c) 2026 T3 Tools Inc.`).
+- Consult the selected package's license and attribution files before using or
+  redistributing it. Preserve those files and applicable modification notices;
+  the Dori non-copy statements above do not imply that ULW's bundled skills are MIT.
+
+## OMP: upstream source and core patches
+
+- Source: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266),
+  `v18.20.0`, revision `c308970263ae13744ea15ab67302e3dac840e266`.
+- Local source: `.upstream/omp`; reproducible patches: `patches/omp`;
+  pin record: `upstream/omp.json`.
+- Dependencies include local `@oh-my-pi/pi-coding-agent` and upstream workspace
+  packages. Local RPC Host, same-Host attach, and lifecycle changes patch upstream
+  source; they are not represented as features of unmodified OMP.
+- Upstream source, its modified patches, and the source artwork identified above
+  retain the following MIT notice from the
+  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/LICENSE):
 
 ```text
 MIT License

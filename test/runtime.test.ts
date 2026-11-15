@@ -2847,53 +2847,37 @@ describe("messenger head session controls", () => {
 });
 
 describe("priority native head commands", () => {
-  test("busy Slack slash diagnostics and mutation refusals never prompt, react, or advance message cursors", async () => {
-    const { runtime, config, main, store, messenger } = fixture();
-    config.slack = { botTokenEnv: "TEST_SLACK", appTokenEnv: "TEST_SLACK_APP", ownerId: "UOWNER", teamId: "TTEAM", allowedChannelIds: ["CCHANNEL"] };
-    const destination = route(null, { platform: "slack", accountId: "TTEAM:UBOT", authorityId: "UOWNER", guildId: "TTEAM", channelId: "CCHANNEL" });
-    await runtime.start();
-    await admit(runtime, { ...message("slack-active", destination), messageId: "1750000000.000001" });
-    const activities = structuredClone(messenger.activities);
-    for (const text of ["/status", "/help", "/context", "/usage"]) {
-      const input = slackCommand(`busy-${text}`, destination, text);
-      await admit(runtime, input);
-      expect(store.input(input.id)).toMatchObject({ messageId: null, invocationId: input.invocationId, state: "done" });
-      expect(messenger.sent.some(output => output.sourceId === input.id && output.text.includes("HEAD"))).toBe(true);
-    }
-    for (const text of ["/model fixture/efficient", "/effort high", "/compact inspect"]) {
-      const input = slackCommand(`busy-${text}`, destination, text);
-      await admit(runtime, input);
-      expect(store.input(input.id)?.state).toBe("cancelled");
-    }
-    expect(main.prompts).toHaveLength(1);
-    expect(main.commands.some(command => ["set_model", "set_thinking_level", "compact"].includes(String(command.type)))).toBe(false);
-    expect(messenger.activities).toEqual(activities);
-    expect(store.getMeta(`cursor:${physicalRouteKey(destination)}`)).toBe("1750000000.000001");
-  });
-
-  test("busy slash diagnostics send native output without model admission or interaction reactions/cursors", async () => {
-    const { runtime, main, store, messenger } = fixture();
-    await runtime.start();
-    const destination = route();
-    const current = message("1750000000000000000", destination, "Active owner work");
-    await admit(runtime, current);
-    const beforeActivities = structuredClone(messenger.activities);
-    for (const [index, text] of ["/status", "/help", "/context", "/usage"].entries()) {
-      const command = applicationCommand(`175000000000000000${index + 1}`, destination, text);
-      await admit(runtime, command);
-      expect(store.input(command.id)).toMatchObject({ messageId: null, interactionId: command.interactionId, state: "done" });
-      expect(messenger.sent.some(output => output.sourceId === command.id && output.text.includes("HEAD"))).toBe(true);
-    }
-    for (const [index, text] of ["/model fixture/efficient", "/effort high", "/compact inspect"].entries()) {
-      const command = applicationCommand(`175000000000000001${index + 1}`, destination, text);
-      await admit(runtime, command);
-      expect(store.input(command.id)?.state).toBe("cancelled");
-    }
-    expect(main.prompts).toHaveLength(1);
-    expect(main.commands.some(command => ["set_model", "set_thinking_level", "compact"].includes(String(command.type)))).toBe(false);
-    expect(messenger.activities).toEqual(beforeActivities);
-    expect(store.getMeta(`cursor:${physicalRouteKey(destination)}`)).toBe(current.messageId);
-  });
+  for (const platform of ["slack", "discord"] as const) {
+    test(`busy ${platform} slash diagnostics and mutation refusals never prompt, react, or advance message cursors`, async () => {
+      const { runtime, config, main, store, messenger } = fixture();
+      if (platform === "slack") config.slack = { botTokenEnv: "TEST_SLACK", appTokenEnv: "TEST_SLACK_APP", ownerId: "UOWNER", teamId: "TTEAM", allowedChannelIds: ["CCHANNEL"] };
+      const destination = platform === "slack"
+        ? route(null, { platform, accountId: "TTEAM:UBOT", authorityId: "UOWNER", guildId: "TTEAM", channelId: "CCHANNEL" }) : route();
+      const current = platform === "slack"
+        ? { ...message("slack-active", destination), messageId: "1750000000.000001" }
+        : message("1750000000000000000", destination, "Active owner work");
+      const command = platform === "slack" ? slackCommand : applicationCommand;
+      await runtime.start();
+      await admit(runtime, current);
+      const activities = structuredClone(messenger.activities);
+      for (const [index, text] of ["/status", "/help", "/context", "/usage"].entries()) {
+        const input = command(platform === "slack" ? `busy-${text}` : `175000000000000000${index + 1}`, destination, text);
+        await admit(runtime, input);
+        expect(store.input(input.id)).toMatchObject({ messageId: null, state: "done",
+          ...(platform === "slack" ? { invocationId: input.invocationId } : { interactionId: input.interactionId }) });
+        expect(messenger.sent.some(output => output.sourceId === input.id && output.text.includes("HEAD"))).toBe(true);
+      }
+      for (const [index, text] of ["/model fixture/efficient", "/effort high", "/compact inspect"].entries()) {
+        const input = command(platform === "slack" ? `busy-${text}` : `175000000000000001${index + 1}`, destination, text);
+        await admit(runtime, input);
+        expect(store.input(input.id)?.state).toBe("cancelled");
+      }
+      expect(main.prompts).toHaveLength(1);
+      expect(main.commands.some(command => ["set_model", "set_thinking_level", "compact"].includes(String(command.type)))).toBe(false);
+      expect(messenger.activities).toEqual(activities);
+      expect(store.getMeta(`cursor:${physicalRouteKey(destination)}`)).toBe(current.messageId);
+    });
+  }
 
   test("unbound slash resume responds honestly while idle, busy, and recovering pending admission", async () => {
     const { runtime, main, store, messenger } = fixture();

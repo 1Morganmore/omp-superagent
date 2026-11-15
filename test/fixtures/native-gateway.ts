@@ -586,6 +586,7 @@ try {
     const admittedRow = db.query("SELECT data FROM inputs WHERE id=?").get(item.id) as { data: string };
     const admitted = JSON.parse(admittedRow.data) as Inbound;
     assert.deepEqual({ id: admitted.id, messageId: admitted.messageId, route: admitted.route, text: admitted.text,
+      ...(admitted.reply === undefined ? {} : { reply: admitted.reply }),
       receivedAt: admitted.receivedAt, attachments: admitted.attachments }, item, "Native intake preserves the exact original identity and authorized task data");
     assert.equal(input(reportId)?.target, "main");
     const ownerSource = db.query("SELECT value FROM metadata WHERE key=?").get(`handoff-source:${owner}`) as { value: string };

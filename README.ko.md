@@ -13,6 +13,13 @@ Discord·Telegram·Slack을 [oh-my-pi](https://github.com/can1357/oh-my-pi)의 �
 
 [설계](DESIGN.md) · [운영](docs/OPERATIONS.md) · [설정 예제](config.example.json)
 
+## 배포 형태
+
+**0.1.0은 Bun 소스 배포판입니다.**
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.0)의 소스 tarball을 받아 아래 준비 절차를
+따르세요. npm 패키지나 독립 실행 바이너리는 제공하지 않습니다. 압축 파일에는 빌드된 OMP
+네이티브 모듈이나 관리형 의존성이 포함되지 않습니다.
+
 ## 차별점
 
 - **직접 실행하는 헤드:** 조사·구현을 직접 처리하거나, 분리할 작업의 범위와 인계를 정해 위임합니다.
@@ -36,7 +43,8 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 ## 빠른 시작
 
 Git, **Bun >= 1.4.4**, 로컬 Unix socket 지원 환경, Rust/Cargo와 플랫폼 네이티브 빌드 도구가 필요합니다.
-이 프로젝트는 **고정된 OMP 소스에 패치를 적용해 빌드**합니다. npm 전역 설치 OMP를 사용하는 절차가 아닙니다.
+Windows는 지원하지 않습니다. 이 프로젝트는 **고정된 OMP 소스에 패치를 적용해 빌드**하며,
+npm 전역 설치 OMP를 사용하는 절차가 아닙니다.
 
 ### 1. 소스 준비
 
@@ -44,50 +52,44 @@ Git, **Bun >= 1.4.4**, 로컬 Unix socket 지원 환경, Rust/Cargo와 플랫폼
 
 ```sh
 bun scripts/prepare-omp.ts
-bun install --frozen-lockfile
 bun --cwd=.upstream/omp run build:native
+bun install --frozen-lockfile
 ```
 
-prepare는 고정 OMP checkout·패치·의존성과 필수 관리형 `omp-ulw`를 준비합니다.
-소스 pin과 로컬 빌드 세부 사항은 [운영 가이드](docs/OPERATIONS.md#1-로컬-준비--봇은-시작하지-않음)에 있습니다.
+prepare 스크립트는 고정 OMP를 checkout하고 패치합니다. 네이티브 모듈을 먼저 빌드한 뒤
+루트 의존성을 설치하면 postinstall이 필수 관리형 `omp-ulw`를 준비합니다.
+소스와 의존성을 받는 데 네트워크가 필요하며, 봇을 시작하거나 전역 OMP를 교체하지 않습니다.
+
+CLI 명령어는 **`omp-sa`**이며 프로젝트·패키지 이름은 `omp-superagent`로 유지합니다.
+준비한 저장소에서 `bun link`로 등록하고 Bun의 전역 bin 디렉터리를 `PATH`에 포함합니다.
+
+```sh
+bun link
+omp-sa --help
+```
+
+아래의 `bun --no-env-file src/cli.ts`는 등록 없이 같은 CLI를 실행하는 소스 호출 방식입니다.
+`omp-sa` 실행 파일도 `.env` 자동 로딩을 끕니다.
 
 ### 2. 설정과 자격 증명
 
-플랫폼 앱을 준비한 뒤 터미널에서 실행합니다.
+[플랫폼 앱·권한](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위)을 준비한 뒤 터미널에서 실행합니다.
 
 ```sh
 bash scripts/setup.sh
 ```
 
-플랫폼·소유자·허용 채널·경로를 입력받아 `config.local.json`을 만들고 토큰은 숨김 입력으로 받습니다.
-토큰은 JSON·argv가 아니라 소유자 전용 `config.local.json.env`(`0600`)에 저장합니다.
-기존 유효한 JSON은 보존하며 자격 증명 변경은 확인 후 저장합니다. 봇은 시작하지 않습니다.
+셋업은 `config.local.json`을 만들고 숨김 입력으로 받은 토큰을 소유자 전용
+`config.local.json.env`(`0600`)에 저장합니다. 파일은 암호화 저장소가 아닌 평문이며,
+비어 있지 않은 셸 자격 증명이 우선합니다. 모델 제공자 인증은 기존 OMP 방식으로 설정합니다.
 
-최종 저장 확인에는 Discord/Telegram 봇 프로필 사진을 저장소 마스코트
-(`assets/superagent-avatar.jpg`)로 교체하는 작업도 포함됩니다. 저장 후 REST API로만
-적용하며, 저장 전 취소하면 프로필 API를 호출하지 않습니다. 업로드·재조회 실패는 자동
-재시도 없이 알리고 이미 저장한 로컬 설정은 보존합니다.
-Slack은 봇·앱 토큰으로 앱 아이콘을 바꿀 수 없으므로, 같은 파일을 앱 설정에서 올리는
-위치와 경로를 셋업 마지막에 안내합니다.
+봇·모델 세션은 시작하지 않습니다. 최종 저장 확인에는 Discord/Telegram 봇 프로필 사진을
+마스코트로 바꾸는 작업도 포함됩니다. 권장하는 Mnemopi 기억 backend 활성화는 별도의 명시적
+`yes`와 최종 저장 확인이 있어야 하며 OMP 전역 기억 backend를 변경합니다.
+누락된 native judge 역할은 설정을 권장하지만 모델을 자동 선택하거나 호출하지 않습니다.
 
-최초 셋업은 Mnemopi 장기 기억을 권장합니다. 명시적인 `yes`와 최종 저장 확인이 있어야만
-native OMP 전역 `memory.backend`를 `mnemopi`로 바꿉니다. 거절·취소·기존 자격 증명 갱신은
-메모리 설정을 건드리지 않습니다. 다른 메모리 옵션은 유지하며 이후 OMP 사용 시 해당 옵션에
-따라 모델 처리·다운로드가 발생할 수 있습니다. 셋업 자체는 메모리 backend를 시작하지 않습니다.
-
-새 구성 저장 후 네이티브 `judge` 역할이 미설정이면 일반 OMP의 `/models` → Roles → Judge에서 지정하도록
-권장합니다. 기존 선택은 보존하며, 셋업이 judge 모델을 자동 선택·변경하거나 호출하지는 않습니다.
-legacy 설정 때문에 실효 상태를 판정할 수 없거나 읽기에 실패하면 미설정으로 단정하지 않습니다.
-
-`doctor`와 명시적 `start`만 해당 파일의 구성된 자격 증명 이름을 환경에 읽습니다.
-이미 셸에 설정된 비어 있지 않은 환경변수가 우선합니다. 파일은 암호화 저장소가 아닌 평문입니다.
-래퍼와 아래 명령은 Bun의 작업 디렉터리 `.env` 자동 로딩을 끕니다.
-모델 제공자 인증은 기존 OMP 방식으로 유지합니다.
-
-다른 경로는 `bash scripts/setup.sh --config /절대/경로/config.json`으로 지정합니다.
-예제 JSON의 수동 설정과 환경변수만 사용하는 방식도 유지합니다.
-
-[플랫폼별 앱·권한 준비](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위)와 [설정 필드](docs/OPERATIONS.md#3-설정)를 참고하세요.
+메모리 동작, 다른 설정 경로, 수동 설정과 저장 효과는
+[설정 가이드](docs/OPERATIONS.md#3-설정)를 참고하세요.
 
 ### 3. 진단 후 명시적으로 시작
 
@@ -113,94 +115,63 @@ bun --no-env-file src/cli.ts start --config config.local.json
 bun --no-env-file src/cli.ts attach main --config config.local.json --read-only
 ```
 
-### 선택: macOS 로그인 후 자동 시작
-
-```sh
-bun --no-env-file src/cli.ts install --config config.local.json
-bun --no-env-file src/cli.ts status --config config.local.json
-bun --no-env-file src/cli.ts uninstall --config config.local.json
-```
-
-`install`은 인스턴스별 LaunchAgent를 등록해 **재부팅 후 다음 로그인**에 기존 `start`를
-한 번 실행합니다. 설치 즉시 봇을 켜지 않습니다. 메신저 자격 증명은 셸 환경에만 두지 말고
-비공개 `config.local.json.env`에 준비해야 합니다. plist에는 토큰을 저장하지 않습니다.
-`status`는 자동 시작 등록과 실제 Gateway·HEAD 준비 상태를 구분합니다.
-`uninstall`은 이후 자동 시작만 해제하고 현재 작업은 유지합니다. 현재 실행 중지는 별도
-`stop main`입니다. 로그인 전 부팅·Linux/Windows 서비스 설치·Gateway crash 자동 재시작은
-지원하지 않습니다.
+상태 조회·종료·macOS 로그인 후 자동 시작·복구는 [운영 가이드](docs/OPERATIONS.md)를
+참고하세요. 로그인 자동 시작은 한 번 실행하는 방식이며 crash 자동 재시작은 아닙니다.
+Linux 서비스 설치는 제공하지 않습니다.
 
 ## 사용 방법
 
-- **상태 반응:** 접수하면 👀, native 처리 중이면 Discord·Slack에 💭를 표시합니다.
-  Telegram은 🤔로 교체했다가 종료 시 👀로 복귀합니다. Discord에는 Add Reactions,
-  Slack에는 `reactions:write` 권한이 필요합니다.
-- **착수 보고:** 작업 지시는 먼저 별도 스레드·topic을 열고 무엇을 어떻게 할지 짧게 보고한 뒤 실행합니다.
-  같은 작업의 후속 지시는 기존 주제를 유지합니다. 질문·상태 조회·계산·연결 테스트는 기존 대화에서 바로 답합니다.
-- **중간 진척 보고:** 오래 걸리는 작업은 같은 작업 주제에 확인한 결과·현재 단계·막힘을 간결하게 보고합니다.
-  의미 있는 실행 경계에서 전달하며 고정 간격의 생존 알림은 아닙니다. 보고 중에도 레인 작업은 계속됩니다.
-- **독립 주제:** 일반 메시지로 새 작업을 요청하면 헤드가 범위를 판단해 지원되는 실제 스레드·topic을 만들고 독립 세션을 연결합니다. native topic이 없는 DM은 논리 주제로 분리합니다. `/new`(Slack `!new`)도 명시적 DM 주제 제어로 유지합니다.
-- **후속 요청:** 같은 주제의 일반 후속 입력은 실행 중인 작업에 기본 steer로 전달합니다. `/steer`는 필요 없습니다. 헤드가 먼저 받고 필요한 레인 지시를 명시적으로 전달하며, 다른 대화·제어 명령·workflow 선택은 섞지 않습니다.
-- **답장·음성 문맥:** Discord·Telegram의 참조 메시지와 Telegram 선택 인용문을 권한 없는
-  문맥 데이터로 보존해 헤드·레인에 전달합니다. 음성 첨부 여부·길이도 유지하지만 자동 전사 기능은 아닙니다.
-- **근거·대기 조회:** 연결 주제의 `/status`에 최근 변경 근거와 구체적인 대기 대상·최초 시각,
-  현재 native 소유자 일치 여부를 표시합니다. 같은 보고·결과를 반복해도 새 진척으로 세지 않으며,
-  이 관측 기록은 검증된 완료나 자동 재개·종료 허가가 아닙니다.
-- **목표 계속 실행·중지:** 맡긴 프로젝트 목표의 완료 기준이나 실제 승인·범위·불확실성·운영자 결정
-  경계까지 진행합니다. `/stop`은 연결 레인을 일시정지하고 `/resume`은 기존 paused native goal을
-  포함한 명시적 재개입니다. 종전 재개는 queue만 다시 열었으며, 이제도 불확실성을 해제하거나
-  중단 prompt의 replay를 보장하지 않습니다. Slack은 `!stop`·`!resume`입니다.
-- **헤드 모델·effort:** `/model`·`/effort`로 조회하고, `/model list`의 정확한 모델을
-  `/model <provider/model>`로 선택하거나 `/effort <level>`로 변경합니다. Slack은 `!model`·`!effort`입니다.
-  유휴 헤드 세션에만 적용하며 전역 기본값과 기존 레인은 유지합니다.
-- **운영 제어:** `/help`·`/status`·`/context`·`/usage`로 상태를 확인하고,
-  `/compact [보존할 내용]`으로 유휴 헤드 맥락을 압축합니다. `/model preset`으로 목록을 보고
-  `/model preset <name>`으로 native 프리셋을 적용합니다. `/stop head`는 Gateway 종료 없이 헤드 작업을 중단합니다.
-  Slack에서는 같은 명령에 `!`를 씁니다.
-- **보류 자동 복구:** 결과가 불확실한 헤드 요청은 후속 작업을 막습니다. 같은 헤드가 제한된
-  복구 턴에서 native 근거를 검토하고, 확인된 처리 결과만 반영해 원본 재실행 없이 해제합니다.
-  결과를 확인할 수 없으면 보류를 유지합니다. `/status`에서 ID를 확인하고
-  `/resolve [input-id]`(Slack `!resolve`)로 요청 하나를 명시적으로 종료할 수 있습니다.
-  복구는 작업 성공의 검증이나 이미 일어난 효과의 취소를 뜻하지 않습니다.
-- **서비스 재시작:** `/restart`는 유휴 상태에서 Gateway와 헤드 프로세스를 모두 교체하며
-  기존 세션·작업 기록을 유지합니다. 작업·비동기 실행·승인 등이 있으면 강제 종료하지 않고 거절합니다.
-  Slack은 `!restart` 또는 등록된 `/superagent-restart`입니다.
-- **Discord 자동완성:** 등록된 슬래시 명령도 같은 제어 경로를 사용합니다.
-  `bun --no-env-file src/cli.ts discord-commands --config config.local.json`으로 변경을 확인하고,
-  `--apply`를 붙이면 봇의 전역 명령 목록을 지원되는 Superagent 명령으로 교체합니다.
-  기존 Hermes 전용 명령은 제거되며 setup·doctor·start는 자동 등록하지 않습니다.
-  인수는 선택적인 `text` 필드에 입력합니다. 비공개 알림은 접수 확인이며 실제 결과는 원래 대화에 전달됩니다.
-- **Telegram 명령 메뉴:** 같은 명령을 사용하며 그룹의 `/status@봇이름`도 처리합니다.
-  같은 CLI의 `telegram-commands --config config.local.json`으로 확인하고 `--apply`로
-  소유자 범위 메뉴를 갱신합니다. 언어별 목록은 `--language CODE`로 선택합니다.
-- **Slack 자동완성:** 기본 명령과 충돌하지 않는 `/superagent-status`·`/superagent-model` 등
-  `/superagent-*`를 사용합니다. 기존 `!` 일반 메시지도 유지합니다.
-  같은 CLI의 `slack-commands --config config.local.json --manifest-token-env NAME [--apply]`로
-  등록합니다. `NAME`은 별도 앱 구성 토큰의 환경변수 이름이며 bot/app 연결 토큰으로 대체할 수 없습니다.
-  등록 결과에 재설치·재승인이 필요하다고 나오면 그 절차까지 완료해야 합니다.
-- **명시적 전역 저장:** `/model preset <name> --global`만 native 기본 역할·effort도 저장합니다.
-  옵션이 없으면 이번 헤드 세션 전용이며, 변경 알림에 실제 모델·effort와 적용 범위를 표시합니다.
+- 일반 메시지로 요청하세요. 질문은 바로 답하고, 작업 지시는 별도 주제에서 짧은 착수 보고와
+  의미 있는 진척·결과를 전달합니다.
+- 같은 주제의 후속 입력은 헤드를 통해 실행 중인 작업을 조정합니다. 저장소·주제별 레인 맥락은
+  독립적입니다. 음성 첨부 메타데이터 보존이 자동 전사를 뜻하지는 않습니다.
+- `/help`와 `/status`로 명령·상태를 확인합니다. `/model`·`/effort`는 유휴 헤드 세션만
+  바꾸며 기존 레인·전역 기본값은 유지합니다. 전역 프리셋 저장은 명시적 `--global`이 필요합니다.
+  Slack 일반 메시지 명령은 `!`를 씁니다.
+- `/stop`은 연결 레인을 일시정지하고 `/resume`은 재개를 허가합니다. 승인·취소·도구 제외와
+  불확실한 효과에 대한 보류는 유지합니다. 진척 보고·복구가 작업 완료의 검증이나 외부 효과의
+  취소를 뜻하지 않으며, 저장된 goal은 crash replay나 로드되지 않은 상태의 실행을 보장하지 않습니다.
 
-새 관리 Host launch는 프로젝트 범위의 native goal 설정과 `goal.continuationModes`의 `rpc`를
-사용하며 OMP 전역 설정은 바꾸지 않습니다. 이어갈 실행 작업은 native goal/workflow owner 하나를
-재사용하고 질문·상태·프리셋 bootstrap마다 goal을 만들지 않습니다. 헤드는 레인을 기다리는 goal
-대신 durable report event로 후속 작업을 판단하며, 작업자는 native task/job을 사용합니다.
-pause/cancel·승인·도구 제외는 유지하며 저장 goal은 crash replay나 unloaded 실행을 보장하지 않습니다.
-enabled goal은 paused 상태여도 명시적으로 해결할 때까지 기존 shutdown guard로 Host를 유지할 수 있습니다.
-launch 설정은 새 Host에, 기존 역할 번들은 별도로 허가된 Host 재시작 후에 적용됩니다.
-저장소 편집만으로 현재 운영 서비스에 반영됐다는 뜻은 아닙니다.
+명령 등록, 재시작·복구 의미와 플랫폼 차이는
+[명령과 일상 사용](docs/OPERATIONS.md#4-명령과-일상-사용)을 참고하세요.
+저장소를 편집했다고 현재 운영 서비스에 반영되는 것은 아닙니다.
 
 ## ULW
 
-공식 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)는 필수 관리형 설치 대상이며, workflow는 사용자의 명시적 요청이나
-헤드가 구체적으로 필요성을 판단한 경우에 선택합니다. Gateway는 시작 시와 이후 매시간 업데이트를 확인해 새 Host에만 적용합니다.
-실행 중인 헤드·레인의 버전은 고정되며, 업데이트 실패 시 기존 버전을 유지합니다.
-활성화 전에는 import뿐 아니라 실제 native 프롬프트에서 모델 프로필과 명시적 workflow
-policy의 offline 합성을 검사합니다.
+공식 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)는 필수 관리형 통합입니다.
+사용자의 명시적 요청이나 허가된 작업에 구체적으로 도움이 된다는 헤드의 판단으로 workflow를
+선택합니다. 일반 작업은 직접 세션·native task·일반 레인으로 처리할 수 있습니다.
+
+업데이트는 새 Host에 적용하며 실행 중인 헤드·레인의 버전은 유지합니다.
+[관리형 통합 운영](docs/OPERATIONS.md#필수-관리형-omp-ulw-설치와-갱신)에서 갱신·활성화 동작을 확인하세요.
+
+## 개발
+
+동일한 소스 준비를 마친 뒤 실행합니다.
+
+```sh
+bun run check
+bun test test
+bun run test:ci
+```
+
+`check`는 타입 검사입니다. 기본 `bun test test`는 opt-in native/PTY 시나리오를 제외합니다.
+`scripts/ci.ts`로 구성한 `test:ci`는 모든 로컬 native/PTY 시나리오와 타입 검사를 실행하며,
+실제 계정·모델 제공자 호출 대신 오프라인 fixture를 사용합니다. Python 3도 필요하며
+launchd 시나리오는 macOS에서만 실행합니다.
+이 검사가 운영 환경이나 실제 계정에서의 준비 완료를 증명하지는 않습니다.
+
+`bun run release`는 커밋된 소스 압축 파일과 SHA256 체크섬을 로컬 `dist`에 만듭니다.
+게시하지는 않으며, 태그로 실행되는 GitHub Actions가 CI 이후 GitHub Release를 게시합니다.
 
 ## 문서와 출처
 
 - [운영 가이드](docs/OPERATIONS.md): 설치·설정·복구 절차와 검증 근거.
 - [설계](DESIGN.md): Gateway·헤드·레인과 공유 게시판의 계약.
-- [서드파티 고지](THIRD_PARTY_NOTICES.md): 출처와 라이선스 고지.
 
 [oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)를 사용합니다.
+
+## License
+
+프로젝트 코드는 [MIT 라이선스](LICENSE)를 따릅니다. 서드파티 구성 요소에는 별도 조건이
+적용됩니다. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 참고하세요.

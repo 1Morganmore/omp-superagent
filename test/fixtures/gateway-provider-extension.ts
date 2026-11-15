@@ -8,7 +8,7 @@ import { nativeRequestEnvelope } from "./native-request-envelope";
 
 const provider = "gateway-native";
 const model = "local";
-const managers = ["lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close"];
+const managers = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close"];
 
 export default function gatewayProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_NATIVE_GATEWAY_ROOT;
