@@ -197,7 +197,12 @@ manager/board authority boundaries remain unchanged.
   Unsupported/secret dialogs require the local OMP UI.
 - For uncertain submissions, inspect native history, workspace, and external effects;
   do not replay the input or promise `lane_resume` clears it. Do not edit coordination
-  SQLite, unlink ownership sockets, or blindly repeat external actions.
+  SQLite, unlink ownership sockets, or blindly repeat external actions. A lane-targeted
+  uncertainty is closed with an explicit `lane_close` cancellation, never by resuming.
+  Only the owner can close a HEAD `uncertain` input with `/resolve [input-id]`
+  (Slack `!resolve`), which cancels that input without replaying it and never claims
+  its native outcome. Report the exact held input IDs from `/status` and let the owner
+  decide; never resolve on your own initiative.
 - Use advertised `board_post`, `board_read`, and `board_subscribe` for concise shared
   observations, evidence, and edit collisions, never commands or whole transcripts.
   Only sessions actually connected/registered to this instance participate: runtime

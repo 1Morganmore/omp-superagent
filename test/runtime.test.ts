@@ -1971,6 +1971,58 @@ describe("messenger head session controls", () => {
     expect(main.commands.filter(command => command.type === "set_model")).toEqual([]);
     expect(main.prompts).toEqual([]);
   });
+
+  test("an uncertain HEAD input holds later work until /resolve names it, and resolving never replays it", async () => {
+    const { runtime, store, main, messenger } = fixture();
+    await runtime.start();
+    store.receive(message("head-blocking-request"), "main");
+    store.submit("head-blocking-request", "head-blocking-receipt", 0);
+    store.settle("head-blocking-request", "uncertain");
+    await admit(runtime, message("head-blocked-later-work"));
+    expect(store.input("head-blocked-later-work")?.state).toBe("pending");
+    expect(main.prompts).toEqual([]);
+    // The operator must be able to discover the exact held identity from HEAD.
+    await admit(runtime, message("head-blocked-status", route(), "/status"));
+    expect(messenger.sent.at(-1)!.text).toContain('"head-blocking-request"');
+    await admit(runtime, message("head-blocked-resolve", route(), '/resolve head-blocking-request'));
+    expect(store.input("head-blocked-resolve")?.state).toBe("done");
+    expect(store.input("head-blocking-request")?.state).toBe("cancelled");
+    // Closure is announced on the original conversation without claiming outcome.
+    expect(messenger.sent.some(output => output.sourceId === "head-blocking-request" && /다시 실행되지 않았고/.test(output.text))).toBe(true);
+    await runtime.kick();
+    expect(store.input("head-blocked-later-work")?.state).not.toBe("pending");
+    expect(main.prompts).toHaveLength(1);
+    expect(String(main.prompts[0]!.command.message)).toContain("Request ID: head-blocked-later-work");
+    // The cancelled original is never resubmitted by the resolution itself.
+    expect(main.prompts.filter(prompt => String(prompt.command.message).includes("head-blocking-request"))).toEqual([]);
+  });
+
+  test("ambiguous, unknown, and empty /resolve requests change nothing", async () => {
+    const { runtime, store, main } = fixture();
+    await runtime.start();
+    // Nothing held: an empty resolve is refused rather than cancelling anything.
+    await admit(runtime, message("head-resolve-empty", route(), "/resolve"));
+    expect(store.input("head-resolve-empty")?.state).toBe("cancelled");
+    for (const id of ["head-resolve-first", "head-resolve-second"]) {
+      store.receive(message(id), "main");
+      store.submit(id, `${id}-receipt`, 0);
+      store.settle(id, "uncertain");
+    }
+    // A bare /resolve with two held uncertainties must not choose for the operator.
+    await admit(runtime, message("head-resolve-ambiguous", route(), "/resolve"));
+    expect(store.input("head-resolve-ambiguous")?.state).toBe("cancelled");
+    expect(store.input("head-resolve-first")?.state).toBe("uncertain");
+    expect(store.input("head-resolve-second")?.state).toBe("uncertain");
+    // An unknown identity never cancels a held one.
+    await admit(runtime, message("head-resolve-unknown", route(), "/resolve head-resolve-missing"));
+    expect(store.input("head-resolve-unknown")?.state).toBe("cancelled");
+    expect(store.input("head-resolve-first")?.state).toBe("uncertain");
+    expect(store.input("head-resolve-second")?.state).toBe("uncertain");
+    await admit(runtime, message("head-resolve-exact", route(), "/resolve head-resolve-second"));
+    expect(store.input("head-resolve-second")?.state).toBe("cancelled");
+    expect(store.input("head-resolve-first")?.state).toBe("uncertain");
+    expect(main.prompts).toEqual([]);
+  });
 });
 
 describe("priority native head commands", () => {
