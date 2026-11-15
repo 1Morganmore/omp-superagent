@@ -30,9 +30,9 @@ class GatewayMessenger implements GatewayHeadMessenger {
   }
 
   private options() { return { token: this.token, clientId: this.clientId }; }
-  private call<T>(endpoint: string, body: unknown): Promise<T> {
+  private call<T>(endpoint: string, body: unknown, signal?: AbortSignal): Promise<T> {
     if (this.stopped) return Promise.reject(new DeliveryError("Gateway client is stopped", "rejected"));
-    return gatewayCall<T>(this.socketPath, endpoint, body, this.options());
+    return gatewayCall<T>(this.socketPath, endpoint, body, { ...this.options(), signal });
   }
 
   async start(handlers: Parameters<Messenger["start"]>[0]): Promise<void> {
@@ -84,6 +84,9 @@ class GatewayMessenger implements GatewayHeadMessenger {
     this.reconnectTimer.unref();
   }
   private async consume(stream: IncomingMessage): Promise<void> {
+    const disconnected = new AbortController();
+    stream.once("close", () => disconnected.abort());
+    if (stream.destroyed) disconnected.abort();
     let pending = Buffer.alloc(0);
     for await (const chunk of stream) {
       pending = Buffer.concat([pending, Buffer.from(chunk)]);
@@ -96,6 +99,7 @@ class GatewayMessenger implements GatewayHeadMessenger {
         // answers instead require exact original-state reconciliation.
         this.delivery = this.delivery.catch(() => {}).then(async () => {
           if (this.stopped || !this.handlers) return;
+          disconnected.signal.throwIfAborted();
           let outcome: GatewayReceipt = "accepted";
           try {
             const event = frame.event;
@@ -115,9 +119,13 @@ class GatewayMessenger implements GatewayHeadMessenger {
           } catch (error) {
             outcome = error instanceof DeliveryError && error.certainty === "rejected" ? "rejected" : "unresolved";
           }
+          // A handler may finish after its Gateway has been replaced. Its
+          // receipt belongs only to this stream; redelivery reconciles the
+          // durable outcome after reattachment instead of ACKing a new server.
+          disconnected.signal.throwIfAborted();
           // A poison input stays visible and ordered without a tight retry loop.
           this.reconnectDelay = outcome === "unresolved" ? Math.min(this.reconnectDelay * 2, 30_000) : 250;
-          await this.call("/receipt", { sequence: frame.sequence, outcome });
+          await this.call("/receipt", { sequence: frame.sequence, outcome }, disconnected.signal);
         });
         await this.delivery;
       }

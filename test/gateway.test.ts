@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
-import { request as httpRequest, type Server, type ServerResponse } from "node:http";
+import { request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Config } from "../src/config";
 import type { Approval, Attachment, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../src/contracts";
@@ -251,6 +251,74 @@ test("lost event receipt redelivers original source identity in order to the nex
   await client.start({ message: async message => { received.push(message); }, answer: async () => {} });
   await eventually(() => received.length === 1 && f.store.pending() === 0);
   expect(received).toEqual([input("unreceipted")]);
+});
+
+test("a handler finishing after Gateway replacement cannot receipt the detached stream on the new server", async () => {
+  const f = await fixture();
+  const client = f.client();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const reconciling = Promise.withResolvers<void>();
+  const reconcile = Promise.withResolvers<void>();
+  const attempts: Inbound[] = [];
+  const accepted: Inbound[] = [];
+  await client.start({
+    message: async message => {
+      attempts.push(message);
+      // The head's durable inbox deduplicates the immutable original input.
+      if (!accepted.some(previous => previous.id === message.id)) accepted.push(message);
+      if (attempts.length === 1) { entered.resolve(); await release.promise; }
+    },
+    answer: async () => {},
+    reconnect: async () => { reconciling.resolve(); await reconcile.promise; },
+  });
+  await f.server.initialReady.promise;
+  await f.messenger.emit(input("201"));
+  await entered.promise;
+  await f.messenger.emit(input("202"));
+  const stream = (client as unknown as { events: IncomingMessage }).events;
+  const disconnected = Promise.withResolvers<void>();
+  stream.once("close", () => disconnected.resolve());
+  await f.server.close();
+  await disconnected.promise;
+  expect(f.store.pending()).toBe(2);
+
+  const errors: unknown[] = [];
+  const requests: string[] = [];
+  const messenger = new FakeMessenger();
+  const server = new GatewayServer({ socketPath: gatewayPaths(f.config).socketPath, store: f.store, messenger,
+    authorizeHead: async pid => { if (pid !== process.pid) throw new Error("Foreign native owner"); },
+    status: (): GatewayStatus => ({ gateway: { pid: process.pid, ready: true, admissionReady: server.ready,
+      pendingEvents: f.store.pending(), stopping: false }, head: { pid: process.pid, ready: server.headReady,
+      connected: server.connected, socketPath: "unused-native-socket", error: null } }),
+    stop: async () => {}, onError: error => errors.push(error),
+  });
+  const internal = server as unknown as { server: Server };
+  internal.server.on("request", request => { requests.push(request.url!); });
+  await server.listen();
+  cleanups.push(() => server.close());
+  try {
+    // Complete the old consumer only after the replacement socket is listening.
+    // Before the fix its next request is /receipt, before /attach, and onError
+    // reports "Gateway client is detached" even though adoption later succeeds.
+    release.resolve();
+    await reconciling.promise;
+    expect(requests[0]).toBe("/attach");
+    expect(errors).toEqual([]);
+    expect(attempts).toEqual([input("201"), input("201"), input("202")]);
+    expect(accepted).toEqual([input("201"), input("202")]);
+    expect(server.connected).toBe(true);
+    expect(server.ready).toBe(false);
+    expect(server.headReady).toBe(false);
+    expect(f.store.pending()).toBe(1); // Reconciliation is not ACKed yet.
+  } finally { release.resolve(); reconcile.resolve(); }
+  await server.initialReady.promise;
+  await eventually(() => f.store.pending() === 0);
+  expect(errors).toEqual([]);
+  expect(server.headReady).toBe(true);
+  await client.stop();
+  expect(server.connected).toBe(false);
+  expect(messenger.stopped).toBe(false);
 });
 
 test.each(["Controller is stopped", "Head store admission failed"])("%s before acceptance preserves platform-ACKed ingress for the replacement head", async failure => {
