@@ -149,8 +149,10 @@ Keep these distinctions explicit:
   pending native UI, async/subagent work, owned services, and queued/uncertain inputs
   where authoritative evidence is available. Missing evidence is unknown, not zero.
 - The runtime owns admission, host budgets, persistence, and idle release. Do not
-  duplicate its scheduler, force an attach via a second `--resume` writer, or treat
-  viewer detach as termination. Process/worktree isolation is not a security sandbox.
+  duplicate its scheduler or treat controller disconnect as termination.
+  Same-process native TUI/herdr attachment to managed RPC sessions is unsupported;
+  never substitute log tailing or a second `--resume` writer. Process/worktree
+  isolation is not a security sandbox.
 
 ## 3. Advance authorized work or correct results with one explicit instruction
 

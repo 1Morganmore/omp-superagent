@@ -1,7 +1,7 @@
 /** Local transport only. Native eval/judge/session accounting remain production code. */
-import { createMockModel, type MockModel } from "../../.upstream/omp/packages/ai/src/providers/mock";
-import { Effort } from "../../.upstream/omp/packages/catalog/src/effort";
-import type { ThinkingConfig } from "../../.upstream/omp/packages/catalog/src/types";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export const modelFixtureProvider = "model-selection-native";

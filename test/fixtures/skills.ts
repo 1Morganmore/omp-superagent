@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { buildModel } from "../../.upstream/omp/packages/catalog/src/build";
-import { toolWireSchema } from "../../.upstream/omp/packages/ai/src/utils/schema/wire";
-import { validateToolArguments } from "../../.upstream/omp/packages/ai/src/utils/validation";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgSkills } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
@@ -53,7 +52,7 @@ process.env.OMP_SUPERAGENT_LANE = "native-proof-lane";
 // An SDK inspection session is deliberately not an authorized messenger host.
 // Root startup must reject it; inherited task sessions must not even try.
 delete process.env.OMP_SUPERAGENT_CONFIG;
-delete process.env.OMP_RPC_SOCKET;
+delete process.env.OMP_SUPERAGENT_HOST_SOCKET;
 let networkAttempts = 0;
 const refuseNetwork = () => { networkAttempts++; throw new Error("Native skills fixture forbids network access"); };
 globalThis.fetch = Object.assign(async () => refuseNetwork(), { preconnect: refuseNetwork });

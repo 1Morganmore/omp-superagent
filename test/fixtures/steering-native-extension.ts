@@ -2,7 +2,7 @@
 import { createConnection } from "node:net";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { createMockModel } from "../../.upstream/omp/packages/ai/src/providers/mock";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 export const steeringModel = { provider: "steering-native", id: "local" } as const;

@@ -190,7 +190,7 @@ export async function runNativeUlwProof(options: {
   await head.exited;
   assert.equal((await actualLane.client.getState()).isSettled, true);
   assert.equal((await actualLane.client.getState()).hasOwnedRunningWork, false);
-  await actualLane.client.shutdownHost();
+  await actualLane.request({ type: "shutdown_host" });
   await actualLane.exited;
   for (const sessionFile of [main.sessionFile, lane.sessionFile]) {
     const entries = parseSessionEntries(await fs.readFile(sessionFile, "utf8"));

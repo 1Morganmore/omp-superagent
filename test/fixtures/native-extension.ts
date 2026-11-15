@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { getBundledProviders } from "../../.upstream/omp/packages/catalog/src/models";
+import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 
 const RECORD_TYPE = "omp-superagent-native-test";
 
@@ -8,8 +9,26 @@ export const nativeDisabledProviders = [...new Set([
   ...getBundledProviders(), "ollama", "lm-studio", "llama.cpp", "apple",
 ])];
 
-/** Command-only native RPC fixture. Any accidental network/model activity is observable. */
+/** Offline native RPC fixture; all provider responses and network attempts are observable. */
 export default function nativeFixture(pi: ExtensionAPI): void {
+  let serviceRequested = false;
+  const mock = createMockModel({ provider: "socket-host-smoke", id: "local",
+    handler: context => {
+      const service = context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("[native-service-proof]"));
+      if (service && !serviceRequested) {
+        serviceRequested = true;
+        return { content: [{ type: "toolCall", name: "bash", arguments: {
+          command: "printf 'superagent-service-completed\\n'", name: "sa-host-proof", pty: false,
+        } }] };
+      }
+      return { content: ["Socket host smoke response"] };
+    } });
+  pi.registerProvider("socket-host-smoke", {
+    baseUrl: "mock://socket-host-smoke", apiKey: "offline-native-fixture", api: "socket-host-smoke",
+    models: [{ id: mock.id, name: mock.name, reasoning: mock.reasoning, input: mock.input,
+      cost: mock.cost, contextWindow: mock.contextWindow, maxTokens: mock.maxTokens }],
+    streamSimple: (model, context, options) => mock.stream(model, context, options),
+  });
   let agentStarts = 0;
   let networkAttempts = 0;
   const refuseNetwork = () => {

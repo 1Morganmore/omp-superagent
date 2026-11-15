@@ -10,8 +10,7 @@
     "allowArbitraryExtensions": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "types": ["bun", "assets"],
-    "typeRoots": ["./node_modules/@types", "./.upstream/omp/types"]
+    "types": ["bun"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
 }

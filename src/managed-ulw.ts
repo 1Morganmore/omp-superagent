@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -160,6 +160,188 @@ async function probe(packagePath: string, stage: string, manifest: UlwManifest):
   if (process.env.PI_NATIVES_DIR) env.PI_NATIVES_DIR = process.env.PI_NATIVES_DIR;
   await run([process.execPath, fileURLToPath(new URL("./managed-ulw-probe.ts", import.meta.url)), packagePath],
     home, manifest.probeTimeoutMs, env);
+}
+
+/** Snapshot native discovery in the exact environment the installed CLI will use. */
+export async function managedUlwLaunchExtensions(options: {
+  cwd: string;
+  managedUlwPath: string;
+  extensionPaths: string[];
+  configPath: string;
+  /** Native argv prefix retained verbatim by the caller when it replaces the generated Host args. */
+  commandArgs: string[];
+  /** Exact native OMP argv, including the original command's flags and generated Host args; no executable prefix. */
+  launchArgs: string[];
+  env: Record<string, string | undefined>;
+  bunCommand: string[];
+}): Promise<{ extensionPaths: string[]; noExtensions: boolean }> {
+  if (!options.bunCommand.length) throw new Error("Managed ULW discovery requires the launcher's Bun command");
+  const { env, bunCommand, ...input } = options;
+  const output = await run([...bunCommand, fileURLToPath(import.meta.url), "--launch-extensions", JSON.stringify(input)],
+    options.cwd, 30_000, Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)));
+  const result = output.split("\n").findLast(line => line.startsWith("MANAGED_ULW_LAUNCH "));
+  if (!result) throw new Error("Stock OMP discovery did not return a launch composition");
+  return JSON.parse(result.slice("MANAGED_ULW_LAUNCH ".length)) as { extensionPaths: string[]; noExtensions: boolean };
+}
+
+if (import.meta.main && process.argv[2] === "--launch-extensions") {
+  const input = JSON.parse(process.argv[3]!) as {
+    cwd: string; managedUlwPath: string; extensionPaths: string[]; configPath: string;
+    commandArgs: string[]; launchArgs: string[];
+  };
+  // Match cli.ts: choose the profile before importing pi-utils/env or any
+  // discovery/settings module that can eagerly read the agent directory.
+  const { extractProfileFlags } = await import("@oh-my-pi/pi-coding-agent/cli/profile-bootstrap");
+  const { setProfile, resolveProfileEnv, getProjectDir } = await import("@oh-my-pi/pi-utils/dirs");
+  const bootstrap = extractProfileFlags(input.launchArgs);
+  setProfile(bootstrap.profile ?? resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
+  if (bootstrap.aliasName !== undefined) throw new Error("Managed ULW discovery requires a launch, not --alias installation");
+  const { isNativeShell } = await import("@oh-my-pi/pi-coding-agent/cli/native-shell");
+  if (isNativeShell(bootstrap.argv[0])) throw new Error("Managed ULW discovery requires native OMP launch argv, not a shell command");
+  const { resolveCliArgv } = await import("@oh-my-pi/pi-coding-agent/cli-commands");
+  const resolved = resolveCliArgv(bootstrap.argv);
+  if ("error" in resolved) throw new Error(resolved.error);
+  if (resolved.argv[0] !== "launch") throw new Error("Managed ULW discovery requires native OMP launch argv");
+  const { parseArgs } = await import("@oh-my-pi/pi-coding-agent/cli/args");
+  const parsed = parseArgs(resolved.argv.slice(1));
+  const command = parseArgs(extractProfileFlags(input.commandArgs).argv);
+  if (parsed.trustedExtensions?.length) {
+    throw new Error("Stock OMP --trusted-extension cannot preserve managed ULW package resources");
+  }
+  const { applyStartupCwd } = await import("@oh-my-pi/pi-coding-agent/cli/startup-cwd");
+  await applyStartupCwd(parsed);
+  const cwd = getProjectDir();
+  const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
+  const { discoverSessionExtensionPaths } = await import("@oh-my-pi/pi-coding-agent/sdk");
+  const { discoverExtensionPaths, listPackageExtensionModules } = await import("@oh-my-pi/pi-coding-agent/extensibility/extensions/loader");
+  const { initializeWithSettings } = await import("@oh-my-pi/pi-coding-agent/discovery");
+  const { listOmpExtensionRoots, withOmpExtensionRootScope, setInvocationConfiguredExtensions } = await import("@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots");
+  const { injectPluginDirRoots, preloadPluginRoots, listClaudePluginRoots } = await import("@oh-my-pi/pi-coding-agent/discovery/helpers");
+  const { cfgExtensions } = await import("@oh-my-pi/pi-coding-agent/extensibility/settings");
+  const { findRepoRoot } = await import("@oh-my-pi/pi-coding-agent/capability/fs");
+  const { discoverCustomCommands } = await import("@oh-my-pi/pi-coding-agent/extensibility/custom-commands/loader");
+  const { getAgentDir } = await import("@oh-my-pi/pi-utils");
+  const { homedir } = await import("node:os");
+  if (parsed.pluginDirs?.length) await injectPluginDirRoots(homedir(), parsed.pluginDirs, cwd);
+  else await preloadPluginRoots(homedir(), cwd);
+  const settings = await Settings.loadReadOnly({
+    cwd, agentDir: getAgentDir(), configFiles: parsed.config,
+  });
+  const restore = initializeWithSettings(settings);
+  try {
+    const managed = validateManagedUlwPackage(input.managedUlwPath);
+    const ulwRoot = async (entry: string): Promise<string | undefined> => {
+      let current: string;
+      try { current = await realpath(entry); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+      if (!(await lstat(current)).isDirectory()) current = dirname(current);
+      for (;;) {
+        try {
+          const manifest = JSON.parse(await readFile(join(current, "package.json"), "utf8")) as PackageManifest;
+          return manifest.name === "omp-ulw" ? current : undefined;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        const parent = dirname(current);
+        if (parent === current) return undefined;
+        current = parent;
+      }
+    };
+    const nativeExplicit = [...new Set([...(parsed.extensions ?? []), ...(parsed.hooks ?? [])])];
+    // These argv entries remain in the caller's command. Appending flags cannot
+    // revoke an explicit -e/--hook, even with --no-extensions.
+    const commandExplicit = [...(command.extensions ?? []), ...(command.hooks ?? [])];
+    const commandModules = await listPackageExtensionModules(commandExplicit, cwd, { plugins: false });
+    const commandRoots = await withOmpExtensionRootScope(commandExplicit, "explicit-only", () => listOmpExtensionRoots({
+      cwd, home: homedir(), repoRoot: null, agentDir: getAgentDir(),
+    }));
+    for (const entry of [...commandModules, ...commandRoots]) {
+      const root = await ulwRoot(entry.path);
+      if (root && root !== managed) {
+        throw new Error(`Stock OMP cannot exclude another ULW copy explicitly selected by -e/--hook: ${root}; remove that original launch argument`);
+      }
+    }
+    // --no-extensions scopes OMP packages, not the independent marketplace and
+    // --plugin-dir resource providers. Their roots cannot be removed by -e.
+    for (const plugin of (await listClaudePluginRoots(homedir(), cwd)).roots) {
+      const root = await ulwRoot(plugin.path);
+      if (root && root !== managed) {
+        throw new Error(`Stock OMP cannot exclude another ULW copy's plugin resources: ${root}; remove --plugin-dir or disable that plugin`);
+      }
+    }
+    const mode = parsed.noExtensions ? "explicit-only" : "merge";
+    const original = await withOmpExtensionRootScope(nativeExplicit, mode, () => {
+      setInvocationConfiguredExtensions(cfgExtensions.get(settings), settings.extensionsSourceLevel());
+      return discoverSessionExtensionPaths({
+        additionalExtensionPaths: nativeExplicit, disableExtensionDiscovery: parsed.noExtensions,
+      }, cwd, settings);
+    });
+    const roots = await listOmpExtensionRoots({
+      cwd, home: homedir(), repoRoot: await findRepoRoot(cwd), agentDir: getAgentDir(),
+      extensionRoots: { explicit: nativeExplicit, configured: cfgExtensions.get(settings),
+        configuredLevel: settings.extensionsSourceLevel(), mode },
+    });
+    if (!(await Promise.all(roots.map(root => realpath(root.path)))).includes(managed)) {
+      throw new Error("Native OMP launch argv does not select the managed ULW package root; generated Host flags may be after --");
+    }
+    const retained = [];
+    let conflict = false;
+    for (const entry of original) {
+      const root = await ulwRoot(entry);
+      if (!root || root === managed) retained.push(entry);
+      else conflict = true;
+    }
+    const resourceRoots: string[] = [];
+    for (const root of roots) {
+      const identity = await ulwRoot(root.path);
+      if (!identity || identity === managed) resourceRoots.push(root.path);
+      else conflict = true;
+    }
+    if (!conflict) {
+      // Ordinary native discovery preserves every native surface, including
+      // TypeScript commands, when no other ULW copy needs exclusion.
+      console.log(`MANAGED_ULW_LAUNCH ${JSON.stringify({
+        extensionPaths: [...new Set([...input.extensionPaths, managed])], noExtensions: !!parsed.noExtensions,
+      })}`);
+    } else {
+      const commands = parsed.noExtensions ? [] : (await discoverCustomCommands({ cwd, agentDir: getAgentDir() })).paths;
+      if (commands.length) {
+        throw new Error(`Stock OMP --no-extensions cannot preserve TypeScript custom commands while excluding another ULW copy: `
+          + JSON.stringify(commands.map(command => command.path)));
+      }
+      // File paths preserve the authoritative module selection/order. Directory
+      // roots preserve all sibling capabilities, not just the skill CLI surface.
+      const explicit = [...retained, ...resourceRoots];
+      const actualExplicit = [...(command.extensions ?? []), ...explicit, ...(command.hooks ?? [])];
+      const expected = retained;
+      const actual = await discoverExtensionPaths(actualExplicit, cwd, undefined, { ambient: false });
+      const canonical = async (entries: string[]) => Promise.all(entries.map(entry => realpath(entry)));
+      const expectedFiles = await canonical(expected);
+      const actualFiles = await canonical(actual);
+      if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+        throw new Error(`Stock OMP cannot preserve this extension/resource selection with --no-extensions: `
+          + `package resources would re-enable disabled modules or change hook order. `
+          + `Expected modules ${JSON.stringify(expectedFiles)}; explicit CLI modules ${JSON.stringify(actualFiles)}`);
+      }
+      const actualRoots = await withOmpExtensionRootScope(actualExplicit, "explicit-only", () => listOmpExtensionRoots({
+        cwd, home: homedir(), repoRoot: null, agentDir: getAgentDir(),
+      }));
+      const expectedRoots = await canonical([...new Set(resourceRoots)]);
+      if (JSON.stringify(await canonical(actualRoots.map(root => root.path))) !== JSON.stringify(expectedRoots)) {
+        throw new Error("Stock OMP explicit CLI resource roots differ from the selected native package roots");
+      }
+      for (const root of roots.filter(root => resourceRoots.includes(root.path))) {
+        const actualLevel = actualRoots[expectedRoots.indexOf(await realpath(root.path))]?.level;
+        if (actualLevel !== root.level) {
+          throw new Error(`Stock OMP explicit -e would change ${root.level} resource scope to ${actualLevel} scope: ${root.path}`);
+        }
+      }
+      console.log(`MANAGED_ULW_LAUNCH ${JSON.stringify({ extensionPaths: explicit, noExtensions: true })}`);
+    }
+  } finally { restore(); }
 }
 
 /** Serialized source preparation only. No Gateway, account adapter, or Host starts here. */

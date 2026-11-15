@@ -115,7 +115,7 @@ const presetScenario = process.env.OMP_NATIVE_GATEWAY_PRESETS ?? "create";
 assert(["create", "valid", "failed", "skipped", "interrupted", "recovery"].includes(presetScenario));
 assert.equal(process.env.HOME, path.join(root, "home"));
 const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-assert(Array.isArray(parsed) && parsed.length && parsed.every(value => typeof value === "string" && value), "OMP_TEST_COMMAND must explicitly name the patched native CLI argv");
+assert(Array.isArray(parsed) && parsed.length && parsed.every(value => typeof value === "string" && value), "OMP_TEST_COMMAND must explicitly name the installed native CLI argv");
 const ulwEntrypoint = process.env.OMP_TEST_ULW_EXTENSION ? await fs.realpath(process.env.OMP_TEST_ULW_EXTENSION) : undefined;
 const managedUlwPath = ulwEntrypoint
   ? (await fs.stat(ulwEntrypoint)).isDirectory() ? ulwEntrypoint : path.dirname(ulwEntrypoint)
@@ -146,12 +146,9 @@ await fs.writeFile(path.join(agent, "config.yml"), JSON.stringify(settings), { m
 await fs.writeFile(path.join(agent, "models.yml"), "providers: {}\n", { mode: 0o600 });
 const settingsBytes = new Map(await Promise.all(["config.yml", "models.yml"].map(async name => [name, await fs.readFile(path.join(agent, name))] as const)));
 const recoveryProvider = path.resolve(import.meta.dir, "recovery-provider-extension.ts");
-const nativeCommand = presetScenario === "recovery"
-  ? parsed.flatMap((argument, index) => index === 0 ? [argument, "--preload", recoveryProvider] : [argument])
-  : parsed;
 const config: Config = {
   path: path.join(root, "superagent.json"), stateDir: root, headCwd,
-  command: [...nativeCommand, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
+  command: [...parsed, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
     presetScenario === "recovery" ? recoveryProvider
       : path.resolve(import.meta.dir, ulwEntrypoint ? "native-ulw-provider-extension.ts" : "gateway-provider-extension.ts")],
   maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model,
@@ -242,7 +239,7 @@ function cleanup(): Promise<void> {
         const state = await within(connection.client.getState(), 2_000, "Owned host identity readback timed out");
         if (state.hostPid !== pid || state.sessionFile !== host.sessionFile) return;
         if (!state.isSettled) await within(connection.client.abortAndRestoreQueue(), 3_000, "Owned host abort timed out");
-        await within(connection.client.shutdownHost(), 3_000, "Owned host shutdown timed out");
+        await within(connection.request({ type: "shutdown_host" }), 3_000, "Owned host shutdown timed out");
         await within(connection.exited, 3_000, "Owned host did not exit after shutdown");
         await processExited(pid);
       } catch {
@@ -270,7 +267,8 @@ const terminate = (signal: NodeJS.Signals): void => {
 process.on("SIGTERM", terminate);
 process.on("SIGINT", terminate);
 try {
-  starting = startGateway(config, { messenger, managedUlwPath, onError: error => errors.push(error) });
+  starting = startGateway(config, { messenger, managedUlwPath, onError: error => errors.push(error),
+    ...(presetScenario === "recovery" ? { extensionPath: recoveryProvider } : {}) });
   gateway = await starting;
   starting = undefined;
   interrupted.signal.throwIfAborted();

@@ -52,6 +52,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   let closed = false;
   let startupError: unknown;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopHostReady: (() => void) | undefined;
   let presets: Promise<NativePresetManager> | undefined;
   const requireRuntime = (ctx: ExtensionContext) => {
     if (ctx.agent.kind !== "main") throw new Error("Lane management is restricted to the main superagent head");
@@ -60,7 +61,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   };
   const nativePresets = (ctx: ExtensionContext): Promise<NativePresetManager> => {
     requireRuntime(ctx);
-    return presets ??= Settings.init({ cwd: ctx.cwd }).then(settings => new NativePresetManager(
+    return presets ??= Settings.loadReadOnly({ cwd: ctx.cwd }).then(settings => new NativePresetManager(
       settings,
       async () => {
         const allowed = await requireRuntime(ctx).availableModels();
@@ -233,10 +234,13 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.agent.kind !== "main" || loading || closed) return;
     const configPath = process.env.OMP_SUPERAGENT_CONFIG;
-    if (!configPath || !process.env.OMP_RPC_SOCKET)
-      throw new Error("Start this extension with omp-sa start and its pinned socket-enabled OMP host");
-    // The host's RPC command queue opens only after session_start returns.
-    timer = setTimeout(() => {
+    if (!configPath || !process.env.OMP_SUPERAGENT_HOST_SOCKET)
+      throw new Error("Start this extension with omp-sa start and its owned stock OMP host");
+    // Native startup precedes the private pipe owner's socket readiness.
+    // Activate only after that exact owner has materialized and verified us.
+    stopHostReady = pi.events.on("superagent:host-ready", () => {
+      if (timer || loading || closed) return;
+      timer = setTimeout(() => {
       loading = (async () => {
         const config = await loadConfig(configPath);
         const store = new Store(join(config.stateDir, "coordination.sqlite"));
@@ -270,10 +274,12 @@ export default function superagentExtension(pi: ExtensionAPI): void {
         pi.logger.error(`Superagent startup failed: ${error instanceof Error ? error.message : String(error)}`);
         ctx.ui.setStatus("superagent", "startup failed; see host log");
       });
-    }, 0);
+      }, 0);
+    });
   });
   pi.on("session_shutdown", async () => {
     closed = true;
+    stopHostReady?.();
     if (timer) clearTimeout(timer);
     await loading;
     await runtime?.stop();

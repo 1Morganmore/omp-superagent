@@ -3,7 +3,7 @@ import { watch } from "node:fs";
 import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { createMockModel, type MockResponse } from "../../.upstream/omp/packages/ai/src/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 const provider = "gateway-native";

@@ -1,5 +1,5 @@
 import {
-  accessSync, closeSync, constants, existsSync, fstatSync, linkSync, lstatSync,
+  closeSync, constants, existsSync, fstatSync, linkSync, lstatSync,
   openSync, readFileSync, realpathSync, unlinkSync, writeSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { isatty } from "node:tty";
 import { setImmediate as yieldToSignals } from "node:timers/promises";
 import { credentialEnvNames, hostPaths, parseConfig, type Config } from "./config";
+import { discoverInstalledOmp, inspectInstalledOmp } from "./installed-omp";
 import {
   assertCredentialsUnchanged, readCredentialFile, serializeCredentials, stagePrivateFile,
   validateCredential, writeCredentials,
@@ -117,14 +118,8 @@ function unchanged(path: string, previous: Buffer | undefined): void {
 
 async function newConfig(terminal: Terminal, path: string): Promise<{ config: Config; text: string }> {
   const template = await Bun.file(join(root, "config.example.json")).json() as Record<string, any>;
-  const upstream = await Bun.file(join(root, "upstream", "omp.json")).json() as {
-    checkout: string; runtime: { entry: string };
-  };
-  const nativeEntry = resolve(root, upstream.checkout, upstream.runtime.entry);
-  const command = [realpathSync(process.execPath), "--no-env-file", nativeEntry];
-  accessSync(command[0]!, constants.X_OK);
-  if (!lstatSync(nativeEntry).isFile()) throw new Error("Prepare the pinned native OMP CLI before setup");
-  console.log(`Native command: ${command.map(shellQuote).join(" ")}`);
+  const command = [discoverInstalledOmp()];
+  console.log(`Installed OMP command: ${command.map(shellQuote).join(" ")}`);
   const selected = [...new Set((await terminal.ask("Messengers (comma-separated discord,telegram,slack): "))
     .split(",").map(s => s.trim().toLowerCase()).filter(Boolean))];
   if (!selected.length || selected.some(p => !["discord", "telegram", "slack"].includes(p)))
@@ -188,6 +183,7 @@ export async function setup(configPath: string): Promise<void> {
       ({ config, text } = await newConfig(terminal, path));
     }
     hostPaths(config, "main");
+    await inspectInstalledOmp(config.command, credentialEnvNames(config));
     const values = Object.assign(Object.create(null) as Record<string, string>, previousCredentials?.values);
     let replacing = false;
     for (const name of credentialEnvNames(config)) {
@@ -275,7 +271,7 @@ export async function setup(configPath: string): Promise<void> {
         if (judge.source !== "default") {
           console.log(`The effective judge value is empty or unset in ${judge.source} settings; a hidden lower-layer assignment does not make it effective.`);
         }
-        console.log("In an ordinary native OMP terminal opened in the head workspace, open /models, choose Roles -> Judge, and assign a native judgment model. Use the intended global/project storage scope and review any overriding native config overlay; do not use a messenger-managed session or read-only attach to persist this setting.");
+        console.log("In an ordinary native OMP terminal opened in the head workspace, open /models, choose Roles -> Judge, and assign a native judgment model. Use the intended global/project storage scope and review any overriding native config overlay; do not use a messenger-managed session to persist this setting.");
         console.log("This is configuration-only advice: selector presence does not prove model or authentication availability. Setup did not select a model, open account storage, or call a model/provider.");
       }
     }

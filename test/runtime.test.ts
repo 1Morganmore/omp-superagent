@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { Effort } from "../.upstream/omp/packages/catalog/src/effort";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequest, Inbound, Lane, LaneModel, LanePresetSnapshot, ResolvedLanePreset, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../src/contracts";
 import { physicalRouteKey, routeKey, WORKFLOW_NAMES } from "../src/contracts";
-import { containsMagicKeyword } from "../.upstream/omp/packages/tui/src/prompt/magic-keywords";
+import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { type Config, hostPaths } from "../src/config";
 import type { HostOptions } from "../src/host";
 import { DeliveryError } from "../src/delivery";
@@ -19,6 +19,24 @@ import { Superagent, type RuntimeAdapters, type RuntimeHost, type RuntimeState }
 import { Store } from "../src/store";
 import type { LaneReport } from "../src/lane-report";
 import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "../src/contracts";
+import { headRecoveryEvidence } from "../src/head-recovery";
+
+test("a delayed durable receipt cannot cancel a later native run", () => {
+  const owner = { sessionId: "native-session", sessionFile: "/private/session.jsonl", requestId: "original", cursor: null };
+  const entries = [
+    { id: "start-1", type: "custom", customType: "rpc_agent_start",
+      data: { ...owner, hostPid: 123, runOrdinal: 1 } },
+    { id: "start-2", type: "custom", customType: "rpc_agent_start",
+      data: { ...owner, hostPid: 123, runOrdinal: 2 } },
+    { id: "late-receipt", type: "custom", customType: "rpc_prompt_result",
+      data: { ...owner, hostPid: 123, runOrdinal: 1,
+        frame: { id: "original", status: "aborted", agentInvoked: true } } },
+  ];
+  expect(headRecoveryEvidence(entries, owner)?.outcome).toBeNull();
+  const data = entries[2]!.data;
+  data.runOrdinal = 2;
+  expect(headRecoveryEvidence(entries, owner)?.outcome).toBe("cancelled");
+});
 
 const executionModel: LaneModel = { provider: "fixture", id: "capable" };
 const otherModel: LaneModel = { provider: "fixture", id: "efficient" };

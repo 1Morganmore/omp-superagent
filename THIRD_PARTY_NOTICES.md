@@ -109,7 +109,7 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   [#46](https://github.com/vntrevx/omp-dori/pull/46).
 - Implemented independently using existing SQLite/Gateway contracts, native custom
   journals, tool results, lanes, progress receipts, discord.js/grammY APIs, and the
-  pinned OMP renderer/ExtensionRunner. No Dori code, skills, prompts, tests,
+  OMP renderer/ExtensionRunner. No Dori code, skills, prompts, tests,
   supervisor, separate state registry, or timers were copied; its SUL notices are
   not reinterpreted.
 
@@ -127,6 +127,10 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   dependency was added.
 - Documentation: [grammY API](https://grammy.dev/guide/api),
   [Telegram Bot API](https://core.telegram.org/bots/api).
+- SDK cancellation uses [`abort-controller` 3.0.0](https://github.com/mysticatea/abort-controller),
+  the signal implementation required by grammY's Node API. Its MIT license,
+  Copyright (c) 2017 Toru Nagashima, is retained in
+  `node_modules/abort-controller/LICENSE`; preserve it when redistributing the dependency.
 - `node_modules/grammy/LICENSE` contains this MIT license. Preserve it when
   redistributing the package:
 
@@ -211,7 +215,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   for this project's OMP/Gateway contracts using Bash builtins, Node's standard
   `readline`/dotenv parser, and existing configuration validation. No Python or
   installer code was copied, and Hermes is not a runtime dependency.
-- Scope is Unix terminals and this project's prepared Bun/patched OMP.
+- Scope is Unix terminals, Bun, and a separately installed unmodified OMP.
   Hermes automatic bot creation, login, Gateway service installation/restart,
   and allow-all policies were not adopted.
 
@@ -231,7 +235,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   sudo/system services, or a Windows backend. Installation does not start the bot;
   prepare/doctor/setup do not register it automatically.
 - Assumptions: the current account's macOS GUI login, accessible absolute
-  Bun/repository/config paths, private sibling credentials, and prepared patched
+  Bun/repository/config paths, private sibling credentials, and separately installed
   OMP. Registration is distinct from Gateway readiness and does not establish
   successful reboot or operational-account round-trip verification.
 
@@ -241,7 +245,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   management configuration: `upstream/ulw.json`. Packages are prepared separately
   under `.upstream/ulw/revisions/<revision>/package`; `active.json` identifies the
   selected revision. The inspected snapshot was
-  [`22a8cfe89447a1cd55f2fd004d81e164372738a5`](https://github.com/dbc-hbin/omp-ulw/tree/22a8cfe89447a1cd55f2fd004d81e164372738a5).
+  [`1625e0de2e4807f1cfdac19e6b54578af1329951`](https://github.com/dbc-hbin/omp-ulw/tree/1625e0de2e4807f1cfdac19e6b54578af1329951).
 - This project's MIT license does not grant a license to that separate package or
   override its per-file licenses and attribution. The inspected snapshot has no
   root LICENSE or `package.json` license declaration; no blanket package license
@@ -259,18 +263,28 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   redistributing it. Preserve those files and applicable modification notices;
   the Dori non-copy statements above do not imply that ULW's bundled skills are MIT.
 
-## OMP: upstream source and core patches
+## OMP: installed runtime and published SDK
 
-- Source: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266),
-  `v18.20.0`, revision `c308970263ae13744ea15ab67302e3dac840e266`.
-- Local source: `.upstream/omp`; reproducible patches: `patches/omp`;
-  pin record: `upstream/omp.json`.
-- Dependencies include local `@oh-my-pi/pi-coding-agent` and upstream workspace
-  packages. Local RPC Host, same-Host attach, and lifecycle changes patch upstream
-  source; they are not represented as features of unmodified OMP.
-- Upstream source, its modified patches, and the source artwork identified above
-  retain the following MIT notice from the
-  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/LICENSE):
+- Runtime baseline: [can1357/oh-my-pi v18.20.2](https://github.com/can1357/oh-my-pi/tree/7c49c11aa5bbaf3f418406583096168ad5b8c6dc),
+  revision `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`.
+- The operator installs OMP separately. This repository does not patch, build,
+  or redistribute an OMP executable. CI downloads upstream release binaries and
+  verifies them against the upstream checksum manifest.
+- Published `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-tui`, and `pi-utils`
+  dependencies are pinned in `package.json`; `bun.lock` records resolved packages
+  and integrity data. Public SDK interfaces support this project's managed
+  extensions and transport adapter. Same-process native TUI attach is not claimed.
+- `pi-tui` supplies native thinking-level helpers and the keyword matcher used by
+  tests; no TUI implementation is copied into this project.
+- The live state projection in `src/host-extension.ts` adapts the `get_state`
+  object from [`rpc-mode.ts` at the baseline revision](https://github.com/can1357/oh-my-pi/blob/7c49c11aa5bbaf3f418406583096168ad5b8c6dc/packages/coding-agent/src/modes/rpc/rpc-mode.ts).
+  It reads the actual session through public getters so status remains observable
+  during a serialized command. It conservatively reports unsettled while that
+  command is pending; idle disposal still requires the stock RPC settlement check.
+  The upstream copyright and MIT terms below apply to this adapted projection.
+- The published SDK and the source artwork identified above retain the following
+  MIT notice, also present in the installed package's `LICENSE` and the
+  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/7c49c11aa5bbaf3f418406583096168ad5b8c6dc/LICENSE):
 
 ```text
 MIT License

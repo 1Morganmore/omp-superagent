@@ -3,8 +3,59 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { buildHostArgs, connect, HostConnection, HostStartError, startHost, type HostFrame, type HostOptions } from "../src/host";
+import { HostChannel, HostRequestTimeout, serviceCompletionRecorded } from "../src/host-protocol";
+import { writeStockHostExecutable } from "./fixtures/stock-host";
+
+test("adapter correlation times out without replay and still observes a late original response", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const channel = new HostChannel(input, output);
+  const sent: string[] = [];
+  output.on("data", data => sent.push(String(data)));
+  try {
+    await expect(channel.request({ type: "get_state" }, "stalled-query", 5)).rejects.toBeInstanceOf(HostRequestTimeout);
+    expect(channel.pending.size).toBe(0);
+    const late = Promise.withResolvers<HostFrame>();
+    channel.once("frame", late.resolve);
+    input.write(`${JSON.stringify({ type: "response", id: "stalled-query", command: "get_state", success: true, data: {} })}\n`);
+    expect(await late.promise).toMatchObject({ id: "stalled-query", success: true });
+    expect(sent).toHaveLength(1);
+    const compact = channel.request({ type: "compact" }, "native-compact", 0);
+    expect(channel.pending.get("native-compact")?.timer).toBeUndefined();
+    input.write(`${JSON.stringify({ type: "response", id: "native-compact", command: "compact", success: true, data: {} })}\n`);
+    expect(await compact).toMatchObject({ id: "native-compact", success: true });
+  } finally { channel.destroy(); }
+});
+
+test("adapter emits and reassembles intact public protocol-v2 chunks", async () => {
+  const wire = new PassThrough();
+  const writer = new HostChannel(new PassThrough(), wire, true);
+  const reader = new HostChannel(wire, new PassThrough());
+  const result = Promise.withResolvers<HostFrame>();
+  reader.once("frame", result.resolve);
+  try {
+    writer.encoder.setProtocolVersion(2);
+    const frame = { type: "notice", id: "large-original", data: "x".repeat(MAX_RPC_FRAME_BYTES + 1) };
+    writer.send(frame);
+    expect(await result.promise).toEqual(frame);
+  } finally { writer.destroy(); reader.destroy(); }
+});
+
+test("terminal service disposal needs native completion for the exact generation, not its name", () => {
+  const daemon = { owner: "native-session", id: "service-id", name: "builder", startedAt: 10, restartCount: 0,
+    state: "exited", exitedAt: 20 };
+  const entries = [{ type: "custom_message", customType: "launch-completion", details: { daemons: [{ ...daemon }] } }];
+  expect(serviceCompletionRecorded(daemon, entries)).toBe(true);
+  for (const changed of [{ owner: "foreign" }, { id: "replacement" }, { startedAt: 11 }, { restartCount: 1 },
+    { state: "failed" }, { exitedAt: 21 }]) {
+    expect(serviceCompletionRecorded({ ...daemon, ...changed }, entries)).toBe(false);
+  }
+  expect(serviceCompletionRecorded(daemon, [])).toBe(false);
+  expect(serviceCompletionRecorded({ ...daemon, state: "running" }, entries)).toBe(false);
+});
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -15,6 +66,7 @@ afterEach(async () => {
 async function directory(): Promise<string> {
   const result = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osh-"));
   await fs.chmod(result, 0o700);
+  await fs.writeFile(path.join(result, "extension.ts"), "export default function () {}\n");
   cleanups.push(() => fs.rm(result, { recursive: true, force: true }));
   return result;
 }
@@ -62,7 +114,8 @@ async function fixture(handler?: (frame: HostFrame, peer: net.Socket) => boolean
         if (handler?.(frame, peer)) continue;
         if (frame.type === "extension_ui_response") continue;
         const data = frame.type === "negotiate_protocol" ? { protocolVersion: 2 }
-          : frame.type === "get_state" ? { sessionId: "fixture-session", sessionFile, hostPid: process.pid }
+          : frame.type === "get_state" ? { sessionId: "fixture-session", sessionFile, hostPid: process.pid,
+            adapterOwnerPid: process.pid, adapterProtocol: "owned-stock-stdio-v1" }
           : { message: frame.message };
         send(peer, { type: "response", id: frame.id, command: frame.type, success: true, data });
         if (frame.type === "prompt") {
@@ -229,9 +282,12 @@ test("rejects shared socket directories, permissive sockets, symlinks, and non-s
 
 function options(root: string): HostOptions {
   return {
-    command: [process.execPath, path.join(root, "host.ts")],
+    command: [path.join(root, "host.ts")],
     socketPath: path.join(root, "new.sock"), sessionFile: path.join(root, "session.jsonl"),
-    cwd: root, extensionPath: path.join(root, "extension.ts"), env: {},
+    cwd: root, extensionPath: path.join(root, "extension.ts"), env: {
+      HOME: root, USERPROFILE: root, PI_CODING_AGENT_DIR: path.join(root, "agent"),
+      XDG_CONFIG_HOME: path.join(root, "config"), PATH: process.env.PATH ?? "/usr/bin:/bin",
+    },
     managedUlwPath: path.resolve(import.meta.dir, "fixtures/managed-ulw"),
     logPath: path.join(root, "host.log"), model: "provider/model", subagentConcurrency: 2,
   };
@@ -241,12 +297,13 @@ test("buildHostArgs keeps explicit persistence, native RPC UI, cwd, extension, a
   const root = await directory();
   const launch = options(root);
   expect(buildHostArgs(launch)).toEqual([
-    "--mode", "rpc-ui", "--session-settings", "--rpc-socket", launch.socketPath,
+    "--mode", "rpc-ui",
     "--session", launch.sessionFile, "--cwd", root,
     "-e", path.resolve(import.meta.dir, "..") + path.sep,
     "-e", launch.managedUlwPath!, "-e", launch.extensionPath,
     "-e", path.resolve(import.meta.dir, "../src/board-extension.ts"),
-    "--config", `${launch.socketPath}.config.json`, "--model", "provider/model",
+    "-e", path.resolve(import.meta.dir, "../src/host-extension.ts"),
+    "--config", `${launch.socketPath}.config.json`,
   ]);
   expect(() => buildHostArgs({ ...launch, sessionFile: "" })).toThrow("sessionFile");
   expect(() => buildHostArgs({ ...launch, socketPath: `/${"x".repeat(100)}` })).toThrow("100 bytes");
@@ -260,6 +317,10 @@ test("buildHostArgs keeps explicit persistence, native RPC UI, cwd, extension, a
   const args = buildHostArgs(inherited);
   expect(args.filter(value => value === launch.managedUlwPath)).toHaveLength(1);
   expect(args).not.toContain("/must-not-select-a-parent-host-revision");
+  expect(buildHostArgs(launch, `${launch.socketPath}.config.json`, {
+    extensionPaths: [launch.extensionPath], noExtensions: true,
+  })).toEqual(["--mode", "rpc-ui", "--session", launch.sessionFile, "--cwd", root,
+    "--no-extensions", "-e", launch.extensionPath, "--config", `${launch.socketPath}.config.json`]);
 });
 
 test("startHost probes but never adopts or unlinks an existing live socket", async () => {
@@ -304,32 +365,15 @@ test("startHost launches a detached argv process with exact child environment, i
   const launch = options(root);
   const credentialNames = ["TEST_HOST_DISCORD_TOKEN", "TEST_HOST_TELEGRAM_TOKEN", "TEST_HOST_SLACK_BOT_TOKEN", "TEST_HOST_SLACK_APP_TOKEN"];
   const previous = new Map(credentialNames.map(name => [name, process.env[name]]));
-  launch.env = { TEST_HOST_PROVIDER_AUTH: "preserved-model-auth", TEST_HOST_EXPLICIT: "supplied-environment" };
-  await fs.writeFile(launch.command[1]!, `
+  launch.env = { ...launch.env, TEST_HOST_PROVIDER_AUTH: "preserved-model-auth", TEST_HOST_EXPLICIT: "supplied-environment" };
+  await writeStockHostExecutable(launch.command[0]!, `
 import * as fs from "node:fs";
-import * as net from "node:net";
+import { stockHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/stock-host.ts"))};
 const args = process.argv.slice(2);
 const value = flag => args[args.indexOf(flag) + 1];
-const socketPath = value("--rpc-socket");
 const sessionFile = value("--session");
 fs.writeFileSync(${JSON.stringify(path.join(root, "observed.json"))}, JSON.stringify({ args, config: JSON.parse(fs.readFileSync(value("--config"), "utf8")), cwd: process.cwd(), credentialPresent: ${JSON.stringify(credentialNames)}.map(name => Object.hasOwn(process.env, name)), providerAuth: process.env.TEST_HOST_PROVIDER_AUTH, explicit: process.env.TEST_HOST_EXPLICIT, managedUlwPath: process.env.OMP_SUPERAGENT_MANAGED_ULW_PATH, fixtureUlwPath: process.env.OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH }));
-const server = net.createServer(peer => {
-  peer.setEncoding("utf8");
-  let pending = "";
-  peer.on("data", chunk => {
-    pending += chunk;
-    let newline;
-    while ((newline = pending.indexOf("\\n")) >= 0) {
-      const command = JSON.parse(pending.slice(0, newline));
-      pending = pending.slice(newline + 1);
-      peer.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true, data: { sessionId: "detached-fixture", sessionFile, hostPid: process.pid } }) + "\\n");
-    }
-  });
-  peer.on("error", () => {});
-  peer.write(JSON.stringify({ type: "ready", supportedProtocolVersions: [1] }) + "\\n");
-});
-server.listen(socketPath, () => fs.chmodSync(socketPath, 0o600));
-process.on("SIGTERM", () => server.close(() => process.exit(0)));
+await stockHostFixture({ sessionFile });
 `);
   let pid: number;
   try {
@@ -349,7 +393,8 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   expect(observed.managedUlwPath).toBe(launch.managedUlwPath);
   expect(observed.fixtureUlwPath).toBe(launch.managedUlwPath);
   expect(observed.args.filter((arg: string) => arg === launch.managedUlwPath)).toHaveLength(1);
-  expect(observed.config).toEqual({ task: { maxConcurrency: 2 }, goal: { continuationModes: ["rpc"] } });
+  expect(observed.config).toEqual({ task: { maxConcurrency: 2 }, goal: { continuationModes: ["rpc"] },
+    modelRoles: { default: "provider/model" } });
   expect(observed.cwd).toBe(root);
   expect(observed.args).toContain("rpc-ui");
   expect(observed.args).not.toContain("--auto-approve");
@@ -358,52 +403,41 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   await attached.close();
   process.kill(pid, 0);
   const reattached = await connect(launch.socketPath);
-  await reattached.close();
   process.kill(pid, 0);
+  expect(await reattached.request({ type: "shutdown_host" })).toMatchObject({ success: true });
+  await reattached.exited;
+  expect(JSON.parse(await fs.readFile(`${launch.socketPath}.exit.json`, "utf8"))).toMatchObject({
+    pid, code: 0, signal: null, persisted: true, observationsFlushed: true,
+  });
+  await reattached.close();
 });
 
-test("startHost waits for the new socket chmod before connecting to its unchanged owned endpoint", async () => {
+test("owner waits for native control readiness after chmod on its unchanged endpoint", async () => {
   const root = await directory();
   const launch = options(root);
   const observations = path.join(root, "permissions.json");
-  await fs.writeFile(launch.command[1]!, `
+  await writeStockHostExecutable(launch.command[0]!, `
 import * as fs from "node:fs";
-import * as net from "node:net";
+import { stockHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/stock-host.ts"))};
 const args = process.argv.slice(2);
 const value = flag => args[args.indexOf(flag) + 1];
-const socketPath = value("--rpc-socket");
+const socketPath = process.env.OMP_SUPERAGENT_NATIVE_SOCKET;
 const sessionFile = value("--session");
 let insecureConnections = 0;
-const server = net.createServer(peer => {
+let beforeInode;
+let afterInode;
+await stockHostFixture({ sessionFile, connected: () => {
   if ((fs.lstatSync(socketPath).mode & 0o777) !== 0o600) insecureConnections++;
-  peer.setEncoding("utf8");
-  peer.on("error", () => {});
-  let pending = "";
-  peer.on("data", chunk => {
-    pending += chunk;
-    let end;
-    while ((end = pending.indexOf("\\n")) >= 0) {
-      const command = JSON.parse(pending.slice(0, end));
-      pending = pending.slice(end + 1);
-      peer.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true,
-        data: { sessionId: "permission-readiness-fixture", sessionFile, hostPid: process.pid } }) + "\\n");
-    }
-  });
-  peer.write(JSON.stringify({ type: "ready", supportedProtocolVersions: [1] }) + "\\n");
-});
-server.listen(socketPath, () => {
+  fs.writeFileSync(${JSON.stringify(observations)}, JSON.stringify({
+    insecureConnections, beforeInode, afterInode, pid: process.pid
+  }));
+}, beforeReady: async () => {
   fs.chmodSync(socketPath, 0o644);
-  const before = fs.lstatSync(socketPath);
-  // Real child/socket integration deliberately exercises the platform's
-  // bind-before-chmod window; fake timers cannot control this separate process.
-  setTimeout(() => {
-    fs.chmodSync(socketPath, 0o600);
-    const after = fs.lstatSync(socketPath);
-    fs.writeFileSync(${JSON.stringify(observations)}, JSON.stringify({
-      insecureConnections, beforeInode: before.ino, afterInode: after.ino, pid: process.pid
-    }));
-  }, 250);
-});
+  beforeInode = fs.lstatSync(socketPath).ino;
+  await Bun.sleep(250);
+  fs.chmodSync(socketPath, 0o600);
+  afterInode = fs.lstatSync(socketPath).ino;
+} });
 `);
   const { pid } = await startHost(launch);
   cleanups.push(async () => { try { process.kill(pid, "SIGKILL"); } catch {} });

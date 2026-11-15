@@ -185,9 +185,10 @@ try {
   await fs.mkdir(path.join(root, "agent"), { mode: 0o700 });
   await fs.writeFile(path.join(root, "agent/config.yml"), "{}\n", { mode: 0o600 });
   await fs.writeFile(path.join(root, "agent/models.yml"), "providers: {}\n", { mode: 0o600 });
+  const executable = path.join(root, "omp.ts");
   await fs.writeFile(configPath, JSON.stringify({
     stateDir: root, headCwd: root,
-    command: [process.execPath, "--no-env-file", hostFixture],
+    command: [executable],
     maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model: "autostart-fixture/local",
     discord: { tokenEnv: "GATEWAY_TEST_BOT_TOKEN", ownerId: "2", allowedGuildIds: [], allowedChannelIds: [] },
   }), { mode: 0o600 });
@@ -195,6 +196,8 @@ try {
   const config = await loadConfig(configPath);
   loadCredentials(config);
   // Preserve the CLI's credential-before-native-import boundary.
+  const { writeStockHostExecutable } = await import("./stock-host");
+  await writeStockHostExecutable(executable, `import ${JSON.stringify(hostFixture)};\n`);
   const { startGateway } = await import("../../src/gateway");
   const { gatewayStatus } = await import("../../src/gateway-protocol");
   const absent = await cli("status");
@@ -232,6 +235,10 @@ try {
   const { Store } = await import("../../src/store");
   const request = { requestId: crypto.randomUUID(), inputId: "autostart-restart", ackOutputId: "autostart-restart-ack" };
   const route = { platform: "discord" as const, accountId: "1", authorityId: "2", guildId: null, channelId: "3", threadId: null };
+  const sessionFile = hostPaths(config, "main").sessionFile;
+  const { readSessionHeaderId } = await import("@oh-my-pi/pi-coding-agent/session/session-loader");
+  const sessionId = await readSessionHeaderId(sessionFile);
+  assert(sessionId, "Restart fence requires the actual native session identity");
   const store = new Store(path.join(root, "coordination.sqlite"));
   try {
     store.receive({ id: request.inputId, route, messageId: request.inputId, text: "/restart", receivedAt: Date.now(), attachments: [] },
@@ -240,8 +247,7 @@ try {
     store.queueOutput({ id: request.ackOutputId, sourceId: request.inputId, route, text: "Local restart acknowledgement" });
     store.claimOutput(request.ackOutputId);
     store.finishOutput(request.ackOutputId, "sent", "local");
-    store.setMeta("head:restart-fence", JSON.stringify({ ...request, ownerPid: headPid,
-      sessionId: "gateway-fixture-session", sessionFile: hostPaths(config, "main").sessionFile,
+    store.setMeta("head:restart-fence", JSON.stringify({ ...request, ownerPid: headPid, sessionId, sessionFile,
       state: "accepted", stopBoundary: store.getMeta("gateway:operator-stop") }));
   } finally { store.close(); }
   const refusedRestart = await service.restart(request);

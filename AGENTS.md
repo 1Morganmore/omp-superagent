@@ -2,7 +2,8 @@
 
 Read `DESIGN.md` before implementing behavior. It is the current architecture,
 not a claim that every feature is verified. Discord, Telegram, and Slack transport implementation lives
-in `src/`; OMP core changes are carried as pinned patches under `patches/omp`.
+in `src/`. Use a separately installed, unmodified OMP executable and its public
+extension/SDK interfaces; do not reintroduce core patches or an OMP source build.
 Read README verification limits before claiming production compatibility.
 
 ## Reuse before writing

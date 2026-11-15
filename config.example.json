@@ -1,8 +1,5 @@
 {
-  "command": [
-    "/absolute/path/to/bun",
-    "/absolute/path/to/omp-superagent/.upstream/omp/packages/coding-agent/src/cli.ts"
-  ],
+  "command": ["omp"],
   "stateDir": "/Users/REPLACE_ME/.omp-sa",
   "headCwd": "/absolute/path/to/workspace",
   "maxHosts": 4,

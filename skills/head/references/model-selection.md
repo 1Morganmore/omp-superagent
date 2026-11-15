@@ -224,13 +224,16 @@ the new exact snapshot. Queued intent is not proof of a completed switch. On an
 uncertain/failed change inspect its stored/native evidence rather than blindly
 retrying or claiming success; this is distinct from a judge consultation receipt.
 
-Managed hosts and their TUI attach replicas, including the head, use native
-`--session-settings`/`Settings.overlay` to keep ordinary startup/RPC/TUI
-model/default/fallback changes private in memory. `--model-preset` startup and RPC
-`set_model_preset` use the actual native preset helper on that overlay, not a
-separate engine; session model changes still persist through native transcript
-events. The dedicated first-setup creation above is the only intended persistent
-preset write. Existing authentication and judge settings are read normally, and the
+Managed hosts, including the head, use a private model-settings overlay. The
+injected managed extension applies the actual AgentSession's native settings and
+preset helpers and requires real native readback of session scope and model
+identity; removed CLI flags are not part of this contract. Ordinary model/default/
+fallback changes must not mutate global settings unless explicitly authorized.
+Session model changes still persist through native transcript events. The
+dedicated first-setup creation above is the only intended persistent preset write.
+Same-process native TUI/herdr attachment to managed RPC sessions is unsupported;
+do not substitute log tailing or a second `--resume` writer.
+Existing authentication and judge settings are read normally, and the
 user's auth database retains normal credential refresh. This is a guarantee about
 model/config writes, not that every file under OMP stays byte-identical. Do not
 rewrite credential setup, create shadow credentials, or persist global `modelRoles`

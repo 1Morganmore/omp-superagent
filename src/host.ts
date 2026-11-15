@@ -9,16 +9,12 @@ import {
   RpcClient,
   type RpcAgentProcess,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import type {
-  RpcCommand,
-  RpcExtensionUIResponse,
-  RpcResponse,
-  RpcSessionState,
-} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { isValidModelPresetName } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { RPC_GOAL_CONTINUATION_MODE } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
+import { HostChannel, type HostResponse, type HostState } from "./host-protocol";
+import { inspectInstalledOmp, resolveOmpCommand } from "./installed-omp";
 import type { DialogResponse, LanePresetSnapshot } from "./contracts";
-import { activeManagedUlw, MANAGED_ULW_ENV, MANAGED_ULW_FIXTURE_ENV, MANAGED_ULW_FIXTURE_ROOT_ENV, validateManagedUlwPackage } from "./managed-ulw";
+import { activeManagedUlw, managedUlwLaunchExtensions, MANAGED_ULW_ENV, MANAGED_ULW_FIXTURE_ENV, MANAGED_ULW_FIXTURE_ROOT_ENV, validateManagedUlwPackage } from "./managed-ulw";
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const START_TIMEOUT_MS = 30_000;
@@ -136,22 +132,24 @@ class SocketProcess implements RpcAgentProcess {
   }
 }
 
+class AdapterClient extends RpcClient {
+  override async getState(): Promise<HostState> {
+    return await super.getState() as HostState;
+  }
+}
+
 export class HostConnection {
-  readonly client: RpcClient;
+  readonly client: AdapterClient;
   readonly exited: Promise<void>;
   readonly #listeners = new Set<(frame: HostFrame) => void>();
-  readonly #subscriptions: Array<() => void>;
+  readonly #channel: HostChannel;
   #close: Promise<void> | undefined;
 
   private constructor(transport: SocketProcess) {
     this.exited = transport.exited.then(() => {});
-    this.client = new RpcClient({ spawn: () => transport });
-    this.#subscriptions = [
-      this.client.onSessionEvent(frame => this.#emit(frame)),
-      this.client.onExtensionUIRequest(frame => this.#emit(frame)),
-      this.client.onPromptResult(frame => this.#emit(frame)),
-      this.client.onSessionSettled(() => this.#emit({ type: "session_settled" })),
-    ];
+    this.#channel = new HostChannel(transport.socket, transport.socket);
+    this.#channel.on("frame", frame => this.#emit(frame));
+    this.client = new AdapterClient({ spawn: () => transport });
   }
 
   static async connect(socketPath: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<HostConnection> {
@@ -170,8 +168,10 @@ export class HostConnection {
       const state = await connection.client.getState();
       if (typeof state.sessionId !== "string" || !state.sessionId ||
           typeof state.sessionFile !== "string" || !path.isAbsolute(state.sessionFile) ||
-          !Number.isSafeInteger(state.hostPid) || state.hostPid! < 1) {
-        throw new Error("RPC socket did not identify a persistent OMP session");
+          !Number.isSafeInteger(state.hostPid) || state.hostPid! < 1 ||
+          state.adapterProtocol !== "owned-stock-stdio-v1" || !Number.isSafeInteger(state.adapterOwnerPid)
+          || state.adapterOwnerPid < 1) {
+        throw new Error("Endpoint did not identify an owned stock-stdio adapter and persistent OMP session");
       }
       return connection;
     } catch (error) {
@@ -182,21 +182,20 @@ export class HostConnection {
     }
   }
 
-  /** Raw response envelope, like RpcClient.request. No reconnect or prompt replay. */
-  request(command: Record<string, unknown>, id?: string): Promise<RpcResponse> {
+  /** Private adapter correlation. Stock RpcClient deliberately has no generic request API. */
+  request(command: Record<string, unknown>, id?: string): Promise<HostResponse> {
     if (typeof command.type !== "string" || !command.type) throw new Error("RPC command requires a type");
     if (Object.hasOwn(command, "id")) throw new Error("Pass the persisted request id as the second argument");
-    return this.client.request(command as RpcCommand, {
-      id,
-      // Native compaction owns its cancellation/deadline. Keep its correlated
-      // result alive until completion, explicit abort, or transport loss.
-      ...(command.type === "compact" ? { timeoutMs: 0 } : {}),
+    return this.#channel.request(command, id, command.type === "compact" ? 0 : 30_000).then(response => {
+      if (response.type !== "response" || response.command !== command.type || typeof response.success !== "boolean"
+        || !response.success && typeof response.error !== "string") throw new Error("Invalid owned Host response envelope");
+      return response as HostResponse;
     });
   }
 
   uiResponse(id: string, response: DialogResponse): void {
     if (!id) throw new Error("UI response requires its original request id");
-    this.client.respondToUI({ ...response, type: "extension_ui_response", id } as RpcExtensionUIResponse);
+    this.#channel.send({ ...response, type: "extension_ui_response", id });
   }
 
   onFrame(listener: (frame: HostFrame) => void): () => void {
@@ -211,7 +210,7 @@ export class HostConnection {
   close(): Promise<void> {
     if (!this.#close) {
       this.#close = this.client.stop().finally(() => {
-        for (const unsubscribe of this.#subscriptions) unsubscribe();
+        this.#channel.removeAllListeners();
         this.#listeners.clear();
       });
     }
@@ -223,7 +222,8 @@ export function connect(socketPath: string): Promise<HostConnection> {
   return HostConnection.connect(socketPath);
 }
 
-export function buildHostArgs(options: HostOptions, configPath = `${options.socketPath}.config.json`): string[] {
+export function buildHostArgs(options: HostOptions, configPath = `${options.socketPath}.config.json`,
+  composition?: { extensionPaths: string[]; noExtensions: boolean }): string[] {
   assertSocketPath(options.socketPath);
   for (const [name, value] of Object.entries({
     sessionFile: options.sessionFile, cwd: options.cwd, extensionPath: options.extensionPath,
@@ -240,18 +240,17 @@ export function buildHostArgs(options: HostOptions, configPath = `${options.sock
   if (options.modelPreset && !isValidModelPresetName(options.modelPreset.name))
     throw new Error("A native model preset must have a valid name");
   const managedUlwPath = selectManagedUlw(options);
+  const extensions = composition?.extensionPaths ?? [
+    fileURLToPath(new URL("../", import.meta.url)), managedUlwPath, options.extensionPath,
+    fileURLToPath(new URL("./board-extension.ts", import.meta.url)),
+    fileURLToPath(new URL("./host-extension.ts", import.meta.url)),
+  ];
   return [
-    "--mode", "rpc-ui", "--session-settings", "--rpc-socket", options.socketPath,
+    "--mode", "rpc-ui",
     "--session", options.sessionFile, "--cwd", options.cwd,
-    // A file entrypoint has no native sibling-resource discovery. The explicit
-    // package root adds skills without replacing any user/project settings.
-    "-e", fileURLToPath(new URL("../", import.meta.url)),
-    "-e", managedUlwPath,
-    "-e", options.extensionPath,
-    "-e", fileURLToPath(new URL("./board-extension.ts", import.meta.url)),
+    ...(composition?.noExtensions ? ["--no-extensions"] : []),
+    ...extensions.flatMap(extension => ["-e", extension]),
     "--config", configPath,
-    ...(options.model ? ["--model", options.model] : []),
-    ...(options.modelPreset ? ["--model-preset", options.modelPreset.name] : []),
   ];
 }
 
@@ -276,7 +275,12 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
   const managedUlwPath = selectManagedUlw(options);
   const fixture = options.managedUlwPath ?? options.env[MANAGED_ULW_FIXTURE_ENV];
   const fixtureRoot = options.managedUlwRoot ?? options.env[MANAGED_ULW_FIXTURE_ROOT_ENV];
-  options = { ...options, managedUlwPath, env: { ...options.env, [MANAGED_ULW_ENV]: managedUlwPath,
+  const bun = options.env.OMP_SUPERAGENT_BUN ?? (path.basename(process.execPath) === "bun" ? process.execPath
+    : Bun.which("bun", { PATH: options.env.PATH ?? process.env.PATH }));
+  if (!bun || !path.isAbsolute(bun)) throw new Error("Managed Host launch requires an explicit installed Bun executable");
+  options = { ...options, command: resolveOmpCommand(options.command, options.env.PATH ?? ""), managedUlwPath,
+    env: { ...options.env, [MANAGED_ULW_ENV]: managedUlwPath,
+    OMP_SUPERAGENT_BUN: bun,
     ...(fixture ? { [MANAGED_ULW_FIXTURE_ENV]: fixture } : {}),
     ...(fixtureRoot ? { [MANAGED_ULW_FIXTURE_ROOT_ENV]: fixtureRoot } : {}) } };
   buildHostArgs(options);
@@ -292,39 +296,55 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
       throw new Error(`RPC socket already hosts session ${state.sessionId} at ${state.sessionFile}; explicit adoption required`);
     } finally { await connection.close(); }
   }
+  await inspectInstalledOmp(options.command, [], options.env);
 
   const launchDirectory = await fs.mkdtemp(path.join(path.dirname(options.socketPath), ".launch-"));
   const configPath = path.join(launchDirectory, "config.json");
   let child: ChildProcess | undefined;
   let log: fs.FileHandle | undefined;
   let failure: Error | undefined;
+  let cleanup: Promise<void> | undefined;
+  const cleanLaunch = () => cleanup ??= fs.rm(launchDirectory, { recursive: true });
   try {
+    const initialSettings = options.modelPreset?.preset ?? options.modelSettings;
     await fs.writeFile(configPath, JSON.stringify({
       task: { maxConcurrency: options.subagentConcurrency },
       goal: { continuationModes: [RPC_GOAL_CONTINUATION_MODE] },
       ...(options.modelPreset ? { modelPresets: { [options.modelPreset.name]: options.modelPreset.preset } } : {}),
-      ...(options.modelSettings ? {
+      ...(initialSettings ? {
         modelRoles: {
           ...Object.fromEntries((options.clearedModelRoles ?? []).map(role => [role, null])),
-          ...options.modelSettings.modelRoles,
+          ...initialSettings.modelRoles,
         },
-        ...(options.modelSettings.defaultThinkingLevel !== undefined
-          ? { defaultThinkingLevel: options.modelSettings.defaultThinkingLevel } : {}),
-      } : {}),
+        ...(initialSettings.defaultThinkingLevel !== undefined
+          ? { defaultThinkingLevel: initialSettings.defaultThinkingLevel } : {}),
+      } : options.model ? { modelRoles: { default: options.model } } : {}),
     }), { flag: "wx", mode: 0o600 });
     log = await fs.open(options.logPath, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
     const stat = await log.stat();
     if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) {
       throw new Error("Host log must be a private regular file owned by this user");
     }
-    child = spawn(options.command[0]!, [...options.command.slice(1), ...buildHostArgs(options, configPath)], {
+    const manifestPath = path.join(launchDirectory, "owner.json");
+    const extensionPaths = [fileURLToPath(new URL("../", import.meta.url)), managedUlwPath, options.extensionPath,
+      fileURLToPath(new URL("./board-extension.ts", import.meta.url)),
+      fileURLToPath(new URL("./host-extension.ts", import.meta.url))];
+    const composition = await managedUlwLaunchExtensions({ cwd: options.cwd, managedUlwPath,
+      extensionPaths, configPath, commandArgs: options.command.slice(1),
+      launchArgs: [...options.command.slice(1), ...buildHostArgs(options, configPath)],
+      env: options.env, bunCommand: [bun, "--no-env-file"] });
+    const { env: _inheritedEnvironment, ...launchOptions } = options;
+    await fs.writeFile(manifestPath, JSON.stringify({ options: launchOptions, args: buildHostArgs(options, configPath, composition), configPath,
+      nativeSocket: path.join(path.dirname(options.socketPath), `.n-${crypto.randomUUID().slice(0, 8)}.sock`) }),
+    { flag: "wx", mode: 0o600 });
+    child = spawn(bun, ["--no-env-file", fileURLToPath(new URL("./host-owner.ts", import.meta.url)), manifestPath], {
       cwd: options.cwd, env: options.env,
       detached: true, stdio: ["ignore", log.fd, log.fd], shell: false,
     });
     child.once("error", error => { failure = error; });
     child.once("exit", (code, signal) => {
       failure = new Error(`OMP host exited during startup (${signal ?? code}); see ${options.logPath}`);
-      void fs.rm(launchDirectory, { recursive: true }).catch(() => {});
+      void cleanLaunch().catch(() => {});
     });
     child.unref();
     await log.close();
@@ -362,22 +382,18 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
         if (connectedSocket.dev !== startingSocket.dev || connectedSocket.ino !== startingSocket.ino) {
           throw new Error("Launched RPC socket identity changed while connecting");
         }
-        const response = await connection.client.request({ type: "get_state" }, {
-          timeoutMs: Math.max(1, deadline - Date.now()),
-        });
+        const response = await connection.request({ type: "get_state" });
         if (!response.success || response.command !== "get_state") {
           throw new Error("Launched RPC host did not confirm its session identity");
         }
-        const state: RpcSessionState = response.data;
+        const state = response.data as HostState;
+        if (state.adapterOwnerPid !== child.pid) throw new Error("Endpoint does not belong to the launched pipe owner");
         if (path.resolve(state.sessionFile!) !== path.resolve(options.sessionFile)) {
           throw new Error("Launched RPC host identified a different session file");
         }
-        if (state.hostPid !== child.pid) {
-          throw new Error("RPC endpoint does not belong to the launched host process");
-        }
         if (failure) throw failure;
-        if (!child.pid) throw new Error("OMP host did not receive a process id");
-        return { pid: child.pid };
+        if (!Number.isSafeInteger(state.hostPid) || state.hostPid < 1) throw new Error("OMP host did not receive a process id");
+        return { pid: state.hostPid };
       } finally { await connection.close(); }
     }
     throw new Error(`OMP host startup timed out; see ${options.logPath}`);
@@ -391,7 +407,7 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
     }
     // Never unlink the socket: it may still belong to an active or racing host.
     if (!child?.pid || child.exitCode !== null || child.signalCode !== null) {
-      await fs.rm(launchDirectory, { recursive: true });
+      await cleanLaunch();
     }
     throw error;
   } finally { await log?.close(); }

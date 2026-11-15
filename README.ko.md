@@ -17,8 +17,8 @@ Discord·Telegram·Slack을 [oh-my-pi](https://github.com/can1357/oh-my-pi)의 �
 
 **0.1.0은 Bun 소스 배포판입니다.**
 [GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.0)의 소스 tarball을 받아 아래 준비 절차를
-따르세요. npm 패키지나 독립 실행 바이너리는 제공하지 않습니다. 압축 파일에는 빌드된 OMP
-네이티브 모듈이나 관리형 의존성이 포함되지 않습니다.
+따르세요. npm 패키지나 독립 실행 바이너리는 제공하지 않습니다. OMP는 미리 설치되어 있어야
+하며 이 프로젝트가 패치하거나 빌드하지 않습니다. 관리형 의존성은 별도로 설치합니다.
 
 ## 차별점
 
@@ -29,7 +29,7 @@ Discord·Telegram·Slack을 [oh-my-pi](https://github.com/can1357/oh-my-pi)의 �
 - **레인별 native 모델·프리셋:** 헤드가 native judge의 자문을 받아 선택하며, 다른 레인이나 전역 설정을 바꾸지 않습니다.
 - **연결과 세션 수명의 분리:** 지속 실행되는 Gateway가 메신저 연결과 수신·조율 장부를 맡고, OMP 세션이 대화 맥락을 맡습니다.
 - **관리 세션만 쓰는 공유 게시판:** 같은 인스턴스에 등록된 헤드·레인이 정보를 공유하며, 명령이나 승인 경로로 쓰지 않습니다.
-- **기존 native TUI:** 같은 Host에 붙어 진행을 봅니다. herdr는 선택 사항이며 별도 대시보드를 요구하지 않습니다.
+- **순정 OMP 사용:** 관리형 익스텐션과 공개 API로 기존 세션·도구·승인·인증을 재사용하며 코어 fork를 유지하지 않습니다.
 
 ## 구조
 
@@ -42,23 +42,25 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 
 ## 빠른 시작
 
-Git, **Bun >= 1.4.4**, 로컬 Unix socket 지원 환경, Rust/Cargo와 플랫폼 네이티브 빌드 도구가 필요합니다.
-Windows는 지원하지 않습니다. 이 프로젝트는 **고정된 OMP 소스에 패치를 적용해 빌드**하며,
-npm 전역 설치 OMP를 사용하는 절차가 아닙니다.
+Git, **Bun >= 1.4.4**, 미리 설치된 **OMP >= 18.20.2, < 19**, 로컬 Unix socket 지원 환경이 필요합니다.
+검증 기준 OMP는 **18.20.2**이며 Windows는 지원하지 않습니다.
 
 ### 1. 소스 준비
 
 저장소 루트에서 순서대로 실행합니다.
 
 ```sh
-bun scripts/prepare-omp.ts
-bun --cwd=.upstream/omp run build:native
+omp --version
 bun install --frozen-lockfile
 ```
 
-prepare 스크립트는 고정 OMP를 checkout하고 패치합니다. 네이티브 모듈을 먼저 빌드한 뒤
-루트 의존성을 설치하면 postinstall이 필수 관리형 `omp-ulw`를 준비합니다.
-소스와 의존성을 받는 데 네트워크가 필요하며, 봇을 시작하거나 전역 OMP를 교체하지 않습니다.
+설치 시 별도로 설치된 OMP를 먼저 확인하고, postinstall이 필수 관리형 `omp-ulw`를 준비합니다.
+OMP가 없다면 [공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)에 따라 먼저 설치하세요.
+공개 SDK 패키지와 플랫폼 네이티브 의존성은 패키지 레지스트리에서 받으며, Rust 도구·OMP 소스
+checkout·코어 패치·네이티브 빌드가 필요하지 않습니다. 의존성 설치에는 네트워크가 필요하지만,
+봇을 시작하거나 설치된 OMP를 교체하지는 않습니다.
+`command`에는 설치된 OMP 실행 파일과 그 뒤에 네이티브 CLI 옵션을 지정합니다.
+Bun 등 런타임으로 OMP 소스를 실행하는 래퍼는 지원하지 않습니다.
 
 CLI 명령어는 **`omp-sa`**이며 프로젝트·패키지 이름은 `omp-superagent`로 유지합니다.
 준비한 저장소에서 `bun link`로 등록하고 Bun의 전역 bin 디렉터리를 `PATH`에 포함합니다.
@@ -109,11 +111,8 @@ bun --no-env-file src/cli.ts start --config config.local.json
 `setup`과 `doctor`는 계속 봇·모델을 실행하지 않습니다.
 
 `start`는 설정에 남긴 **모든 플랫폼**을 활성화하고, detached Gateway와 헤드를 시작합니다.
-같은 Host를 native TUI로 읽기 전용 관찰하려면 다음을 실행합니다.
-
-```sh
-bun --no-env-file src/cli.ts attach main --config config.local.json --read-only
-```
+이 패치 없는 배포판은 관리형 RPC Host에 native TUI/herdr로 접속하는 기능을 제공하지 않습니다.
+관리 세션은 메신저 명령과 `omp-sa status`로 확인하고 제어합니다.
 
 상태 조회·종료·macOS 로그인 후 자동 시작·복구는 [운영 가이드](docs/OPERATIONS.md)를
 참고하세요. 로그인 자동 시작은 한 번 실행하는 방식이며 crash 자동 재시작은 아닙니다.
@@ -147,7 +146,7 @@ Linux 서비스 설치는 제공하지 않습니다.
 
 ## 개발
 
-동일한 소스 준비를 마친 뒤 실행합니다.
+설치를 마친 뒤 실행합니다.
 
 ```sh
 bun run check

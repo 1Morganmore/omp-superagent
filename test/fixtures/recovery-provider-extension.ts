@@ -4,19 +4,13 @@ import { appendFileSync, existsSync, watch } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { createMockModel } from "../../.upstream/omp/packages/ai/src/providers/mock";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { HostConnection } from "../../src/host";
 import superagentExtension from "../../src/extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
-// Preload and the real manager must share HostConnection's module identity.
+// This entrypoint imports the real manager so both share HostConnection's module identity.
 const manager = fileURLToPath(new URL("../../src/extension.ts", import.meta.url));
-if (process.env.OMP_SUPERAGENT_ROLE === "head") {
-  for (let index = 1; index < process.argv.length; index++) {
-    if (process.argv[index - 1] === "-e" && process.argv[index] === manager)
-      process.argv[index] = fileURLToPath(import.meta.url);
-  }
-}
 
 export default function recoveryProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_NATIVE_GATEWAY_ROOT;

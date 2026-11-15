@@ -1,6 +1,7 @@
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Platform, Route } from "./contracts";
+import { resolveOmpCommand } from "./installed-omp";
 
 export interface DiscordConfig {
   tokenEnv: string;
@@ -131,10 +132,12 @@ export function parseConfig(value: unknown, path: string): Config {
   const pathValue = (v: unknown, key: string) => resolve(base, text(v, key));
   if (!Array.isArray(raw.command) || !raw.command.length ||
       !raw.command.every(v => typeof v === "string" && v.length > 0))
-    throw new Error("command must be an argv array for the patched OMP executable");
+    throw new Error("command must be an argv array for an installed stock OMP executable");
+  if (raw.command.some(v => /^(?:--session-settings|--rpc-socket|--model-preset)(?:=|$)/.test(v)) || raw.command[1] === "attach")
+    throw new Error("command contains unsupported patched OMP arguments; configure an installed stock OMP executable");
   const headCwd = realpathSync(pathValue(raw.headCwd, "headCwd"));
   if (!lstatSync(headCwd).isDirectory()) throw new Error("headCwd must be a directory");
-  const command = raw.command as string[];
+  const command = resolveOmpCommand(raw.command as string[]);
   const maxHosts = integer(raw.maxHosts, "maxHosts", 2);
   const maxSubagents = integer(raw.maxSubagents, "maxSubagents", maxHosts);
   return {

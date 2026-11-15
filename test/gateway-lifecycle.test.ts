@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { appendFile, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostPaths, loadConfig } from "../src/config";
@@ -14,6 +14,15 @@ import { connect } from "../src/host";
 import { main } from "../src/cli";
 import { Store } from "../src/store";
 import type { ManagedUlwStatus } from "../src/managed-ulw";
+import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
+import { writeStockHostExecutable } from "./fixtures/stock-host";
+
+function fixtureSessionId(root: string): string {
+  const header = parseSessionEntries(readFileSync(join(root, "sessions", "main", "session.jsonl"), "utf8"))
+    .find(entry => entry.type === "session");
+  if (!header) throw new Error("Actual native session header is missing");
+  return header.id;
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -30,8 +39,10 @@ async function fixture(updateManagedUlw?: () => Promise<ManagedUlwStatus>, optio
   await chmod(root, 0o700);
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const path = join(root, "config.json");
+  const executable = join(root, "omp.ts");
+  await writeStockHostExecutable(executable, `import ${JSON.stringify(fileURLToPath(new URL("./fixtures/gateway-host.ts", import.meta.url)))};\n`);
   await writeFile(path, JSON.stringify({ stateDir: root, headCwd: root, maxHosts: 2, maxSubagents: 4, idleMs: 1000,
-    command: [process.execPath, fileURLToPath(new URL("./fixtures/gateway-host.ts", import.meta.url))],
+    command: [executable],
     model: "provider/initial-model", discord: { tokenEnv: "GATEWAY_TEST_BOT_TOKEN", ownerId: "2", allowedGuildIds: [], allowedChannelIds: [] } }));
   await writeFile(`${path}.env`, "GATEWAY_TEST_BOT_TOKEN=isolated-test-secret\n", { mode: 0o600 });
   const config = await loadConfig(path);
@@ -64,7 +75,7 @@ async function fixture(updateManagedUlw?: () => Promise<ManagedUlwStatus>, optio
     }
   });
   await until(() => service.status().head.ready);
-  expect(service.status().head.initialization).toMatchObject({ sessionId: "gateway-fixture-session", state: "complete" });
+  expect(service.status().head.initialization).toMatchObject({ sessionId: fixtureSessionId(root), state: "complete" });
   return { root, config, service, get stopped() { return stopped; },
     async emit(id: string) {
       const input: Inbound = { id, route, messageId: id, text: id, receivedAt: Date.now(), attachments: [] };
@@ -98,11 +109,12 @@ test("Gateway owns one credential-free native head; busy CLI stop refuses, expli
   const launches = (await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
   expect(launches).toHaveLength(1);
   expect(launches[0].credentialPresent).toBe(false);
-  expect(launches[0].args).toContain("--session-settings");
-  expect(launches[0].args).toContain("provider/initial-model");
+  expect(launches[0].args).not.toContain("--session-settings");
+  expect(launches[0].args).not.toContain("--rpc-socket");
+  expect(launches[0].config.modelRoles.default).toBe("provider/initial-model");
   const pid = f.service.status().head.pid;
   await writeFile(join(f.root, "busy"), "busy");
-  await expect(main(["stop", "main", "--config", f.config.path])).rejects.toThrow("Host is busy");
+  await expect(main(["stop", "main", "--config", f.config.path])).rejects.toThrow("session_busy");
   expect(f.service.status().gateway.stopping).toBe(false);
   expect(f.service.status().head.pid).toBe(pid);
   expect(f.stopped).toBe(false);
@@ -119,8 +131,8 @@ test("confirmed-dead owned head restarts, offline input stays durable, and exist
   const coordination = new Store(join(f.root, "coordination.sqlite"));
   const snapshot = { modelRoles: { default: "provider/preset-model", smol: "provider/small-model" }, defaultThinkingLevel: "low" };
   try {
-    coordination.setMeta("main:sessionId", "gateway-fixture-session");
-    coordination.setMeta("head:model-settings:gateway-fixture-session", JSON.stringify({ settings: snapshot, clearedRoles: ["slow"] }));
+    coordination.setMeta("main:sessionId", fixtureSessionId(f.root));
+    coordination.setMeta(`head:model-settings:${fixtureSessionId(f.root)}`, JSON.stringify({ settings: snapshot, clearedRoles: ["slow"] }));
     coordination.setMeta("head:model-settings:unrelated-session", JSON.stringify({
       settings: { modelRoles: { default: "provider/wrong-session" } }, clearedRoles: [],
     }));
@@ -154,7 +166,7 @@ function seedRestart(root: string, pid: number, id = crypto.randomUUID()): Gatew
     store.claimOutput(request.ackOutputId);
     store.finishOutput(request.ackOutputId, "sent", "remote-ack");
     store.setMeta("head:restart-fence", JSON.stringify({ ...request, ownerPid: pid,
-      sessionId: "gateway-fixture-session", sessionFile: join(root, "sessions", "main", "session.jsonl"), state: "accepted",
+      sessionId: fixtureSessionId(root), sessionFile: join(root, "sessions", "main", "session.jsonl"), state: "accepted",
       stopBoundary: store.getMeta("gateway:operator-stop") }));
   } finally { store.close(); }
   return request;
@@ -210,8 +222,9 @@ test("a refused busy CLI stop still supersedes restart intent captured before li
   f.service.runRestart(request.requestId);
   expect(f.service.status().head.pid).toBe(pid);
   expect(processAlive(pid)).toBe(true);
-  await until(() => existsSync(join(f.root, "shutdowns.jsonl"))); // Only the failed explicit stop was attempted.
-  expect((await readFile(join(f.root, "shutdowns.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
+  // The pipe owner rejects busy stop before native disposal; neither that
+  // refusal nor the superseded restart may reach the native shutdown callback.
+  expect(existsSync(join(f.root, "shutdowns.jsonl"))).toBe(false);
 });
 
 test("duplicate accepted restart cannot adopt the old endpoint and explicit stop cancels successor authority", async () => {
@@ -313,8 +326,10 @@ test("detached restart replaces both processes, preserves native session/setting
   await chmod(root, 0o700);
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const configPath = join(root, "config.json");
+  const executable = join(root, "omp.ts");
+  await writeStockHostExecutable(executable, `import ${JSON.stringify(fileURLToPath(new URL("./fixtures/gateway-host.ts", import.meta.url)))};\n`);
   await writeFile(configPath, JSON.stringify({ stateDir: root, headCwd: root, maxHosts: 2, maxSubagents: 4, idleMs: 1000,
-    command: [process.execPath, fileURLToPath(new URL("./fixtures/gateway-host.ts", import.meta.url))],
+    command: [executable],
     model: "provider/initial-model", discord: { tokenEnv: "GATEWAY_TEST_BOT_TOKEN", ownerId: "2", allowedGuildIds: [], allowedChannelIds: [] } }));
   await writeFile(`${configPath}.env`, "GATEWAY_TEST_BOT_TOKEN=isolated-test-secret\n", { mode: 0o600 });
   const config = await loadConfig(configPath);
@@ -338,30 +353,27 @@ test("detached restart replaces both processes, preserves native session/setting
   const request = seedRestart(root, before.head.pid!);
   const coordination = new Store(join(root, "coordination.sqlite"));
   try {
-    coordination.setMeta("main:sessionId", "gateway-fixture-session");
-    coordination.setMeta("head:model-settings:gateway-fixture-session", JSON.stringify({
+    coordination.setMeta("main:sessionId", fixtureSessionId(root));
+    coordination.setMeta(`head:model-settings:${fixtureSessionId(root)}`, JSON.stringify({
       settings: { modelRoles: { default: "provider/preserved" }, defaultThinkingLevel: "low" }, clearedRoles: ["slow"],
     }));
   } finally { coordination.close(); }
-  const native = await connect(hostPaths(config, "main").socketPath);
-  let rejected = false;
-  try { rejected = !(await native.request({ type: "fixture_restart", request })).success; }
+  // The actual head requests replacement from its messenger callback, not
+  // from a fabricated in-flight native RPC command that would make it busy.
+  const restartInput: Inbound = { id: request.inputId, messageId: request.inputId,
+    route, text: "/restart", receivedAt: Date.now(), attachments: [] };
+  await writeFile(join(root, "ingress.jsonl"), `${JSON.stringify(restartInput)}\n`);
+  try { await until(() => restartRecord(root, request.requestId) !== null); }
   catch (error) {
-    // A lost native receipt is admissible only after real durable Gateway acceptance.
-    const persisted = restartRecord(root, request.requestId);
-    if (!persisted || !["accepted", "head-stopped", "started"].includes(persisted.state))
-      throw new Error(`Restart transport failed before acceptance: ${String(error)}\n${await restartDiagnostics(root, request.requestId)}`);
+    throw new Error(`Restart transport failed before acceptance: ${String(error)}\n${await restartDiagnostics(root, request.requestId)}`);
   }
-  finally { await native.close(); }
-  if (rejected)
-    throw new Error(`Native fixture reported restart rejection.\n${await restartDiagnostics(root, request.requestId)}`);
   const accepted = restartRecord(root, request.requestId);
   if (!accepted) throw new Error("Restart returned without a durable lifecycle receipt");
   expect(["accepted", "head-stopped", "started"]).toContain(accepted.state);
   // This source remains on the transport's disk through endpoint/lifetime-lock handoff.
   const input: Inbound = { id: "handoff-original-source", route, messageId: "handoff-original-source", text: "handoff",
     receivedAt: Date.now(), attachments: [] };
-  await writeFile(join(root, "ingress.jsonl"), `${JSON.stringify(input)}\n`);
+  await appendFile(join(root, "ingress.jsonl"), `${JSON.stringify(input)}\n`);
   try {
     await until(async () => {
       try { const status = await gatewayStatus(config); return Boolean(status?.head.ready && status.gateway.pid !== before.gateway.pid &&
@@ -376,7 +388,7 @@ test("detached restart replaces both processes, preserves native session/setting
   expect(after.gateway.pid).not.toBe(before.gateway.pid);
   expect(after.head.pid).not.toBe(before.head.pid);
   expect(restartRecord(root, request.requestId)).toMatchObject({ state: "started", successorPid: after.gateway.pid,
-    replacementPid: after.head.pid, sessionId: "gateway-fixture-session", sessionFile: hostPaths(config, "main").sessionFile });
+    replacementPid: after.head.pid, sessionId: fixtureSessionId(root), sessionFile: hostPaths(config, "main").sessionFile });
   expect(await readFile(hostPaths(config, "main").sessionFile, "utf8")).toBe(transcript);
   await until(async () => existsSync(join(root, "received.jsonl")) &&
     (await readFile(join(root, "received.jsonl"), "utf8")).includes(input.id));

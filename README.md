@@ -21,7 +21,8 @@ the results back to your conversation.
 **0.1.0 is a Bun source distribution:** download the source tarball from the
 [GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.0)
 and follow the preparation steps below. There is no npm package or standalone
-binary. The archive does not include built OMP native modules or managed dependencies.
+binary. OMP must already be installed; this project neither patches nor builds it.
+Managed dependencies are installed separately.
 
 ## Why superagent?
 
@@ -38,8 +39,8 @@ binary. The archive does not include built OMP native modules or managed depende
   connections and durable intake alive. OMP retains conversations separately from process residency.
 - **A shared information board.** The head and its managed lanes exchange findings and
   progress. Unconnected OMP sessions cannot join; posts are information, not commands.
-- **The OMP interface you already use.** Attach the native TUI to the same running Host.
-  Use herdr as an optional terminal view, not a separate execution backend or required service.
+- **Unmodified OMP.** Reuse native sessions, tools, approvals, and authentication through
+  managed extensions and public APIs, without maintaining a core fork.
 
 ## Architecture
 
@@ -53,23 +54,26 @@ head; the head replies to the original conversation.
 
 ## Quick start
 
-Requires Git, **Bun >= 1.4.4**, local Unix sockets, and Rust/Cargo with your platform's
-native build tools. Windows is unsupported. Use this repository's pinned, patched OMP source.
+Requires Git, **Bun >= 1.4.4**, an installed **OMP >= 18.20.2 and < 19**, and local Unix
+sockets. The tested OMP version is **18.20.2**. Windows is unsupported.
+Configure `command` with the installed OMP executable followed by native CLI flags;
+runtime/script wrappers are unsupported.
 
 ### 1. Prepare
 
 From the repository root:
 
 ```sh
-bun scripts/prepare-omp.ts
-bun --cwd=.upstream/omp run build:native
+omp --version
 bun install --frozen-lockfile
 ```
 
-The prepare script checks out and patches pinned OMP. Build its native modules before
-the root install, whose postinstall prepares the managed `omp-ulw` integration.
-These steps need network access for sources and dependencies; they do not start a bot
-or replace your global OMP installation.
+Installation checks for a separately installed OMP before preparing the managed
+`omp-ulw` integration. If OMP is missing, install it using the
+[upstream instructions](https://github.com/can1357/oh-my-pi#installation) first.
+Published SDK packages and platform-native dependencies come from the package registry;
+no Rust toolchain, OMP source checkout, core patch, or native build is required.
+Dependency installation needs network access. It does not start a bot or replace OMP.
 
 The CLI command is **`omp-sa`**; the project/package name remains `omp-superagent`.
 Register it from the prepared repository with `bun link` and ensure Bun's global
@@ -125,11 +129,8 @@ dedicated turn of the same head, before ordinary work. Existing presets are pres
 failed initialization is not reported as ready. Neither `setup` nor `doctor` starts
 a bot/model session; only setup makes the profile REST calls described above.
 
-Attach a read-only native TUI to the same head:
-
-```sh
-bun --no-env-file src/cli.ts attach main --config config.local.json --read-only
-```
+Native TUI/herdr attachment to managed RPC Hosts is not available in this patch-free
+release. Use messenger commands and `omp-sa status` for managed sessions.
 
 For status, shutdown, macOS login startup, and recovery, use the
 [operations guide](docs/OPERATIONS.md). Login startup is a one-shot launch, not a
@@ -165,7 +166,7 @@ for update and activation behavior.
 
 ## Development
 
-After the same source preparation:
+After installation:
 
 ```sh
 bun run check

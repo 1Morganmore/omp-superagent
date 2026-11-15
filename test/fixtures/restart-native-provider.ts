@@ -4,26 +4,12 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, readFileSync, watch } from "node:fs";
 import { Socket } from "node:net";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { createMockModel, type MockResponse } from "../../.upstream/omp/packages/ai/src/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { HostConnection } from "../../src/host";
 import superagentExtension from "../../src/extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
-
-// Native extension reloads use separate ?mtime module graphs. These two
-// scenarios preload this entry and load the real head factory in its same
-// graph, so the probe observes the actual controller rather than another class.
-const windowScenario = process.env.OMP_RESTART_NATIVE_SCENARIO === "lane-failure-recovery-window"
-  || process.env.OMP_RESTART_NATIVE_SCENARIO === "lane-abort-recovery-window";
-const headExtensionPath = fileURLToPath(new URL("../../src/extension.ts", import.meta.url));
-if (windowScenario && process.env.OMP_SUPERAGENT_ROLE === "head") {
-  for (let index = 1; index < process.argv.length; index++) {
-    if (process.argv[index - 1] === "-e" && process.argv[index] === headExtensionPath)
-      process.argv[index] = fileURLToPath(import.meta.url);
-  }
-}
 
 export default function restartNativeProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_RESTART_NATIVE_ROOT;
@@ -89,6 +75,7 @@ export default function restartNativeProvider(pi: ExtensionAPI): void {
     // readback runs in the orchestrator, outside this private module instance.
     const request = HostConnection.prototype.request;
     let sequence = 0;
+    let held = false;
     HostConnection.prototype.request = async function (command, id) {
       if (command.type !== "get_entries") return request.call(this, command, id);
       const requestId = id ?? `restart-recovery-head:${process.pid}:${++sequence}`;
@@ -99,44 +86,25 @@ export default function restartNativeProvider(pi: ExtensionAPI): void {
       });
       try {
         const response = await request.call(this, command, requestId);
+        if (!held && response.success && response.command === "get_entries" && existsSync(join(root, "arm-lane-recovery-entries"))) {
+          const producer = await this.client.getState();
+          if (producer.sessionFile !== join(root, "sessions/main/session.jsonl")) {
+            held = true;
+            record("head-recovery-snapshot-held", { requestId, producerPid: producer.hostPid,
+              response: structuredClone(response), bytes: `${JSON.stringify(response)}\n` });
+            await waitForFile("release-lane-recovery-entries", new AbortController().signal);
+            const currentProducer = await this.client.getState();
+            record("head-recovery-snapshot-released", { requestId, producerPid: producer.hostPid,
+              connected: currentProducer.hostPid === producer.hostPid && currentProducer.sessionId === producer.sessionId,
+              bytes: `${JSON.stringify(response)}\n` });
+          }
+        }
         record("head-recovery-entries-received", { requestId, response });
         return response;
       } finally { unsubscribe(); }
     };
     pi.on("session_shutdown", () => { HostConnection.prototype.request = request; });
-    assert(!process.argv.includes(headExtensionPath), "The original head factory must be installed exactly once through the shared probe entry");
     superagentExtension(pi);
-  }
-  if (role === "lane" && recoveryWindow) {
-    // Hold one serialized native journal response, not the producer or the
-    // socket. Later native terminal events retain their ordinary delivery path.
-    const write = Socket.prototype.write;
-    let held: { socket: Socket; requestId: string } | undefined;
-    Socket.prototype.write = function (this: Socket, chunk: string | Uint8Array,
-      encoding?: BufferEncoding | ((error?: Error | null) => void), callback?: (error?: Error | null) => void): boolean {
-      const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      if (text.startsWith("{") && text.endsWith("\n")) {
-        const frame: { type?: string; command?: string; id?: string; success?: boolean } = JSON.parse(text);
-        if (!held && frame.type === "response" && frame.command === "get_entries" && frame.success === true
-          && frame.id?.startsWith("restart-recovery-head:") && existsSync(join(root, "arm-lane-recovery-entries"))) {
-          const requestId = frame.id;
-          held = { socket: this, requestId };
-          record("lane-recovery-entries-held", { requestId, response: frame, bytes: text });
-          const finished = typeof encoding === "function" ? encoding : callback;
-          queueMicrotask(() => finished?.());
-          void waitForFile("release-lane-recovery-entries", new AbortController().signal).then(() => {
-            record("lane-recovery-entries-released", { requestId, bytes: text, destroyed: this.destroyed });
-            if (!this.destroyed) write.call(this, chunk);
-          }).catch(error => { record("fixture-error", { error: String(error) }); this.destroy(); });
-          return true;
-        }
-        if (held?.socket === this && (frame.type === "message_end" || frame.type === "agent_end" || frame.type === "session_settled"))
-          record("lane-recovery-native-forward", { requestId: held.requestId, nativeFrame: frame });
-      }
-      const forward = write.bind(this);
-      return typeof encoding === "string" ? forward(chunk, encoding, callback) : forward(chunk, encoding);
-    };
-    pi.on("session_shutdown", () => { Socket.prototype.write = write; });
   }
   pi.on("session_start", (_event, ctx) => {
     current = ctx;

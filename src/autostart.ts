@@ -37,7 +37,7 @@ export interface AutostartStatus {
 }
 interface Definition {
   label: string; plistPath: string; stateDir: string; configPath: string;
-  cliPath: string; home: string; executable: string; path: string; target: string;
+  cliPath: string; home: string; executable: string; ompDirectory: string; path: string; target: string;
 }
 interface Snapshot { bytes: string; stat: Stats; executable: string }
 const NOTE = "Login-only one-shot launcher, not a Gateway supervisor. Registration/loading is not Gateway readiness. Install never starts accounts. Native provider authentication, settings, and model presets must already be available under the OS account home; shell-only environment is not preserved.";
@@ -66,17 +66,22 @@ function canonical(path: string): string {
     return join(canonical(dirname(path)), basename(path));
   }
 }
+function searchPath(executable: string, ompDirectory?: string): string {
+  return [...new Set([dirname(executable), ...(ompDirectory ? [ompDirectory] : []),
+    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
+}
 function definition(config: Config, adapters: AutostartAdapters): Definition {
   const stateDir = canonical(resolve(config.stateDir));
   const label = `app.omp-superagent.${createHash("sha256").update(stateDir).digest("hex").slice(0, 24)}`;
   const executable = realpathSync(adapters.executable);
+  const ompDirectory = isAbsolute(config.command[0]!) ? dirname(config.command[0]!) : "";
   const home = adapters.home;
   if (!isAbsolute(home) || !isAbsolute(executable)) throw new Error("Autostart requires absolute OS home and Bun paths");
   return {
-    stateDir, label, home, executable, configPath: resolve(config.path),
+    stateDir, label, home, executable, ompDirectory, configPath: resolve(config.path),
     cliPath: fileURLToPath(new URL("./cli.ts", import.meta.url)),
     plistPath: join(home, "Library", "LaunchAgents", `${label}.plist`),
-    path: [...new Set([dirname(executable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":"),
+    path: searchPath(executable, ompDirectory),
     target: `gui/${adapters.uid}/${label}`,
   };
 }
@@ -87,7 +92,7 @@ function xml(value: string): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 function plist(d: Definition): string {
-  if (d.executable.includes(":")) throw new Error("Bun executable directory cannot contain a PATH separator");
+  if (d.executable.includes(":") || d.ompDirectory.includes(":")) throw new Error("Executable directories cannot contain a PATH separator");
   const strings = (values: string[]) => values.map(value => `<string>${xml(value)}</string>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -139,8 +144,10 @@ function snapshot(d: Definition, uid: number): Snapshot | undefined {
     const executable = encoded?.replace(/&(amp|lt|gt|quot|apos);/g, (_, entity: string) =>
       ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[entity]!);
     if (!executable || !isAbsolute(executable)) throw new Error("Refusing foreign autostart definition");
-    const old = { ...d, executable, path: [...new Set([dirname(executable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":") };
-    if (bytes !== plist(old)) throw new Error("Refusing foreign autostart definition; use its owning config and checkout");
+    const old = { ...d, executable, path: searchPath(executable, d.ompDirectory) };
+    // Retain ownership of our earlier one-shot definitions for update/uninstall.
+    if (bytes !== plist(old) && bytes !== plist({ ...old, path: searchPath(executable) }))
+      throw new Error("Refusing foreign autostart definition; use its owning config and checkout");
     return { bytes, stat, executable };
   } finally { closeSync(fd); }
 }

@@ -1,12 +1,12 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { IsStandardObject as isRecord } from "@sinclair/typebox/value";
-import { acquireModelRoleMutation, captureModelPreset, createModelPresetIfMissing, getModelPreset, getModelPresetNames, isValidModelPresetName } from "@oh-my-pi/pi-coding-agent/config/model-presets";
+import { acquireModelRoleMutation, getModelPreset, getModelPresetNames, isValidModelPresetName } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import type { Settings, SettingsMirrorState } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { MODEL_PRESET_NAMES, type LaneModel, type LanePresetSnapshot, type ResolvedLanePreset } from "./contracts";
 import { isLaneModel } from "./lane-models";
+import { editNativeGlobalConfig, hasUnresolvedNativeLegacy, readNativeSettings } from "./native-settings";
 
 export type NativeModel = Awaited<ReturnType<ExtensionContext["models"]["list"]>>[number];
 export type BootstrapName = (typeof MODEL_PRESET_NAMES)[number];
@@ -52,14 +52,33 @@ function disabledSource(state: SettingsMirrorState, name: string): PresetSource 
 
 /** Native settings are the sole registry. No active role is changed to inspect or resolve a preset. */
 export class NativePresetManager {
+  private readonly source: Settings;
+
   constructor(
-    private readonly settings: Settings,
+    private settings: Settings,
     private readonly availableModels: () => Promise<NativeModel[]>,
     private readonly hasConcreteAuth: (provider: string) => boolean,
   ) {
-    if (settings.settingsScope !== "persistent" || settings.overlayParent()) {
+    if (settings.overlayParent() || settings.mirrorState().derived) {
       throw new Error("Native presets require the persistent native base settings");
     }
+    this.source = settings;
+  }
+
+  private async reload(): Promise<void> {
+    await this.source.reloadFromDisk();
+    this.settings = await readNativeSettings(this.source);
+    if (await hasUnresolvedNativeLegacy(this.settings.getAgentDir())) {
+      throw new Error("Native global settings require legacy migration");
+    }
+  }
+
+  private capture(): LanePresetSnapshot {
+    return {
+      modelRoles: Object.fromEntries(Object.entries(this.settings.getModelRoles())
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)),
+      defaultThinkingLevel: cfgDefaultThinkingLevel.get(this.settings),
+    };
   }
 
   private freeze(
@@ -123,7 +142,7 @@ export class NativePresetManager {
       catch (error) { status.reason = (error as Error).message; }
       return status;
     });
-    const settings = captureModelPreset(this.settings);
+    const settings = this.capture();
     let configuredDefault: NativePresetInspection["configuredDefault"];
     try { configuredDefault = { available: true, resolvedDefault: this.freeze("configured default", settings, models).model }; }
     catch (error) { configuredDefault = { available: false, reason: (error as Error).message }; }
@@ -138,13 +157,13 @@ export class NativePresetManager {
   }
 
   async inspect(): Promise<NativePresetInspection> {
-    await this.settings.reloadFromDisk();
+    await this.reload();
     return this.inspectLoaded((await this.availableModels()).filter(isCodingModel));
   }
 
   async resolve(name: string, thinkingContext?: Pick<LanePresetSnapshot, "defaultThinkingLevel">): Promise<ResolvedLanePreset> {
     if (typeof name !== "string" || !isValidModelPresetName(name)) throw new Error("Invalid native preset name");
-    await this.settings.reloadFromDisk();
+    await this.reload();
     const lookup = getModelPreset(this.settings, name);
     if (lookup.kind !== "found") throw new Error(`Native preset "${name}" is ${lookup.kind}`);
     return this.freeze(name, lookup.preset, (await this.availableModels()).filter(isCodingModel), thinkingContext);
@@ -165,15 +184,16 @@ export class NativePresetManager {
     };
     const release = await acquireModelRoleMutation();
     try {
-      await this.settings.reloadFromDisk();
-      // Whole-record native writes clear omitted global roles without touching
-      // project roles or synchronizing the base's runtime role overrides.
-      cfgModelRoles.set(this.settings, expected.modelRoles);
-      if (expected.defaultThinkingLevel !== undefined) {
-        cfgDefaultThinkingLevel.set(this.settings, expected.defaultThinkingLevel);
-      } else cfgDefaultThinkingLevel.unset(this.settings);
-      await this.settings.flush();
-      await this.settings.reloadFromDisk();
+      await this.reload();
+      const validation = getModelPreset(this.settings.overlay({ modelPresets: { selection: expected } }), "selection");
+      if (validation.kind !== "found") throw new Error("Invalid native model selection snapshot");
+      // Explicit global authorization replaces this record, not the host's
+      // active model scope or any project/overlay/runtime assignment.
+      await editNativeGlobalConfig(this.settings, [
+        { path: "modelRoles", value: expected.modelRoles },
+        { path: "defaultThinkingLevel", value: expected.defaultThinkingLevel },
+      ]);
+      await this.reload();
       const global = this.settings.getGlobalSettings();
       const persisted = {
         modelRoles: global.modelRoles,
@@ -188,7 +208,7 @@ export class NativePresetManager {
   }
 
   /**
-   * Native conditional creation checks absence under the existing persistence
+   * Application conditional creation checks absence under the native persistence
    * lock, so an operator insertion after preview is preserved. This is not a
    * multi-entry transaction: partial creation and conflicts are read back, never
    * repaired by overwriting or rolling back the operator's entry.
@@ -209,7 +229,7 @@ export class NativePresetManager {
     }
     const release = await acquireModelRoleMutation();
     try {
-      await this.settings.reloadFromDisk();
+      await this.reload();
       // Validate every supplied candidate before any writes, including choices
       // whose existing preset will be preserved rather than replaced.
       const models = (await this.availableModels()).filter(isCodingModel);
@@ -238,13 +258,14 @@ export class NativePresetManager {
       }
       const staged = new Set<BootstrapName>();
       for (const [name, snapshot] of expected) {
-        const result = await createModelPresetIfMissing(this.settings, name, snapshot);
-        if (result.kind === "created") staged.add(name);
+        const [created] = await editNativeGlobalConfig(this.settings, [
+          { path: `modelPresets.${name}`, value: snapshot, ifMissing: true },
+        ]);
+        if (created) staged.add(name);
         else conflicts.push(name);
       }
       if (expected.size > 0) {
-        await this.settings.flush();
-        await this.settings.reloadFromDisk();
+        await this.reload();
       }
       const created: BootstrapName[] = [];
       for (const [name, snapshot] of expected) {

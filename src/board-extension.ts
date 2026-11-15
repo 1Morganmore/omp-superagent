@@ -28,7 +28,7 @@ export default function boardExtension(pi: ExtensionAPI): void {
   let watcher: FSWatcher | undefined;
   let noticeTimer: NodeJS.Timeout | undefined;
   let latestContext: ExtensionContext | undefined;
-  let suppressed: { sessionId: string; before: string[]; after: string[] } | undefined;
+  let suppressed: { sessionId: string; sessionFile: string | undefined; removed: string[]; after: string[] } | undefined;
   let closed = false;
 
   const membershipTools = async (ctx: ExtensionContext, allowed: boolean): Promise<void> => {
@@ -36,18 +36,23 @@ export default function boardExtension(pi: ExtensionAPI): void {
     if (!allowed) {
       const scoped = active.filter(name => !tools.has(name));
       if (scoped.length === active.length) return;
-      // Restore only our own subtraction, and only if the native selection has
-      // not changed at all since then. Operator-excluded tools stay excluded.
-      suppressed = ctx.agent.kind === "main"
-        ? { sessionId: ctx.sessionManager.getSessionId(), before: active, after: scoped } : undefined;
       await pi.setActiveTools(scoped);
+      // Snapshot the committed enabled set, not its pre-reconciliation order.
+      suppressed = ctx.agent.kind === "main"
+        ? { sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile(),
+          removed: active.filter(name => tools.has(name)), after: pi.getActiveTools() } : undefined;
       return;
     }
     const previous = suppressed;
     suppressed = undefined;
+    // Stock Host startup may add native tools (for example goal) after our
+    // session_start subtraction but before runtime membership is registered.
+    // Preserve those additions; any withdrawal invalidates restoration, and
+    // only board names we actually removed can ever be restored.
     if (previous?.sessionId === ctx.sessionManager.getSessionId() &&
-        previous.after.length === active.length && previous.after.every((name, index) => name === active[index])) {
-      await pi.setActiveTools(previous.before);
+        previous.sessionFile === ctx.sessionManager.getSessionFile() &&
+        previous.after.every(name => active.includes(name))) {
+      await pi.setActiveTools([...new Set([...active, ...previous.removed])]);
     }
   };
 

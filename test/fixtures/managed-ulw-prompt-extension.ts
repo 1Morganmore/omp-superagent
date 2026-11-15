@@ -26,7 +26,7 @@ export default function compatiblePromptFixture(pi: ExtensionAPI): void {
     if (!native) return;
     const replacement = defect === "empty-preset" ? "<omp-model-preset></omp-model-preset>" : preset;
     const base = native.includes("<omp-model-preset>") ? native : native.replace(
-      /(\n[§⁂] Role\n)[\s\S]*?(?=\n[§⁂] Runtime\n)/,
+      /(^|\n[§⁂] Role\n)[\s\S]*?(?=\n[§⁂] Runtime\n)/,
       (_role, heading: string) => `${heading}${replacement}\n`,
     );
     if (/^ulw\s/.test(event.prompt)) active = true;

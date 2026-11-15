@@ -1,10 +1,20 @@
 # omp-superagent 설계
 
-상태: 기존 Discord·Telegram·Slack 어댑터·SQLite 장부·독립 레인·프로젝트 내부 OMP 코어
-패치를 유지하면서 **Gateway → 단일 헤드 기동, 모든 입력의 헤드 경유, 역할별 확장 분리,
-공유 정보 게시판**으로 전환한다. 기존 runtime 통합은 최종 검증 담당자가 root 타입 검사, Gateway/
+상태: **별도로 설치한 수정 없는 OMP**와 공개 확장 API를 사용한다. 최소 OMP 18.20.2,
+동일 major 18 범위를 지원하며 테스트 기준선은 18.20.2의 소스 revision
+`7c49c11aa5bbaf3f418406583096168ad5b8c6dc`다. OMP 소스 준비·코어 패치·native 빌드는
+하지 않는다. **Gateway → 단일 헤드 기동, 모든 입력의 헤드 경유, 역할별 확장 분리,
+공유 정보 게시판**과 아래 안전·권한 계약을 유지한다. 2026-11-16 macOS arm64에서
+Bun 1.4.4와 공식 OMP 18.20.2 실행 파일로 `bun run test:ci`를 실행해 타입 검사와
+40개 파일의 963개 테스트·66,581 assertion이 모두 통과했다. 검증 범위와 미검증 항목은
+[운영 가이드](docs/OPERATIONS.md#6-개발자-검증)에 기록한다.
+
+**이전 소스 기준선의 검증 이력:** 아래 도입부의 수치는 OMP 18.20.0
+`c308970263ae13744ea15ab67302e3dac840e266`에 프로젝트 코어 패치를 적용한 경로의
+기록이다. 삭제된 패치·CLI flag·TUI attach의 현재 지원이나 stock 18.20.2 호환성 증거가
+아니다. 기존 runtime 통합은 최종 검증 담당자가 root 타입 검사, Gateway/
 board/Host/스킬·runtime/store의 아래 범위 회귀와 실제 native runtime·모델 선택·board·Gateway
-E2E 경로를 확인했다. 이는 기존 통합 기록이다. 현재 변경은 최종 담당자가 root 타입 검사,
+E2E 경로를 확인했다. 이는 기존 통합 기록이다. 당시 변경은 최종 담당자가 root 타입 검사,
 전체 root 회귀 345개 통과·7개 skip·0개 실패·2,542 assertion(Bun 1.4.4), native core managed-
 extension/discovery 80개·235 assertion과 공식 ULW 설치 CLI를 확인했다. 실제 managed ULW 활성화
 1개 통과·3.50초, 수정된 native Gateway/runtime/model 기준선 3개·217 assertion과 앞선 native
@@ -44,8 +54,9 @@ Host 15개·58 assertion과 최종 tsc를 확인했으며 그 뒤 전체 root �
   완료 기준에 도달하면 멈추며 새 범위·외부 효과·불확실성·승인 경계는 그대로 지킨다.
 - 모든 요청을 위임하지 않는다. 메인 헤드와 레인 모두 일반 OMP 작업 능력을 유지한다.
 - 저장된 세션 수와 상주 실행 수를 분리한다.
-- 실행은 herdr 없이도 가능하다. herdr는 동일한 실행에 접속하는 선택적 화면이다.
-- RPC용 실행과 herdr용 실행을 별도 백엔드로 만들지 않는다.
+- 실행은 herdr 없이 동작한다. 관리 RPC 세션에 같은 프로세스의 native TUI/herdr를
+  붙이는 기능은 지원하지 않는다. 로그 tail이나 두 번째 `--resume` writer로 대체하지 않는다.
+- RPC용 실행과 관측용 실행을 별도 AI 백엔드로 만들지 않는다.
 - 자체 대시보드, 새로운 모델·인증·컴팩션·서브에이전트 엔진은 만들지 않는다.
 - 명시적 `start`가 하나의 detached **Gateway**를 기동하고 Gateway가 정확히 하나의 지정 헤드를
   시작·재연결·감독한다. Gateway는 일반 코드 데몬이지 AI 감독자나 새 실행 백엔드가 아니다.
@@ -94,8 +105,6 @@ flowchart TB
     L -->|영속 report event · native UI / 상태| H
     HB <--> B[(동일 instance의 연결된 세션 전용 게시판<br/>general · repo 채널)]
     LB <--> B
-    V[선택적 herdr / native TUI] <-->|동일 Host attach| H
-    V <-->|동일 Host attach| L
 ```
 
 | 구성 | 책임 |
@@ -107,7 +116,7 @@ flowchart TB
 | 레인 전용 확장 | 관리 레인 역할 계약 주입. manager registry·메신저 어댑터·헤드 runtime 없음 |
 | 공통 게시판 확장 | 동일 instance에 실제 연결·등록된 head/lane만 정보 read/post·구독·알림. 실행·전송·lane RPC 권한 없음 |
 | OMP Host | 해당 세션의 실제 추론·도구 실행·기록을 소유하는 단일 실행 주체 |
-| herdr TUI 클라이언트 | Host의 대화·활동 관찰과 권한 있는 사용자 제어 |
+| native TUI / herdr | 관리 RPC Host의 동일 프로세스 attach는 지원하지 않음 |
 
 Gateway 수신 연결은 헤드/레인의 모델 턴과 프로세스 상주 여부에 귀속되지 않는다. 헤드가
 없어도 Gateway는 허가된 수신을 먼저 영속화하고 지정 헤드 복구 뒤 순서대로 전달한다.
@@ -118,7 +127,7 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 
 | 소스 | 구현 책임 |
 | --- | --- |
-| `src/cli.ts`, `src/config.ts` | `omp-sa` 실행 이름과 `--config` 필수 CLI, 명시적 start, 설정·소유 경로 검증, doctor/status/attach/stop |
+| `src/cli.ts`, `src/config.ts` | `omp-sa` 실행 이름과 `--config` 필수 CLI, 명시적 start, 설정·소유 경로 검증, doctor/status/stop |
 | `src/autostart.ts` | macOS의 인스턴스별 일회성 LaunchAgent install/uninstall·등록 상태 조회. 기존 start를 다음 로그인에 호출하며 별도 Gateway 실행·복구 엔진 없음 |
 | `scripts/setup.sh`, `src/setup.ts`, `src/credentials.ts` | controlling-terminal 셋업·토큰 숨김 입력, 기존 config 검증 재사용, owner-only sibling 환경 파일과 start/doctor의 제한된 로딩. 봇 활성화 없음 |
 | `src/gateway*.ts` | detached Gateway 기동·소유권·영속 수신/receipt·헤드 감독·로컬 transport 효과 proxy |
@@ -134,30 +143,43 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 | `src/discord.ts` | discord.js 기반 소유자 전용 수신·허용 목적지 검증·대화형 승인·첨부 전송 |
 | `src/telegram.ts` | grammY `Api` 기반 getMe/getWebhookInfo/getUpdates long polling·영속 offset·native forum topic·inline 승인·토큰 없는 file 참조 |
 | `src/slack.ts` | 공식 SocketModeClient/WebClient 기반 workspace 인증·메시지/Block Kit 수신·history·thread·외부 파일 업로드 |
-| `src/host.ts` | 로컬 소켓 RpcClient와 분리된 세션별 OMP 프로세스의 시작·접속·소유권 확인 |
-| `scripts/prepare-omp.ts`, `upstream/omp.json`, `patches/omp` | OMP v18.20.0 `c308970263ae13744ea15ab67302e3dac840e266` 소스·의존성 준비와 실제 코어 패치 |
+| `src/host.ts`와 관리 Host 확장 | 설치 OMP의 stdio RPC 시작·재연결·정확한 native identity 확인, 실제 AgentSession의 수명·저널 저장·종료 검사 |
+| `scripts/check-omp.ts`, `src/installed-omp.ts` | 별도 설치한 stock CLI의 버전·기능 확인. 소스 checkout·빌드·패치 없음 |
 | `upstream/ulw.json`, `.upstream/ulw/` | 공식 ULW 원격·1시간 갱신 간격과 프로젝트 소유 immutable revision package·원자적 활성 pointer·업데이트 상태 |
 
 설치·준비·doctor는 Gateway나 봇을 활성화하지 않는다. `start`만 Gateway를 백그라운드로
-기동하고 Gateway가 패치된 OMP를 `--mode rpc-ui --rpc-socket … --session … --cwd …`로
-시작하거나 이미 소유권이 확인된 지정 헤드에 연결한다. 헤드는 `src/extension.ts`와 공통 게시판
+기동하고 세션별 detached 일반 Bun stdio owner가 설치된 `omp --mode rpc-ui`를 시작한다.
+owner는 stdio transport와 비공개 재연결 socket만 유지하며 두 번째 AI·실행 backend·supervisor가
+아니다. 실제 추론·도구·세션은 OMP가 소유한다. Gateway는 소유권을 확인한 지정 헤드에
+재연결하며 자동 작업 재시도를 추가하지 않는다. adapter 표식은 `OMP_SUPERAGENT_HOST_SOCKET`이다.
+헤드는 `src/extension.ts`와 공통 게시판
 확장, 레인은 `src/lane-extension.ts`와 공통 게시판 확장을 로드한다. 일반 OMP에 전역 설치하지
 않는다. 각 관리 Host는 관리형 ULW package도 시작 시 해석한 정확한 revision 경로로 로드한다.
 native 자식에는 manager/board 권한이 없고 기존 active-tool 제외와 실행 시 거부를 유지한다.
+
+관리형 ULW는 충돌이 없으면 일반 native discovery로 조합한다. 같은 identity의 다른 ULW root가
+있으면 공개 stock discovery로 무관한 리소스를 열거하고 명시적으로 선택해 managed factory의
+중복 실행을 막는다. 다만 충돌 ULW root와 native TypeScript custom command가 함께 있으면
+stock CLI의 `--no-extensions`로 둘을 보존한 구성을 표현할 수 없다. 명시적 선택이 기존
+project 리소스 root를 user 범위로 바꾸거나 비활성 모듈을 되살리는 경우도 시작을 거부한다.
+정확한 진단을 반환하며 custom command·리소스를 조용히 제거하거나 범위를 바꾸지 않는다.
 
 Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서는 해당 변수를 제거한다. 이는
 같은 OS 사용자의 사고 노출을 줄이는 경계이지 capability framework나 OS 보안 샌드박스가
 아니다. 기존 native 모델 제공자 인증·설정·일반 도구는 유지한다. 각 플랫폼 블록은 선택 항목이며
 최소 하나가 필수다. Discord-only 설정·동시 어댑터 설정과 기존 신원/권한 검증을 그대로 사용한다.
-`doctor`는 `platforms`·환경변수별 `credentials` boolean·`messengersActivated: false`만 진단한다.
+`doctor`는 설치 CLI의 버전·필요 기능과 `platforms`·환경변수별 `credentials` boolean·
+`messengersActivated: false`를 진단하며 봇을 활성화하지 않는다.
 소켓은 전용 `stateDir/run`에서 파생하고 임의 URL이나 범용 RPC forwarding을 허용하지 않는다.
 
 ### 필수 ULW 설치와 일반 코드 갱신 경계
 
 `omp-ulw`는 선택적 사용자 checkout이 아니라 설치에 항상 포함되는 관리형 의존성이다.
 공식 원격은 `https://github.com/dbc-hbin/omp-ulw.git`이며 `upstream/ulw.json`에 기록한다.
-`bun scripts/prepare-omp.ts`로 OMP 소스·의존성을 준비하고 native addon을 빌드한 뒤,
-루트 postinstall 또는 명시적인 `bun run prepare:ulw`로 ULW를 준비한다.
+별도 설치한 OMP의 preinstall 검사 뒤 루트 postinstall 또는 명시적인
+`bun run prepare:ulw`로 ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
+SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-utils`
+18.20.2 패키지다.
 설치 때 원격 기본 브랜치 HEAD를 확인한다. production Gateway 시작에는 이미 유효한
 active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startup 원격 확인은 백그라운드로
 진행하고 이후 `checkIntervalMs: 3600000`에 따라 매시간 확인한다. 느리거나 불가한 upstream이
@@ -167,7 +189,7 @@ active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startu
 확인한 commit의 전체 소스·submodule을 프로젝트 소유
 `.upstream/ulw/revisions/<commit>/package`에 materialize한다. 의존성 설치는 임의 lifecycle
 script를 무시하고 정해진 materialization과 유한 offline native prompt-composition probe를 거친다.
-probe는 pinned OMP의 실제 system prompt와 ExtensionRunner로 일반 모델 프로필 및 명시적
+probe는 배포된 OMP SDK의 실제 system prompt와 ExtensionRunner로 일반 모델 프로필 및 명시적
 ULW 활성화의 합성을 각각 검사한다. 프로필·활성화 policy가 비어 있거나 중복되거나 native 역할
 교체가 빠지면 활성화하지 않는다. provider 호출·Agent 실행·goal 생성 없이 메모리 세션과
 격리된 HOME에서 검사하며, 이미 준비된 revision을 다시 활성화할 때도 같은 검사를 거친다.
@@ -193,7 +215,7 @@ current-Host revision 필드는 없다.
 live Host는 로드한 정확한 revision package 경로를 계속 사용한다. 업데이트는 live head/lane을
 재시작하거나 hot reload하지 않는다. **각 새 Host launch**가 현재 active pointer를 해석하므로
 기존 head가 나중에 새 lane을 시작할 때도 head의 과거 경로를 lane에 전파하지 않는다. 같은
-Host의 attach는 기존 revision을 그대로 관측하며, current Host revision과 다음 launch의
+Host의 제어 연결 재접속은 기존 revision을 그대로 사용하며, current Host revision과 다음 launch의
 active revision을 구분한다. 설치/업데이트 성공·프로필 로드·선택 SKILL 적용·실제 native mode
 활성화·goal 생성·사용자 작업 완료는 서로 별도 사실이다. 절차와 검증 상태는 [운영·설치 가이드](docs/OPERATIONS.md)를 따른다.
 
@@ -214,7 +236,7 @@ sequenceDiagram
     alt 확인된 동일 head가 생존
         G->>H: 기존 Host에 재연결 (두 번째 writer 금지)
     else 최초 시작 + 기존 owner / 충돌 socket 없음
-        G->>H: native session-settings로 지정 head 시작
+        G->>H: private 설정 overlay로 설치 OMP head 시작
     else 저장 PID 종료 확인 + socket 상태 검증
         G->>H: stale socket은 owned inode 일치 시에만 제거 후 재시작
     else 소유권 / 생존 불명
@@ -242,7 +264,7 @@ sequenceDiagram
 연결 해제일 뿐 실제 어댑터 종료가 아니다. `stop main`은 감독 대상 헤드와 Gateway를 함께
 중지하며 즉시 부활시키지 않는다. busy-host 거부, 알 수 없는 socket 보존, 살아 있는 레인의
 재연결·보존을 유지한다. macOS 로그인 자동 시작은 아래의 별도 명시적 설치로만 등록한다.
-연동 제어 연결과 native TUI는 같은 Host/session을 보고 viewer 종료는 Host 종료가 아니다.
+연동 제어 연결 해제는 Host 종료가 아니다. 동일 Host의 native TUI/herdr attach는 지원하지 않는다.
 
 ### macOS 로그인 자동 시작
 
@@ -301,7 +323,7 @@ Gateway는 원래 소유자 입력·정확한 응답·현재 프로세스 신원
 socket Host는 실제 native session journal에 원래 RPC ID의 `rpc_prompt_result`를 발송 전에
 영속화하고 실제 run 시작도 `rpc_agent_start`로 한 번씩 기록한다. 첫 receipt 전에 체크포인트한
 레인의 후속 run 실패·중단은 이 native 경계와 마지막 outcome으로 복구하며 첫 성공으로 덮지 않는다.
-동일 PID·세션·generation의 admission은 attach에서 buffered 이벤트를 관측하기 전에 복원한다.
+동일 PID·세션·generation의 admission은 제어 연결 재접속에서 buffered 이벤트를 관측하기 전에 복원한다.
 초기 state/journal 읽기 사이의 완료 이벤트도 원래 입력·승인에 귀속한다. 복구한 작업은 정착할 때
 native journal을 다시 대조하며, 두 읽기 사이에 lifecycle이 바뀌면 그 이벤트가 요청한 후속 정착에서
 확인한다. run 수는 체크포인트 cursor에 고정해 재구성하고 assistant는 실제 이전 run 경계에
@@ -515,7 +537,7 @@ snapshot을 native `set_model_preset`으로 적용한다. 기본은 head 세션 
 적용은 유휴·session scope와 전체 native readback을 요구한다. 확인된
 head 설정은 native session ID별 metadata에 보관하고 재시작의 private `--config` overlay로
 복원한다. 제거된 역할은 null tombstone으로 복원해 이전 전역 역할이 다시 살아나지 않게 한다.
-`--model-preset`을 재실행하지 않으므로 이후 transcript에 기록된 명시적 모델·effort 선택을
+시작 시 과거 프리셋을 다시 적용하지 않으므로 이후 transcript에 기록된 명시적 모델·effort 선택을
 과거 프리셋 기본값으로 덮지 않는다.
 
 조회는 실행 중에도 가능하다. 변경은 실행·대기 중인 native 작업, 승인, goal, compaction,
@@ -806,8 +828,8 @@ lane report event에서 근거를 확인해 다음 허가 작업을 명시적으
 
 새 관리 Host launch는 프로젝트 범위의 native goal 설정과 `goal.continuationModes`의 `rpc`를
 사용한다. 일반 OMP 전역 설정·공유 ULW 소스는 바꾸지 않고 native 승인·도구 제외도 우회하지
-않는다. pinned core patch `0003`은 이 opt-in이 있는 root의 기본 도구에만 native `goal`을
-노출한다. 명시적 `--tools`·`--no-tools`, child 제한, `goal.enabled=false`는 유지한다.
+않는다. 관리 확장은 기존 native goal 구현과 공개 API를 사용하며 별도 goal 엔진을 만들지 않는다.
+명시적 `--tools`·`--no-tools`, child 제한, `goal.enabled=false`는 유지한다.
 이 launch 설정과 이미 로드한 역할 번들의 적용 시점을 구분한다. 저장된 goal은 실제
 계속 실행·완료나 crash prompt 자동 replay, unloaded 상태의 실행을 보장하지 않는다.
 기존 `lane_resume`는 runtime queue만 다시 열었지만, 이제 명시적으로 허가된 재개에서만 기존
@@ -1007,9 +1029,9 @@ pause/cancel·입력 불확실성을 해제하거나 새 작업·재실행을 �
 유지한다. 하위 native 재시도가 다른 설정 모델을 절대 사용하지 않는다는 보장은 하지 않는다.
 runtime은 관측한 drift를 추가 dispatch 전에 보류하며 저장된 선택을 몰래 다시 쓰지 않는다.
 
-모든 관리 Host와 TUI attach replica는 헤드까지 native `--session-settings`/`Settings.overlay`로
-일상적인 startup·RPC·TUI의 모델/default/fallback 변경을 private in-memory 설정에만 적용한다.
-`--model-preset` 시작과 RPC `set_model_preset`은 실제 native preset helper를 overlay에 적용한다.
+모든 관리 Host는 헤드까지 private 설정 overlay를 사용한다. 주입된 관리 확장이 실제
+AgentSession의 native 설정·preset helper에 모델/default/fallback 변경을 적용하고 실제
+readback으로 세션 범위와 선택을 확인한다. 제거된 CLI flag나 TUI replica에 의존하지 않는다.
 별도 preset 엔진을 만들지 않으며 세션 모델 변경 transcript는 계속 영속화한다. 위의 누락 native
 프리셋 최초 생성만 의도된 전역 preset 쓰기다. 기존 native 인증·judge 설정과 auth DB의 정상
 자격 증명 갱신은 유지한다. 운영자의 명시적 `/model preset <name> --global`은 별도로
@@ -1125,8 +1147,14 @@ DSH의 활성 슬롯 개념을 참고하되, 슬롯 반환과 메모리 회수�
 `agent_end`는 회수 근거로 충분하지 않다. `session_settled`/실제 실행 상태와
 미해결 요청·소유 자원을 함께 확인한다. 유휴 실행을 종료해도 세션 기록은 보존한다.
 다음 입력에서 재개하며, 작업·실행 상태를 별도로 기록한다.
-패치된 `get_state`의 미해결 UI·비동기 작업·소유 자원을 대조하며,
+주입된 관리 확장이 `pi.pi.AgentRegistry`에서 정확한 native identity의 실제 AgentSession을
+확인하고 공개 `ensureOnDisk`로 journal을 materialize한다. 실제 세션의 미해결 UI·비동기 작업·
+admitted/post-prompt 작업·소유 서비스를 대조한 뒤 `beginDispose`와 shutdown을 진행한다.
 필수 `pendingUiRequests`·`hasOwnedRunningWork`가 없으면 유휴로 추측하지 않는다.
+서비스의 terminal broker 행만으로 완료 전달을 가정하지 않는다. 정확한 owner·daemon ID·
+시작 시각·재시작 횟수·종료 상태/시각에 대응하는 native 완료 기록과 비어 있는 yield queue를
+확인한다. 교체·인계된 세대의 전달 이력을 확인할 수 없으면 보류한다. stock 공개 API에는
+broker의 과거 미전달 완료 목록이 없으므로 최신 행 하나로 과거 세대까지 처리됐다고 판단하지 않는다.
 소유권 불명·오래된 socket은 자동 삭제하거나
 중복 Host로 대체하지 않고, 실제 소유권 대조 전까지 상주 예산에 남긴다.
 shutdown ACK는 native 프로세스 종료 증거가 아니다. unload/stop의 슬롯·소유권 해제는 실제
@@ -1144,30 +1172,25 @@ native 종료를 확인한 뒤에만 수행한다. RPC disconnect·기존 PID �
 레인 프로세스 수명은 헤드의 제어 소켓과 분리했다. 헤드 재시작 시 실제 소켓·PID·세션을 대조해
 기존 레인에 다시 연결한다. 기존 stdio RPC 자식 프로세스의 EOF 동작을 수명 보장으로 사용하지 않는다.
 
-## 7. 통합 실행과 herdr 관측
+## 7. 설치 OMP Host와 관측 경계
 
-하나의 OMP Host가 세션의 추론·도구 실행·기록을 소유한다.
-확장은 구조화된 제어 연결로 입력·상태를 주고받고, herdr pane은 같은 Host의 TUI 클라이언트를 띄운다.
-pane 닫기는 연결 해제이지 작업 종료가 아니다.
+하나의 설치 OMP 프로세스가 세션의 추론·도구 실행·기록을 소유한다.
+세션별 detached 일반 Bun owner는 `--mode rpc-ui`의 stdio와 재연결 socket을 유지한다.
+헤드의 제어 연결이 끊겨도 독립 레인의 owner와 native 실행 수명은 유지하며, owner가
+추론·도구·자동 작업 재시도·별도 감독 판단을 맡지 않는다.
 
-이 구조를 위해 `patches/omp/0001-process-owned-local-rpc-and-native-attach.patch`로
-다음 OMP 코어 변경을 적용한다. 코드 존재와 실제 TUI/herdr 사용자 흐름의 검증은 구분한다.
+관리 확장이 실제 AgentSession을 확인한 상태만 native 수명·저장·소유 작업 근거로 사용한다.
+압축 등 직렬 명령 중 상태·컨텍스트·사용량은 실제 세션의 공개 getter로 조회한다.
+진행 중인 관리 명령이 있으면 이 관측을 settled로 보고하지 않으며, 유휴 해제에는
+stock RPC의 실제 settlement 확인을 계속 요구한다.
+세션 파일 존재·lease 보유·제어 연결·실행 중·실제 프로세스 종료는 별도 사실이다.
+UI/승인에는 원래 요청 ID를 유지하고 최초 유효 응답만 적용한다. 재연결·세션 교체 뒤
+오래된 입력이나 승인을 새 실행에 적용하지 않는다. 일반 사용자 세션은 명시적 채택 없이
+관리 레인으로 바꾸지 않는다.
 
-- 기존 Collab Host의 `InteractiveModeContext` 의존성을 세션 호스팅 경계에서 분리.
-- RPC로 제어되는 Host에도 기존 OMP TUI의 attach·동기화 허용.
-- 동일 머신에서는 외부 relay를 필수화하지 않는 로컬 연결과 탐색 지원.
-- 읽기 전용 관측과 사용자 제어 권한 분리.
-- 메신저와 TUI에 동시에 뜬 요청은 동일 ID를 사용하고 최초 유효 응답 하나만 적용.
-- 연결이 끊기거나 세션이 교체되면 오래된 입력·승인이 새 실행에 적용되지 않게 처리.
-
-기존 Collab의 화면·이벤트·서브에이전트 표시를 재사용한다.
-새 대시보드나 TUI를 작성하지 않고, herdr용·headless용 실행을 이중화하지 않는다.
-현재 OMP의 `--mode rpc`와 `omp join`을 조합하는 것만으로 이미 구현된 기능처럼 표현하지 않는다.
-
-일반 OMP 세션 탐색·lease 조회는 재사용한다.
-실제 연결에 필요한 endpoint·실행 식별자는 기존 discovery 확장으로 해결할 수 있는지 먼저 확인한다.
-세션 파일 존재, lease 보유, 턴 실행 중, attach 가능은 각각 다른 사실이다.
-일반 사용자 세션은 명시적인 채택 없이 관리 대상 레인으로 바꾸지 않는다.
+stock OMP의 관리 RPC 세션에는 동일 프로세스 native TUI/herdr attach가 지원되지 않는다.
+따라서 attach CLI, 로그 tail 화면, 두 번째 `--resume` writer를 제공하지 않는다.
+과거 패치된 소스 기준선의 native RPC/TUI PTY 증거는 운영 가이드의 역사 기록으로만 보존한다.
 
 ## 8. 영속 상태·권한·복구
 
@@ -1289,17 +1312,18 @@ native `tool_call` hook이 복구 도구 이외의 실행을 거부하고 한 �
 바뀌지 않게 하며, 운영자의 더 늦은 중단·수동 종료가 오래된 판단을 무효화한다.
 
 재사용 기준은 기존 `rpc_prompt_result`/`rpc_agent_start` journal, `get_entries`, native
-tool-call 차단, preset bootstrap의 내부 턴 경로다. OMP pin
-`c308970263ae13744ea15ab67302e3dac840e266`와 조사 당시 upstream
-`7c49c11aa5bbaf3f418406583096168ad5b8c6dc`의 completion/tool-blocking 계약을 확인했으며,
-새 코어 패치·외부 엔진·전역 도구 설정은 추가하지 않는다. 검증 결과는 운영 가이드에 별도 기록한다.
+tool-call 차단, preset bootstrap의 내부 턴 경로다. 이전 소스 기준선
+`c308970263ae13744ea15ab67302e3dac840e266`와 현재 테스트 기준선
+`7c49c11aa5bbaf3f418406583096168ad5b8c6dc`의 completion/tool-blocking 계약을 조사했다.
+이 조사는 새 stock 통합 경로의 실행 증거가 아니다. 코어 패치·외부 엔진·전역 도구 설정은
+추가하지 않는다. 검증 결과는 운영 가이드에 별도 기록한다.
 
 ## 9. 기존 구현 검색과 재사용
 
 구현 전 공개 코드와 OMP 최신 API를 다시 검색한다.
 아래는 조사 당시 확인한 기준선이지 현재 호환성 보장이 아니다.
 전체 프로젝트를 합치기보다 필요한 모듈·API·회귀 사례를 선택하고, 동일 기능의 두 체계를 병존시키지 않는다.
-실제 구현의 OMP pin은 위 구성 절과 `upstream/omp.json`을 따른다. SQLite 패턴 수정 재사용,
+지원 OMP 범위와 테스트 기준선은 위 구성 절을 따른다. SQLite 패턴 수정 재사용,
 Discord 동작 참조 revision과 의존 패키지의 정확한 고지는 `THIRD_PARTY_NOTICES.md`에 기록한다.
 Telegram·Slack은 기존 SUL 봇 구현을 복사하지 않고 grammY와 공식 Slack API client를 재사용한다.
 
@@ -1346,8 +1370,8 @@ commit SHA를 만들어 pin된 검증 근거로 제시하지 않는다.
 
 ## 10. 구현 확인 범위와 운영 완료 기준
 
-구현된 코드·코어 패치에 대해 아래 실제 흐름을 검증한다. 코드 회귀, 로컬 결정적 모델을
-사용한 CLI/소켓, 실제 메신저·모델·herdr 검증은 서로 다른 근거다. 현재 관측 결과는
+구현된 확장과 설치 stock OMP에 대해 아래 실제 흐름을 검증한다. 코드 회귀, 로컬 결정적 모델을
+사용한 CLI/소켓, 실제 메신저·모델 검증은 서로 다른 근거다. 현재 관측 결과는
 [운영·설치 가이드의 검증 표](docs/OPERATIONS.md#6-개발자-검증)를 따르며, 미수행 운영 항목을 완료로 간주하지 않는다.
 
 1. **메신저와 같은 OMP 세션 연결**
@@ -1367,7 +1391,7 @@ commit SHA를 만들어 pin된 검증 근거로 제시하지 않는다.
      재사용 충돌·unavailable·drift 보류, unload/재시작/기존 기록 채택의 모델 유지와 자식 권한.
    - 최초 native high/middle/low 초기화의 기존 프리셋·기본/활성 역할·judge 보존, 충돌 덮어쓰기
      거부, 전체 역할/thinking snapshot과 편집 후 기존 레인 불변, 명시적 유휴 레인 변경,
-     최초 생성 및 운영자의 명시적 preset `--global` 외 전역 모델/config 쓰기 금지·TUI replica/헤드/다른 레인 격리를 확인한다.
+     최초 생성 및 운영자의 명시적 preset `--global` 외 전역 모델/config 쓰기 금지·헤드/다른 레인 격리를 확인한다.
      정상 native 인증 갱신은 유지하며 모든 OMP 파일 불변으로 과장하지 않는다.
    - 스킬의 자문 정책과 runtime 강제를 구분하고 실제 judge 자문/사용량은 native purpose
      `judge` 증거로 따로 확인. 기존 로컬 fixture나 과거 통과 수치로 대신하지 않음.
@@ -1375,10 +1399,11 @@ commit SHA를 만들어 pin된 검증 근거로 제시하지 않는다.
    - 슬롯 포화에서 새 요청은 대기하고 제어 응답은 동작.
    - 백그라운드 작업을 유휴로 잘못 회수하지 않음.
    - 안전한 unload 후 같은 기록을 재개하고, 헤드 재시작으로 살아 있는 레인을 복제하지 않음.
-4. **통합 Host와 herdr attach**
-   - 패치된 OMP 호스팅·연결 기능을 실제 CLI와 네이티브 TUI로 확인한다.
-   - herdr 없이 실행한 동일 세션에 접속·해제·재접속.
-   - 창을 닫아도 작업이 유지되고, 두 표면의 승인 응답은 한 번만 적용.
+4. **stock Host와 제어 연결**
+   - 설치된 수정 없는 OMP의 실제 RPC와 관리 확장에서 identity·저널·수명 readback을 확인한다.
+   - 제어 연결 해제·재접속 및 헤드 재시작 뒤 독립 레인의 실행·기록을 보존한다.
+   - UI/승인은 원래 ID로 한 번만 적용하고 안전 검사 후 실제 종료를 확인한다.
+   - 동일 프로세스 TUI/herdr attach는 지원하지 않으며 대체 writer를 띄우지 않는다.
 5. **완료 검증·발송**
    - 턴 종료를 완료로 오인하지 않고 근거 확인 후 원래 스레드에 한 번 회신.
    - 재시작·전송 불확실성에서 외부 행동을 맹목적으로 반복하지 않음.
@@ -1396,18 +1421,19 @@ commit SHA를 만들어 pin된 검증 근거로 제시하지 않는다.
      복사/상속 role의 standalone session·native 자식의 read/post/알림을 모두 거부.
    - 게시물이 lane 제어·새 업무·승인으로 승격되지 않음.
 
-위 목록은 수용 기준이며 그 자체가 실행 결과는 아니다. 최종 담당자가 관측한 통합 검증은
-[운영·설치 가이드의 새 결과 행](docs/OPERATIONS.md#6-개발자-검증)을 따른다. 실제 native Gateway E2E도 wrapper 1개가 통과했으며 production
+위 목록은 수용 기준이며 그 자체가 실행 결과는 아니다. stock 18.20.2 통합의 최종 실행 결과는
+최종 담당자가 [운영·설치 가이드](docs/OPERATIONS.md#6-개발자-검증)에 별도로 기록한다.
+이전 패치된 18.20.0 기준선의 실제 native Gateway E2E는 wrapper 1개가 통과했으며 production
 Gateway와 native head/lane/board, head 부재 중 수신·복구·중복 제거·원래 route의 head-only 회신을
 확인했다. 결정적 로컬 제공자·기록용 Messenger 범위로, 운영 메신저·실제 제공자/비용·herdr
-검증으로 확대하지 않는다. 기존 모델 프리셋 최초 생성·
-`--session-settings`·정확한 모델 snapshot·head/다른 lane 격리는 변경하지 않았고 native
+검증으로 확대하지 않는다. 당시 모델 프리셋 최초 생성·
+세션 설정 격리·정확한 모델 snapshot·head/다른 lane 격리를 포함한 native
 runtime/model-selection 2개·215 assertion은 로컬 결정적 제공자에서 head 경유·모델/judge
 readback을 확인한 근거다.
 
-코드 기반 회귀 검증과 실제 OMP·메신저·herdr 사용자 흐름 검증을 구분한다.
+코드 기반 회귀 검증과 실제 OMP·메신저 사용자 흐름 검증을 구분한다.
 실제 모델 제공자 결과·사용량과 운영 Discord/Telegram/Slack 토큰 활성화 증거가 없는 항목은
 미검증으로 명시한다. 잘못된 generator 호출로 실행된 보조 OMP의 응답은 [운영·설치 가이드](docs/OPERATIONS.md)의 제한된
 사고 기록으로 구분하며, 실행/제공자 사용량 미확보를 결정적 로컬 테스트 성공으로 대신하지 않는다.
-herdr는 설치되어 있으나 `HERDR_ENV`가 없어 제어를 시도하지 않았으며,
-일반 PTY에서의 네이티브 attach 확인을 herdr QA로 바꾸어 기록하지 않는다.
+이전 조사에서는 herdr가 설치되어 있었으나 `HERDR_ENV`가 없어 제어를 시도하지 않았다.
+당시 일반 PTY의 native attach 확인을 herdr QA나 현재 stock attach 지원 근거로 쓰지 않는다.

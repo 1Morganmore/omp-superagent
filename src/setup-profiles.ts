@@ -3,6 +3,7 @@ import { REST, Routes, type RESTOptions } from "discord.js";
 import { Api, InputFile } from "grammy";
 import type { Config } from "./config";
 import { validateCredential } from "./credentials";
+import { withTelegramSignal } from "./telegram";
 
 const avatar = new URL("../assets/superagent-avatar.jpg", import.meta.url);
 
@@ -62,13 +63,14 @@ export async function setupBotProfiles(
       const api = (options.createApi ?? (credential => new Api(credential, {
         sensitiveLogs: false, timeoutSeconds: 45, baseFetchConfig: { redirect: "error" },
       })))(token);
-      const bot = await api.getMe(options.signal);
+      const bot = await withTelegramSignal(options.signal, signal => api.getMe(signal));
       if (!bot.is_bot || !Number.isSafeInteger(bot.id) || bot.id <= 0 || String(bot.id) === config.telegram.ownerId)
         throw new Error("Invalid bot identity");
       attempted = true;
-      if (await api.setMyProfilePhoto({ type: "static", photo: new InputFile(image, "superagent-avatar.jpg") }, options.signal) !== true)
+      if (await withTelegramSignal(options.signal, signal =>
+        api.setMyProfilePhoto({ type: "static", photo: new InputFile(image, "superagent-avatar.jpg") }, signal)) !== true)
         throw new Error("Missing profile receipt");
-      const current = await api.getUserProfilePhotos(bot.id, { limit: 1 }, options.signal);
+      const current = await withTelegramSignal(options.signal, signal => api.getUserProfilePhotos(bot.id, { limit: 1 }, signal));
       if (current.total_count < 1 || !current.photos[0]?.some(photo => photo.file_id && photo.file_unique_id))
         throw new Error("Missing profile readback");
       results.push({ platform: "telegram", status: "applied", message: "Mascot upload accepted by Telegram; current profile photo confirmed by getUserProfilePhotos." });

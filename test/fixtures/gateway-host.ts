@@ -1,79 +1,58 @@
-/** Isolated native-RPC peer for Gateway lifecycle tests; no platform activation. */
-import { appendFile, chmod, mkdir, readFile } from "node:fs/promises";
+/** Isolated stock-stdio peer for Gateway lifecycle tests; no platform activation. */
+import { appendFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createServer } from "node:net";
-import { dirname, join } from "node:path";
-import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
+import { join } from "node:path";
+import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { loadConfig } from "../../src/config";
 import { createGatewayMessenger } from "../../src/gateway-client";
 import { Store } from "../../src/store";
+import { stockHostFixture } from "./stock-host";
 
 const arg = (name: string) => process.argv[process.argv.indexOf(name) + 1]!;
 const config = await loadConfig(process.env.OMP_SUPERAGENT_CONFIG!);
-const socketPath = arg("--rpc-socket");
 const sessionFile = arg("--session");
-await mkdir(dirname(sessionFile), { recursive: true });
-const sessionId = "gateway-fixture-session";
-if (!existsSync(sessionFile)) await appendFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: config.headCwd })}\n`);
+const sessionId = await readSessionHeaderId(sessionFile);
+if (!sessionId) throw new Error("Lifecycle peer requires the actual materialized native header");
 const messenger = createGatewayMessenger(config);
 await appendFile(join(config.stateDir, "launches.jsonl"), `${JSON.stringify({ pid: process.pid,
   args: process.argv, config: JSON.parse(await readFile(arg("--config"), "utf8")),
   credentialPresent: Boolean(process.env.GATEWAY_TEST_BOT_TOKEN) })}\n`);
-const server = createServer(peer => {
-  peer.on("error", () => {});
-  peer.setEncoding("utf8");
-  let pending = "";
-  const send = (frame: unknown) => peer.write(`${JSON.stringify(frame)}\n`);
-  peer.on("data", chunk => {
-    pending += chunk;
-    let newline: number;
-    while ((newline = pending.indexOf("\n")) >= 0) {
-      const frame = JSON.parse(pending.slice(0, newline)) as Record<string, unknown>;
-      pending = pending.slice(newline + 1);
-      if (frame.type === "shutdown_host") {
-        void appendFile(join(config.stateDir, "shutdowns.jsonl"), `${JSON.stringify({ pid: process.pid })}\n`);
-        if (existsSync(join(config.stateDir, "ambiguous-shutdown"))) { peer.destroy(); continue; }
-        const busy = existsSync(join(config.stateDir, "busy")) || existsSync(join(config.stateDir, "busy-shutdown"));
-        send({ type: "response", id: frame.id, command: frame.type, success: !busy,
-          ...(busy ? { error: "Host is busy" } : { data: {} }) });
-        if (!busy) void messenger.stop().finally(() => { server.close(); setTimeout(() => process.exit(0), 50); });
-      } else if (frame.type === "fixture_restart") {
-        void messenger.requestRestart(frame.request as { requestId: string; inputId: string; ackOutputId: string }).then(
-          data => send({ type: "response", id: frame.id, command: frame.type, success: true, data }),
-          () => send({ type: "response", id: frame.id, command: frame.type, success: false, error: "Fixture restart failed" }));
-      } else {
-        send({ type: "response", id: frame.id, command: frame.type, success: true,
-          data: frame.type === "negotiate_protocol" ? { protocolVersion: 2 }
-            : { sessionId, sessionFile, hostPid: process.pid, settingsScope: "session",
-              isSettled: !existsSync(join(config.stateDir, "busy")), isStreaming: false, isCompacting: false,
-              queuedMessageCount: 0, hasPendingAsyncWork: false, hasOwnedRunningWork: false, pendingUiRequests: [], goal: null } });
-      }
-    }
-  });
-  send({ type: "ready", supportedProtocolVersions: [1, 2], maxFrameBytes: MAX_RPC_FRAME_BYTES,
-    maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES });
-});
-const listening = Promise.withResolvers<void>();
-server.once("error", listening.reject);
-server.listen(socketPath, listening.resolve);
-await listening.promise;
-await chmod(socketPath, 0o600);
-// This RPC peer replaces the whole native controller. Model a head whose
-// fixture presets were preverified; actual initialization/readback belongs to
-// native-gateway.test.ts, not these transport/process lifecycle cases.
-const coordination = new Store(join(config.stateDir, "coordination.sqlite"));
-try {
-  const saved = coordination.getMeta("head:preset-bootstrap");
-  if (saved) {
-    const initialization = JSON.parse(saved) as { sessionId: string; state: string };
-    if (initialization.sessionId !== sessionId || initialization.state !== "complete") {
-      throw new Error("Lifecycle peer cannot replace an incomplete or foreign initialization receipt");
-    }
-  } else coordination.setMeta("head:preset-bootstrap", JSON.stringify({ sessionId,
-    state: "complete", replayBlocked: true, detail: "Lifecycle RPC peer: fixture presets were already verified." }));
-} finally { coordination.close(); }
-await messenger.start({
-  message: async input => { await appendFile(join(config.stateDir, "received.jsonl"), `${JSON.stringify(input)}\n`); },
-  answer: async () => {},
-  restart: async notice => { await appendFile(join(config.stateDir, "restart-notices.jsonl"), `${JSON.stringify(notice)}\n`); },
+await stockHostFixture({
+  sessionId, sessionFile,
+  state: () => ({ isSettled: !existsSync(join(config.stateDir, "busy")) }),
+  async activated() {
+    // Like the real manager, attach only after the pipe owner is listening.
+    // Native initialization/readback is covered by native-gateway.test.ts.
+    const coordination = new Store(join(config.stateDir, "coordination.sqlite"));
+    try {
+      const saved = coordination.getMeta("head:preset-bootstrap");
+      if (saved) {
+        const initialization = JSON.parse(saved) as { sessionId: string; state: string };
+        if (initialization.sessionId !== sessionId || initialization.state !== "complete")
+          throw new Error("Lifecycle peer cannot replace an incomplete or foreign initialization receipt");
+      } else coordination.setMeta("head:preset-bootstrap", JSON.stringify({ sessionId,
+        state: "complete", replayBlocked: true, detail: "Lifecycle RPC peer: fixture presets were already verified." }));
+    } finally { coordination.close(); }
+    await messenger.start({
+      message: async input => {
+        await appendFile(join(config.stateDir, "received.jsonl"), `${JSON.stringify(input)}\n`);
+        if (input.text !== "/restart") return;
+        const store = new Store(join(config.stateDir, "coordination.sqlite"));
+        let request: { requestId: string; inputId: string; ackOutputId: string };
+        try { request = JSON.parse(store.getMeta("head:restart-fence")!); }
+        finally { store.close(); }
+        if (request.inputId !== input.id) throw new Error("Fixture restart source identity mismatch");
+        await messenger.requestRestart(request);
+      },
+      answer: async () => {},
+      restart: async notice => { await appendFile(join(config.stateDir, "restart-notices.jsonl"), `${JSON.stringify(notice)}\n`); },
+    });
+  },
+  async shutdown(channel) {
+    await appendFile(join(config.stateDir, "shutdowns.jsonl"), `${JSON.stringify({ pid: process.pid })}\n`);
+    if (existsSync(join(config.stateDir, "ambiguous-shutdown"))) { channel.destroy(); return; }
+    const busy = existsSync(join(config.stateDir, "busy")) || existsSync(join(config.stateDir, "busy-shutdown"));
+    return busy ? { success: false, error: "Host is busy" } : { data: {} };
+  },
+  exit: () => messenger.stop(),
 });

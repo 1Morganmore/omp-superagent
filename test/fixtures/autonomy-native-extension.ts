@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync, watch } from "node:fs";
 import * as path from "node:path";
-import { createMockModel } from "../../.upstream/omp/packages/ai/src/providers/mock";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 export const autonomyModel = { provider: "autonomy-native", id: "local" } as const;
@@ -16,7 +16,21 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
   let headTodoStep = 0;
   const progressStarted = new Set<string>();
   pi.on("agent_start", () => { run++; });
-  pi.on("session_before_compact", async (_event, ctx) => {
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (event.customInstructions === "queue-stop-restoration") {
+      const session = pi.pi.AgentRegistry.global().get(pi.pi.MAIN_AGENT_ID)?.session;
+      if (!(session instanceof pi.pi.AgentSession)) throw new Error("Native compact queue fixture requires its root session");
+      // Admit through the real public SDK while native compact owns the
+      // disconnected session. These messages predate the owner's stop fence.
+      await session.steer("Already admitted steering\nKeep the exact first draft.");
+      await session.steer("Already admitted second steering: preserve ordering.");
+      await session.followUp("Already admitted follow-up\nKeep the exact final draft.");
+      session.agent.followUp({
+        role: "custom", customType: "fixture-stop-context", content: "Preserve admitted internal context without a model turn.",
+        display: true, attribution: "agent", timestamp: Date.now(),
+      });
+      if (session.queuedMessageCount !== 4) throw new Error("Native compact did not retain all admitted messages");
+    }
     await ctx.ui.confirm("Autonomy serial barrier", "Release the isolated native compaction command.");
     return { cancel: true };
   });

@@ -3,13 +3,10 @@
 set +x
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-PREPARED_BUN="$ROOT/.upstream/toolchain/node_modules/.bin/bun"
-if [[ -x "$PREPARED_BUN" ]]; then
-  BUN="$PREPARED_BUN"
-elif command -v bun >/dev/null 2>&1; then
+if command -v bun >/dev/null 2>&1; then
   BUN="$(command -v bun)"
 else
-  printf '%s\n' 'Bun is required. Prepare the repository runtime or install Bun explicitly first.' >&2
+  printf '%s\n' 'Bun is required. Install Bun explicitly first.' >&2
   exit 1
 fi
 if [[ $# -eq 0 ]]; then

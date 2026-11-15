@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { activeManagedUlw, managedUlwStatus, updateManagedUlw, type UlwManifest } from "../src/managed-ulw";
+import { activeManagedUlw, managedUlwLaunchExtensions, managedUlwStatus, updateManagedUlw, type UlwManifest } from "../src/managed-ulw";
 import { connect, startHost, type HostOptions } from "../src/host";
+import { getExtensionNameFromPath } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { writeStockHostExecutable } from "./fixtures/stock-host";
 
 const cleanups: Array<() => Promise<void>> = [];
 // Production revisions are deliberately not pruned. Tests own their entire temp
@@ -63,6 +65,240 @@ async function fixture() {
     "--manifest", manifestPath, "--root", managed, ...extra], root);
   return { root, remote, managed, options, first, manifest, manifestPath, commit, cli };
 }
+
+async function launchFixture() {
+  const f = await fixture();
+  const home = join(f.root, "home");
+  const agentDir = join(home, "agent");
+  const unrelated = join(f.root, "operator-package");
+  const oldUlw = join(f.root, "old-ulw");
+  await mkdir(join(agentDir, "extensions"), { recursive: true });
+  await mkdir(join(unrelated, "skills/operator-skill"), { recursive: true });
+  await mkdir(oldUlw);
+  await writeFile(join(agentDir, "extensions/ambient.ts"), "throw new Error('discovery must not import ambient modules');\n");
+  await writeFile(join(unrelated, "index.ts"), "throw new Error('discovery must not import package modules');\n");
+  await writeFile(join(unrelated, "extra.ts"), "throw new Error('disabled module must not load');\n");
+  await writeFile(join(unrelated, "skills/operator-skill/SKILL.md"),
+    "---\nname: operator-skill\ndescription: Preserved operator resource.\n---\nOperator resource.\n");
+  await writeFile(join(unrelated, "package.json"), JSON.stringify({
+    name: "operator-package", omp: { extensions: ["./index.ts"] },
+  }));
+  await writeFile(join(oldUlw, "package.json"), JSON.stringify({ name: "omp-ulw", omp: { extensions: ["./index.ts"] } }));
+  await writeFile(join(oldUlw, "index.ts"), "throw new Error('unmanaged ULW must not load');\n");
+  const configPath = join(f.root, "launch.json");
+  await writeFile(configPath, JSON.stringify({ extensions: [unrelated, oldUlw] }));
+  const launch = (commandArgs: string[] = [], env: Record<string, string | undefined> = {}) => managedUlwLaunchExtensions({
+    cwd: f.root, managedUlwPath: f.remote, extensionPaths: [], configPath,
+    commandArgs,
+    launchArgs: [...commandArgs, "--mode", "rpc-ui", "--cwd", f.root, "-e", f.remote, "--config", configPath],
+    env: { PATH: process.env.PATH, HOME: home, PI_CODING_AGENT_DIR: agentDir,
+      XDG_CONFIG_HOME: join(home, "config"), CI: "true", ...env },
+    bunCommand: [process.execPath, "--no-env-file"],
+  });
+  return { ...f, home, agentDir, unrelated, oldUlw, configPath, launch };
+}
+
+test("stock launch snapshot retains unrelated ambient modules and package resources, replacing only ULW identity", async () => {
+  const f = await launchFixture();
+  const { extensionPaths: paths, noExtensions } = await f.launch();
+  expect(noExtensions).toBe(true);
+  expect(paths).toContain(join(f.agentDir, "extensions/ambient.ts"));
+  expect(paths).toContain(join(f.unrelated, "index.ts"));
+  expect(paths).toContain(f.unrelated);
+  expect(paths).not.toContain(f.oldUlw);
+  expect(paths).not.toContain(join(f.oldUlw, "index.ts"));
+  expect(paths.filter(entry => entry === f.remote)).toHaveLength(1);
+  // Explicit managed resources precede configured resources in stock OMP.
+  expect(paths.indexOf(f.remote)).toBeLessThan(paths.indexOf(f.unrelated));
+  expect(paths.indexOf(join(f.remote, "index.ts"))).toBeLessThan(paths.indexOf(join(f.unrelated, "index.ts")));
+  expect(await readFile(join(f.unrelated, "skills/operator-skill/SKILL.md"), "utf8")).toContain("Operator resource.");
+}, 60_000);
+
+test("stock launch refuses resource roots that would resurrect a disabled sibling module", async () => {
+  const f = await launchFixture();
+  await writeFile(join(f.unrelated, "package.json"), JSON.stringify({
+    name: "operator-package", omp: { extensions: ["./index.ts", "./extra.ts"] },
+  }));
+  await writeFile(f.configPath, JSON.stringify({
+    extensions: [f.unrelated, f.oldUlw], disabledExtensions: ["extension-module:extra"],
+  }));
+  await expect(f.launch()).rejects.toThrow("re-enable disabled modules or change hook order");
+  expect(await readFile(join(f.unrelated, "extra.ts"), "utf8")).toContain("disabled module must not load");
+}, 60_000);
+
+test("stock launch excludes a second ULW reached through native ambient symlink discovery", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, JSON.stringify({ extensions: [f.unrelated] }));
+  await symlink(f.oldUlw, join(f.agentDir, "extensions/old-ulw"));
+  const launch = await f.launch();
+  expect(launch.noExtensions).toBe(true);
+  expect(launch.extensionPaths.some(entry => entry.includes("old-ulw"))).toBe(false);
+  expect(launch.extensionPaths).toContain(join(f.agentDir, "extensions/ambient.ts"));
+  expect(launch.extensionPaths).toContain(f.unrelated);
+}, 60_000);
+
+test("stock launch reports package hook order that explicit discovery cannot preserve", async () => {
+  const f = await launchFixture();
+  await mkdir(join(f.unrelated, "hooks/pre"), { recursive: true });
+  await writeFile(join(f.unrelated, "hooks/pre/proof.ts"), "throw new Error('hook discovery must not run factories');\n");
+  await expect(f.launch()).rejects.toThrow("re-enable disabled modules or change hook order");
+}, 60_000);
+
+test("stock launch reports TypeScript commands that --no-extensions cannot preserve", async () => {
+  const f = await launchFixture();
+  await mkdir(join(f.agentDir, "commands/operator"), { recursive: true });
+  await writeFile(join(f.agentDir, "commands/operator/index.ts"), "throw new Error('command discovery must not execute factories');\n");
+  await expect(f.launch()).rejects.toThrow("cannot preserve TypeScript custom commands");
+}, 60_000);
+
+test("stock launch preserves ordinary native discovery and TypeScript commands when there is no other ULW copy", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, JSON.stringify({ extensions: [f.unrelated] }));
+  await mkdir(join(f.agentDir, "commands/operator"), { recursive: true });
+  await writeFile(join(f.agentDir, "commands/operator/index.ts"), "throw new Error('command discovery must not execute factories');\n");
+  const launch = await f.launch();
+  expect(launch.noExtensions).toBe(false);
+  expect(launch.extensionPaths).toEqual([f.remote]);
+}, 60_000);
+
+test("stock launch honors original --no-extensions without resurrecting ambient or configured modules", async () => {
+  const f = await launchFixture();
+  await mkdir(join(f.agentDir, "commands/operator"), { recursive: true });
+  await writeFile(join(f.agentDir, "commands/operator/index.ts"), "throw new Error('disabled command must not load');\n");
+  const launch = await f.launch(["--no-extensions", "-e", f.unrelated]);
+  expect(launch).toEqual({ extensionPaths: [f.remote], noExtensions: true });
+  expect(launch.extensionPaths).not.toContain(join(f.agentDir, "extensions/ambient.ts"));
+  expect(launch.extensionPaths).not.toContain(f.oldUlw);
+}, 60_000);
+
+test("stock launch rejects a conflicting original explicit ULW directory or module instead of pretending flags can remove it", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, "{}");
+  for (const args of [
+    ["-e", f.oldUlw],
+    [`--extension=${join(f.oldUlw, "index.ts")}`],
+    ["--no-extensions", "--hook", f.oldUlw],
+  ]) {
+    await expect(f.launch(args)).rejects.toThrow("explicitly selected by -e/--hook");
+  }
+}, 60_000);
+
+test("stock launch includes original extra extensions when checking disabled modules under exclusion", async () => {
+  const f = await launchFixture();
+  await writeFile(join(f.unrelated, "package.json"), JSON.stringify({
+    name: "operator-package", omp: { extensions: ["./index.ts", "./extra.ts"] },
+  }));
+  await writeFile(f.configPath, JSON.stringify({
+    extensions: [f.oldUlw], disabledExtensions: ["extension-module:extra"],
+  }));
+  await expect(f.launch(["--extension", f.unrelated])).rejects.toThrow("re-enable disabled modules or change hook order");
+}, 60_000);
+
+test("stock launch rejects reordering an original explicit module ahead of ambient modules", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, JSON.stringify({ extensions: [f.oldUlw] }));
+  const cliExtension = join(f.root, "cli-extension.ts");
+  await writeFile(cliExtension, "throw new Error('CLI discovery must not execute factories');\n");
+  await expect(f.launch(["-e", cliExtension])).rejects.toThrow("re-enable disabled modules or change hook order");
+}, 60_000);
+
+test("stock launch uses original --config overlays and the generated config in native replacement order", async () => {
+  const f = await launchFixture();
+  const originalConfig = join(f.root, "operator.json");
+  const replacementConfig = join(f.root, "replacement.json");
+  await writeFile(originalConfig, JSON.stringify({ extensions: [f.unrelated, f.oldUlw] }));
+  await writeFile(replacementConfig, JSON.stringify({ extensions: [f.unrelated] }));
+  await writeFile(f.configPath, "{}");
+  const excluded = await f.launch(["--config", originalConfig]);
+  expect(excluded.noExtensions).toBe(true);
+  expect(excluded.extensionPaths).toContain(f.unrelated);
+  expect(excluded.extensionPaths).not.toContain(f.oldUlw);
+  const replaced = await f.launch(["--config", originalConfig, `--config=${replacementConfig}`]);
+  expect(replaced).toEqual({ extensionPaths: [f.remote], noExtensions: false });
+  await writeFile(f.configPath, JSON.stringify({ extensions: [f.unrelated] }));
+  expect(await f.launch(["--config", originalConfig])).toEqual({ extensionPaths: [f.remote], noExtensions: false });
+}, 60_000);
+
+test("stock launch preserves PI_CONFIG_FILES precedence beneath original CLI configs", async () => {
+  const f = await launchFixture();
+  const environmentConfig = join(f.root, "environment.json");
+  const originalConfig = join(f.root, "operator.json");
+  await writeFile(environmentConfig, JSON.stringify({ extensions: [f.oldUlw] }));
+  await writeFile(originalConfig, JSON.stringify({ extensions: [f.unrelated] }));
+  await writeFile(f.configPath, "{}");
+  const launch = await f.launch(["--config", originalConfig], { PI_CONFIG_FILES: environmentConfig });
+  expect(launch).toEqual({ extensionPaths: [f.remote], noExtensions: false });
+}, 60_000);
+
+test("stock launch bootstraps the explicit profile before its .env and native discovery", async () => {
+  const f = await launchFixture();
+  const profileAgent = join(f.home, ".omp/profiles/work/agent");
+  const profileConfig = join(f.root, "profile.json");
+  await mkdir(join(profileAgent, "extensions"), { recursive: true });
+  await writeFile(join(profileAgent, "extensions/profile.ts"), "throw new Error('profile discovery must not execute factories');\n");
+  await writeFile(profileConfig, JSON.stringify({ extensions: [f.unrelated, f.oldUlw] }));
+  await writeFile(join(profileAgent, ".env"), `PI_CONFIG_FILES=${profileConfig}\n`);
+  await writeFile(f.configPath, "{}");
+  const launch = await f.launch(["--profile=work"]);
+  expect(launch.noExtensions).toBe(true);
+  expect(launch.extensionPaths).toContain(join(profileAgent, "extensions/profile.ts"));
+  expect(launch.extensionPaths).not.toContain(join(f.agentDir, "extensions/ambient.ts"));
+  expect(launch.extensionPaths).toContain(f.unrelated);
+  expect(launch.extensionPaths).not.toContain(f.oldUlw);
+}, 60_000);
+
+test("stock launch follows native profile value consumption instead of scanning tokens", async () => {
+  const f = await launchFixture();
+  const launch = await f.launch(["--system-prompt", "--profile", "work"]);
+  expect(launch.noExtensions).toBe(true);
+  expect(launch.extensionPaths).toContain(join(f.agentDir, "extensions/ambient.ts"));
+}, 60_000);
+
+test("stock launch includes original plugin-dir hooks in native exclusion snapshots", async () => {
+  const f = await launchFixture();
+  const plugin = join(f.root, "operator-plugin");
+  const hook = join(plugin, "hooks/pre/plugin-proof.ts");
+  await mkdir(join(plugin, "hooks/pre"), { recursive: true });
+  await writeFile(hook, "throw new Error('plugin discovery must not execute factories');\n");
+  const launch = await f.launch([`--plugin-dir=${plugin}`]);
+  expect(launch.noExtensions).toBe(true);
+  expect(launch.extensionPaths).toContain(hook);
+  expect(launch.extensionPaths).not.toContain(f.oldUlw);
+}, 60_000);
+
+test("stock launch rejects ULW plugin-dir resources that --no-extensions cannot exclude", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, "{}");
+  await expect(f.launch(["--plugin-dir", f.oldUlw])).rejects.toThrow("cannot exclude another ULW copy's plugin resources");
+}, 60_000);
+
+test("stock launch rejects non-launch argv and end-of-options that prevents managed selection", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, "{}");
+  await expect(f.launch(["--"])).rejects.toThrow("does not select the managed ULW package root");
+  await expect(f.launch(["zsh", "-c", "exit 0"])).rejects.toThrow("not a shell command");
+  await expect(f.launch(["--trusted-extension", join(f.remote, "index.ts")])).rejects.toThrow("--trusted-extension cannot be combined");
+  await expect(f.launch(["--trusted-extension", join(f.remote, "index.ts"), "--"])).rejects.toThrow("cannot preserve managed ULW package resources");
+}, 60_000);
+
+test("stock launch does not resurrect disabled managed modules when replacing another ULW", async () => {
+  const f = await launchFixture();
+  await writeFile(f.configPath, JSON.stringify({ extensions: [f.oldUlw],
+    disabledExtensions: [`extension-module:${getExtensionNameFromPath(join(f.remote, "index.ts"))}`] }));
+  await expect(f.launch()).rejects.toThrow("re-enable disabled modules or change hook order");
+}, 60_000);
+
+test("stock launch refuses to change project package resource scope while excluding another ULW copy", async () => {
+  const f = await launchFixture();
+  await rename(join(f.unrelated, "skills"), join(f.unrelated, "knowledge"));
+  await writeFile(join(f.unrelated, "package.json"), JSON.stringify({
+    name: "operator-package", omp: { extensions: ["./index.ts"], skills: ["./knowledge"] },
+  }));
+  await mkdir(join(f.root, ".omp"));
+  await writeFile(join(f.root, ".omp/config.yml"), JSON.stringify({ extensions: [f.unrelated, f.oldUlw] }));
+  await writeFile(f.configPath, "{}");
+  await expect(f.launch()).rejects.toThrow(`change project resource scope to user scope: ${f.unrelated}`);
+}, 60_000);
 
 test("real preparation CLI installs, reads back provenance/resources/skills, and ignores arbitrary package scripts", async () => {
   const f = await fixture();
@@ -191,22 +427,23 @@ test("new Hosts select the newly active package despite an old head marker; live
   await updateManagedUlw(f.options);
   const firstPath = activeManagedUlw(f.options);
   const launcher = join(f.root, "host.ts");
-  await writeFile(launcher, `import * as fs from 'node:fs'; import * as net from 'node:net';
+  await writeStockHostExecutable(launcher, `import * as fs from 'node:fs';
+import { stockHostFixture } from ${JSON.stringify(resolve(import.meta.dir, "fixtures/stock-host.ts"))};
+import { readSessionHeaderId } from ${JSON.stringify(import.meta.resolve("@oh-my-pi/pi-coding-agent/session/session-loader"))};
 const args=process.argv.slice(2); const value=flag=>args[args.indexOf(flag)+1];
-const socket=value('--rpc-socket'); const sessionFile=value('--session');
+const socket=process.env.OMP_SUPERAGENT_HOST_SOCKET; const sessionFile=value('--session');
 const packagePath=process.env.OMP_SUPERAGENT_MANAGED_ULW_PATH;
 fs.writeFileSync(socket+'.observed.json',JSON.stringify({packagePath,args,managedRoot:process.env.OMP_SUPERAGENT_TEST_MANAGED_ULW_ROOT}));
-const server=net.createServer(peer=>{let pending='';peer.setEncoding('utf8');
-peer.on('error',()=>{});peer.on('data',chunk=>{pending+=chunk;let end;
-while((end=pending.indexOf('\\n'))>=0){const cmd=JSON.parse(pending.slice(0,end));pending=pending.slice(end+1);
-const bytes=fs.readFileSync(packagePath+'/index.ts','utf8');
-peer.write(JSON.stringify({type:'response',id:cmd.id,command:cmd.type,success:true,data:{sessionId:'fixture',sessionFile,hostPid:process.pid,sessionName:bytes}})+'\\n');}});
-peer.write(JSON.stringify({type:'ready',supportedProtocolVersions:[1]})+'\\n');});
-server.listen(socket,()=>fs.chmodSync(socket,0o600));`);
+const sessionId=await readSessionHeaderId(sessionFile);
+if(!sessionId)throw new Error('Fixture requires the actual persisted session identity');
+await stockHostFixture({sessionId,sessionFile,state:()=>({sessionName:fs.readFileSync(packagePath+'/index.ts','utf8')})});`);
+  const home = join(f.root, "host-home");
+  await mkdir(join(home, "agent"), { recursive: true });
   const launch = async (name: string, env: Record<string, string>, managedUlwRoot?: string) => {
-    const options: HostOptions = { command: [process.execPath, launcher], socketPath: join(f.root, `${name}.sock`),
+    const options: HostOptions = { command: [launcher], socketPath: join(f.root, `${name}.sock`),
       sessionFile: join(f.root, `${name}.jsonl`), cwd: f.root, extensionPath: launcher,
-      managedUlwRoot, env, logPath: join(f.root, `${name}.log`), subagentConcurrency: 1 };
+      managedUlwRoot, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, PI_CODING_AGENT_DIR: join(home, "agent"), ...env },
+      logPath: join(f.root, `${name}.log`), subagentConcurrency: 1 };
     const { pid } = await startHost(options);
     cleanups.push(async () => { try { process.kill(pid, "SIGKILL"); } catch {} });
     return JSON.parse(await readFile(options.socketPath + ".observed.json", "utf8")) as { packagePath: string; args: string[]; managedRoot: string };
@@ -227,7 +464,7 @@ server.listen(socket,()=>fs.chmodSync(socket,0o600));`);
   expect(await readFile(join(head.packagePath, "index.ts"), "utf8")).toContain("v1");
   const liveHead = await connect(join(f.root, "head.sock"));
   try {
-    const response = await liveHead.client.request({ type: "get_state" });
+    const response = await liveHead.request({ type: "get_state" });
     expect(JSON.stringify(response)).toContain("v1");
     expect(JSON.stringify(response)).not.toContain("v2");
   } finally { await liveHead.close(); }

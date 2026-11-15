@@ -87,11 +87,11 @@ function alive(pid: number): boolean {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
 }
 
-/** Independent real patched-OMP proof; existing native verification assets remain unchanged. */
+/** Independent installed-OMP proof through the owned stdio adapter. */
 export async function nativeSteeringRuntime(): Promise<void> {
   const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
   if (!Array.isArray(parsed) || !parsed.length || parsed.some(value => typeof value !== "string" || !value))
-    throw new Error("Native steering requires OMP_TEST_COMMAND as an explicit patched CLI argv JSON array");
+    throw new Error("Native steering requires OMP_TEST_COMMAND as an explicit installed CLI argv JSON array");
   const nativeCommand: string[] = parsed;
   const natives = process.env.OMP_TEST_NATIVES_DIR;
   if (natives && !path.isAbsolute(natives)) throw new Error("OMP_TEST_NATIVES_DIR must be absolute");
@@ -142,7 +142,7 @@ export async function nativeSteeringRuntime(): Promise<void> {
   };
   const fixture = path.resolve(import.meta.dir, "steering-native-extension.ts");
   const guard = path.resolve(import.meta.dir, "native-extension.ts");
-  const command = ["/usr/bin/env", "-i", ...Object.entries(env).map(([name, value]) => `${name}=${value}`), ...nativeCommand, "-e", guard];
+  const command = [...nativeCommand, "-e", guard];
   const config: Config = {
     path: path.join(root, "superagent.json"), stateDir: root, headCwd, command,
     maxHosts: 3, maxSubagents: 3, idleMs: 3_600_000, model: `${steeringModel.provider}/${steeringModel.id}`,
@@ -198,7 +198,8 @@ export async function nativeSteeringRuntime(): Promise<void> {
     else errors.push(error);
   }, {
     startHost: async options => {
-      const started = await startHost({ ...options, managedUlwPath });
+      const started = await startHost({ ...options, managedUlwPath, env: { ...env,
+        ...Object.fromEntries(Object.entries(options.env).filter(([name]) => name.startsWith("OMP_SUPERAGENT_"))) } });
       owned.set(options.socketPath, { ...started, socketPath: options.socketPath, sessionFile: options.sessionFile });
       return started;
     },
@@ -560,7 +561,7 @@ export async function nativeSteeringRuntime(): Promise<void> {
           if (state.hostPid !== host.pid || state.sessionFile !== host.sessionFile) throw new Error("Refusing foreign native steering host cleanup");
           verified = true;
           if (!state.isSettled) await connection.client.abortAndRestoreQueue();
-          await connection.client.shutdownHost();
+          await connection.request({ type: "shutdown_host" });
           await within(connection.exited, "owned native steering shutdown", 10_000);
           await within(until(() => !alive(host.pid), "owned native process exit"), "native process exit", 10_000);
         } catch (error) {

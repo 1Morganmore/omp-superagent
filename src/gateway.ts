@@ -33,8 +33,8 @@ export interface GatewayOptions {
   /** Only the durable, owned one-shot handoff may supply this identity. */
   restartRequestId?: string;
 }
-interface HeadIdentity { pid: number; sessionId: string; sessionFile: string; dev: number; ino: number }
-interface SocketIdentity { pid: number; dev: number; ino: number }
+interface HeadIdentity { pid: number; ownerPid: number; sessionId: string; sessionFile: string; dev: number; ino: number }
+interface SocketIdentity { pid: number; ownerPid?: number; dev: number; ino: number }
 
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
@@ -43,11 +43,14 @@ function alive(pid: number): boolean {
     throw error;
   }
 }
-async function removeDeadSocket(socketPath: string, identity: SocketIdentity | null): Promise<void> {
+async function removeDeadSocket(socketPath: string, identity: SocketIdentity | null, kind: "gateway" | "host"): Promise<void> {
   let stat;
   try { stat = await lstat(socketPath); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-  if (!identity || alive(identity.pid) || !stat.isSocket() || stat.uid !== process.getuid?.() ||
+  if (!identity || alive(identity.pid) ||
+      kind === "host" && (typeof identity.ownerPid !== "number" || !Number.isSafeInteger(identity.ownerPid) ||
+        identity.ownerPid < 1 || alive(identity.ownerPid))
+      || !stat.isSocket() || stat.uid !== process.getuid?.() ||
       stat.dev !== identity.dev || stat.ino !== identity.ino)
     throw new Error("Existing endpoint ownership is unresolved; no socket was removed or second host started");
   await unlink(socketPath);
@@ -123,7 +126,7 @@ export class GatewayService {
       }
       const path = gatewayPaths(this.config).socketPath;
       const previous = JSON.parse(this.store.getMeta("gateway:socket") ?? "null") as SocketIdentity | null;
-      await removeDeadSocket(path, previous);
+      await removeDeadSocket(path, previous, "gateway");
       await this.server.listen();
       await this.messenger.start({
         ready: this.server.initialReady.promise,
@@ -191,11 +194,12 @@ export class GatewayService {
       const state = await connection.client.getState();
       if (resolve(state.sessionFile!) !== resolve(paths.sessionFile)) throw new Error("Main endpoint belongs to another native session");
       const stat = await lstat(paths.socketPath);
-      return { pid: state.hostPid!, sessionId: state.sessionId, sessionFile: state.sessionFile!, dev: stat.dev, ino: stat.ino };
+      return { pid: state.hostPid!, ownerPid: state.adapterOwnerPid, sessionId: state.sessionId,
+        sessionFile: state.sessionFile!, dev: stat.dev, ino: stat.ino };
     } finally { await connection.close(); }
   }
   private sameHead(actual: HeadIdentity, expected: HeadIdentity): boolean {
-    return actual.pid === expected.pid && actual.sessionId === expected.sessionId &&
+    return actual.pid === expected.pid && actual.ownerPid === expected.ownerPid && actual.sessionId === expected.sessionId &&
       resolve(actual.sessionFile) === resolve(expected.sessionFile) && actual.dev === expected.dev && actual.ino === expected.ino;
   }
   private async authorizeHead(pid: number): Promise<void> {
@@ -226,12 +230,15 @@ export class GatewayService {
         if (alive(known.pid)) throw error;
       }
     }
-    await removeDeadSocket(paths.socketPath, this.head);
+    await removeDeadSocket(paths.socketPath, this.head, "host");
     this.head = null;
     this.store.setMeta("gateway:head", "null");
     const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
     for (const name of credentialEnvNames(this.config)) delete env[name];
     delete env.OMP_RPC_SOCKET;
+    delete env.OMP_SUPERAGENT_HOST_SOCKET;
+    delete env.OMP_SUPERAGENT_NATIVE_SOCKET;
+    delete env.OMP_SUPERAGENT_HOST_CONFIG;
     env.OMP_SUPERAGENT_CONFIG = this.config.path;
     env.OMP_SUPERAGENT_ROLE = "head";
     env.OMP_SUPERAGENT_GATEWAY_TOKEN = this.store.token();
@@ -287,8 +294,14 @@ export class GatewayService {
         throw error;
       } finally { await connection.close(); }
       const deadline = Date.now() + 15_000;
-      while (alive(head.pid) && Date.now() < deadline) await Bun.sleep(25);
-      if (alive(head.pid)) throw new Error("Native head shutdown is pending; Gateway supervision remains stopped");
+      while ((alive(head.pid) || existsSync(hostPaths(this.config, "main").socketPath)) && Date.now() < deadline) await Bun.sleep(25);
+      if (alive(head.pid) || existsSync(hostPaths(this.config, "main").socketPath))
+        throw new Error("Native head exit/persistence is pending; Gateway supervision remains stopped");
+      const receipt = await Bun.file(`${hostPaths(this.config, "main").socketPath}.exit.json`).json();
+      if (receipt.pid !== head.pid || receipt.ownerPid !== head.ownerPid || receipt.sessionId !== head.sessionId
+        || receipt.sessionFile !== head.sessionFile || receipt.code !== 0 || receipt.signal !== null
+        || receipt.persisted !== true || receipt.observationsFlushed !== true)
+        throw new Error("Native head exit and durable persistence were not confirmed; Gateway supervision remains stopped");
     }
     this.head = null;
     this.store.setMeta("gateway:head", "null");
@@ -553,7 +566,8 @@ export async function launchGateway(config: Config, restartRequestId?: string, c
       plan = readRestartPlan(handoff, restartRequestId);
       await validateRestartPlan(config, restart, plan);
       if (!restart || !plan || restart.state !== "head-stopped" || plan.runnerPid !== process.pid || plan.launchPid ||
-          handoff.getMeta("gateway:restart-active") !== restartRequestId || alive(restart.gatewayPid) || alive(restart.headPid))
+          handoff.getMeta("gateway:restart-active") !== restartRequestId || alive(restart.gatewayPid) ||
+          alive(restart.headPid) || alive(plan.head.ownerPid))
         throw new Error("Restart launch authority is no longer valid");
     } catch (error) { handoff.close(); throw error; }
   }

@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { YAML, type Subprocess } from "bun";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import { discoverInstalledOmp } from "../src/installed-omp";
 
-// Opt in because this exercises the prepared real native CLI, Python, and Unix PTYs.
+// Opt in because this exercises the installed real native CLI, Python, and Unix PTYs.
 const ptyTest = process.env.OMP_SUPERAGENT_SETUP_PTY_TEST === "1" ? test : test.skip;
 const repo = path.resolve(import.meta.dir, "..");
 const relay = path.join(import.meta.dir, "fixtures/setup-pty.py");
@@ -60,6 +60,7 @@ class Terminal {
   private cursor = 0;
   private serial = 0;
   private ended = false;
+  private exitCode?: number;
 
   constructor(command: string[], cwd: string, env: Record<string, string>, tty = true) {
     const child = Bun.spawn(["python3", "-u", relay, JSON.stringify({ command, tty })], {
@@ -89,6 +90,7 @@ class Terminal {
             }
           } else if (event.type === "exit") {
             this.ended = true;
+            this.exitCode = event.code;
             this.done.resolve(event);
           } else {
             const request = this.requests.get(event.id!);
@@ -111,7 +113,7 @@ class Terminal {
       throw error;
     }).finally(() => {
       this.ended = true;
-      const error = new Error("Setup exited before the expected terminal event");
+      const error = this.earlyExit("Setup exited before the expected terminal event");
       for (const waiter of this.prompts) waiter.reject(error);
       for (const request of this.requests.values()) request.reject(error);
       this.prompts.clear();
@@ -122,10 +124,14 @@ class Terminal {
 
   transcript(): string { return this.raw; }
 
+  private earlyExit(message: string): Error {
+    return new Error(`${message} (exit ${this.exitCode ?? "unknown"}):\n${this.raw}`);
+  }
+
   async prompt(text: string): Promise<void> {
     const index = this.raw.indexOf(text, this.cursor);
     if (index >= 0) { this.cursor = index + text.length; return; }
-    if (this.ended) throw new Error(`Setup exited before prompt: ${text}`);
+    if (this.ended) throw this.earlyExit(`Setup exited before prompt: ${text}`);
     const pending = Promise.withResolvers<void>();
     const waiter = { text, resolve: () => pending.resolve(), reject: pending.reject };
     this.prompts.add(waiter);
@@ -178,7 +184,7 @@ class Terminal {
 }
 
 interface Audit {
-  phase: "launch" | "doctor" | "profile";
+  phase: "launch" | "doctor" | "probe" | "profile";
   argv: string[];
   hashes: Record<string, string | null>;
   platform?: string;
@@ -234,16 +240,14 @@ async function fixture(native: Record<string, unknown> | null = { memory: { back
   await fs.writeFile(guard, `
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { REST, Routes } from ${JSON.stringify(import.meta.resolve("discord.js"))};
-import { Api } from ${JSON.stringify(import.meta.resolve("grammy"))};
 import net from "node:net";
 import tls from "node:tls";
 import dgram from "node:dgram";
 const names = JSON.parse(process.env.SETUP_PTY_NAMES);
-function record(phase) {
-  appendFileSync(process.env.SETUP_PTY_AUDIT, JSON.stringify({ phase, argv: process.argv,
-    hashes: Object.fromEntries(names.map(name => [name, process.env[name] === undefined ? null :
-      createHash("sha256").update(process.env[name]).digest("hex")])) }) + "\\n");
+function record(phase, argv = process.argv, env = process.env) {
+  appendFileSync(process.env.SETUP_PTY_AUDIT, JSON.stringify({ phase, argv,
+    hashes: Object.fromEntries(names.map(name => [name, env[name] === undefined ? null :
+      createHash("sha256").update(env[name]).digest("hex")])) }) + "\\n");
 }
 function deny(operation) {
   return function () {
@@ -259,6 +263,11 @@ for (const name of ["connect", "listen", "serve"]) Bun[name] = deny("Bun." + nam
 globalThis.fetch = deny("fetch");
 globalThis.WebSocket = class { constructor() { deny("WebSocket")(); } };
 record("launch");
+// Profile mocks belong to setup's Bun process. The installed compiled OMP
+// metadata subprocess inherits the network guard, not external SDK preloads.
+if (process.argv.includes("setup")) {
+const { REST, Routes } = await import(${JSON.stringify(import.meta.resolve("discord.js"))});
+const { Api } = await import(${JSON.stringify(import.meta.resolve("grammy"))});
 const hash = value => createHash("sha256").update(value).digest("hex");
 const tokens = new WeakMap();
 const setToken = REST.prototype.setToken;
@@ -300,6 +309,7 @@ Api.prototype.getUserProfilePhotos = async function (id, options) {
   profile("telegram", "getProfile", this.token);
   return { total_count: 1, photos: [[{ file_id: "mascot-photo", file_unique_id: "mascot-unique", width: 1254, height: 1254 }]] };
 };
+}
 // Native settings imports eagerly load OMP's own dotenv, unlike setup itself.
 // Observe that real side effect rather than mocking the inspector or its wiring.
 process.on("exit", () => {
@@ -309,8 +319,13 @@ process.on("exit", () => {
 const originalSpawn = Bun.spawn;
 Bun.spawn = function (...args) {
   const command = Array.isArray(args[0]) ? args[0] : args[0]?.cmd;
-  if (process.argv.includes("doctor") && command?.includes("--help")) record("doctor");
-  return originalSpawn.apply(Bun, args);
+  const child = originalSpawn.apply(Bun, args);
+  if (process.argv.includes("doctor") && command?.includes("--help")) {
+    record("doctor");
+    const options = Array.isArray(args[0]) ? args[1] : args[0];
+    record("probe", command, options?.env ?? process.env);
+  }
+  return child;
 };
 `);
   const env: Record<string, string> = {
@@ -322,17 +337,12 @@ Bun.spawn = function (...args) {
     SETUP_PTY_IMPORT_AUDIT: importAudit,
     SETUP_PTY_VIOLATION: violation, SETUP_PTY_NAMES: JSON.stringify(trackedNames),
   };
-  const metadata = await Bun.file(path.join(repo, "upstream/omp.json")).json();
-  const preparedBun = path.join(repo, ".upstream/toolchain/node_modules/.bin/bun");
-  let executable = process.execPath;
-  try { await fs.access(preparedBun, constants.X_OK); executable = preparedBun; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const nativeCommand = [await fs.realpath(executable), "--no-env-file", path.resolve(repo, metadata.checkout, metadata.runtime.entry)];
+  const nativeCommand = [discoverInstalledOmp(env.PATH)];
   // Resolve isolated fixture paths through native APIs in a fresh process; do
   // not import native dirs/dotenv into this runner's real HOME or cache them.
   const settingsModule = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
   const dirsModule = Bun.resolveSync("@oh-my-pi/pi-utils/dirs", path.dirname(fileURLToPath(settingsModule)));
-  const resolver = Bun.spawn([nativeCommand[0]!, "--no-env-file", "-e", `
+  const resolver = Bun.spawn([process.execPath, "--no-env-file", "-e", `
     import { join } from "node:path";
     import { getAgentDir, getAgentDbPath, getProjectAgentDir, getMemoriesDir, MAIN_CONFIG_FILENAMES } from ${JSON.stringify(dirsModule)};
     const agentDir = getAgentDir();
@@ -449,9 +459,11 @@ async function doctor(context: Fixture, explicit: Record<string, string> = {}) {
     }
     const observed = audit.filter(row => row.phase === "doctor").at(-1)!;
     expect(observed).toBeDefined();
-    // The native command really ran --help, but received no messenger credentials.
-    const probe = audit.filter(row => row.phase === "launch" && row.argv.includes("--help")).at(-1)!;
+    // The installed compiled CLI need not execute Bun preloads. Observe the
+    // actual spawn boundary; successful doctor proves its metadata probe exited.
+    const probe = audit.filter(row => row.phase === "probe" && row.argv.includes("--help")).at(-1)!;
     expect(probe).toBeDefined();
+    expect(probe.argv).toEqual([context.nativeCommand[0]!, "--help"]);
     for (const name of Object.keys(result.credentials)) expect(probe.hashes[name]).toBeNull();
     return { stdout, result, observed };
   } finally {

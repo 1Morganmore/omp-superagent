@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, requireMessengerCredentials } from "./config";
+import { inspectInstalledOmp, supportedOmp } from "./installed-omp";
 import { loadCredentials } from "./credentials";
 import type { Lane } from "./contracts";
 import { setup } from "./setup";
@@ -17,7 +18,6 @@ Usage:
   omp-sa install --config FILE
   omp-sa uninstall --config FILE
   omp-sa status --config FILE
-  omp-sa attach [main|LANE_ID] --config FILE [--read-only]
   omp-sa stop [main|LANE_ID] --config FILE
   omp-sa doctor --config FILE
   omp-sa discord-commands --config FILE [--apply]
@@ -29,13 +29,12 @@ start explicitly launches a detached Gateway and its native head, activating con
 install enables macOS per-user startup at future login only; requires configured messenger credentials in private FILE.env and native settings/authentication under the OS account home. No immediate start or shell environment capture.
 uninstall removes only the owned login launcher; it does not stop an existing Gateway/head or remove credentials/state.
 stop main stops the supervised Gateway/head service; busy native hosts refuse without being killed or resurrected.
-attach uses the same host, not another --resume writer. Run it in a herdr pane if desired.
 discord-commands uses Discord REST only: dry-run by default, with no Gateway or native runtime activation.
 --apply exclusively replaces this dedicated bot's GLOBAL commands with supported Superagent commands, deleting obsolete registrations (including Hermes). Guild commands are preserved; shadowing conflicts refuse apply.
 telegram-commands configures owner-scoped Telegram command menus; --language selects an optional Telegram language code.
 slack-commands configures /superagent-* commands through the app manifest; NAME identifies an app-configuration token environment variable, never a token argument.
 All command registration is read-only by default and requires --apply to change remote configuration. No polling, Socket Mode, or native model session is started.
-Use the patched OMP command prepared with scripts/prepare-omp.ts.
+Requires an already installed stock OMP ${supportedOmp}. Same-process native TUI attach is not supported.
 `;
 
 function laneRows(stateDir: string): Lane[] {
@@ -51,7 +50,7 @@ function laneRows(stateDir: string): Lane[] {
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (!args.length || args.includes("--help") || args[0] === "help") { console.log(HELP); return; }
   const [command] = args;
-  if (!["setup", "start", "install", "uninstall", "status", "attach", "stop", "doctor", "discord-commands", "telegram-commands", "slack-commands"].includes(command!)) throw new Error(`Unknown command: ${command}`);
+  if (!["setup", "start", "install", "uninstall", "status", "stop", "doctor", "discord-commands", "telegram-commands", "slack-commands"].includes(command!)) throw new Error(`Unknown command: ${command}`);
   const configAt = args.indexOf("--config");
   if (configAt < 0 || !args[configAt + 1]) throw new Error("--config FILE is required");
   if (command === "install" || command === "uninstall") {
@@ -103,17 +102,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const paths = hostPaths(config, target);
   if (command === "doctor") {
     loadCredentials(config);
-    const probeEnv = { ...process.env };
-    for (const name of credentialEnvNames(config)) delete probeEnv[name];
-    const probe = Bun.spawn([...config.command, "--help"], { env: probeEnv, stdout: "pipe", stderr: "ignore" });
-    const [stdout, code] = await Promise.all([
-      new Response(probe.stdout).text(), probe.exited,
-    ]);
-    if (code !== 0) throw new Error(`OMP command failed (${code}); diagnostic output suppressed to protect credentials`);
-    if (!["--rpc-socket", "--session-settings", "--model-preset"].every(flag => stdout.includes(flag)))
-      throw new Error("Configured OMP lacks managed socket/session-settings/model-preset support. Apply the current pinned core patch; a normal installed OMP is not enough.");
+    const omp = await inspectInstalledOmp(config.command, credentialEnvNames(config));
     console.log(JSON.stringify({
       config: config.path, command: config.command, headCwd: config.headCwd,
+      omp, nativeTuiAttach: false,
       maxHosts: config.maxHosts, maxSubagents: config.maxSubagents,
       platforms: configuredPlatforms(config),
       credentials: Object.fromEntries(credentialEnvNames(config).map(name => [name, Boolean(process.env[name])])),
@@ -139,13 +131,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   }
   if (target !== "main" && !laneRows(config.stateDir).some(l => l.id === target))
     throw new Error("Unknown managed lane");
-  if (command === "attach") {
-    const proc = Bun.spawn([
-      ...config.command, "attach", paths.socketPath, ...(args.includes("--read-only") ? ["--read-only"] : []),
-    ], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-    process.exitCode = await proc.exited;
-    return;
-  }
   if (command === "stop") {
     if (target === "main") {
       const { stopGateway } = await import("./gateway");

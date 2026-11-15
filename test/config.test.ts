@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { authorizeRoute, configuredPlatforms, credentialEnvNames, loadConfig } from "../src/config";
+import { main } from "../src/cli";
+import { discoverInstalledOmp, inspectInstalledOmp } from "../src/installed-omp";
 import type { Route } from "../src/contracts";
 
 const dirs: string[] = [];
@@ -27,6 +29,7 @@ describe("operator execution limits", () => {
     const loaded = await loadConfig(path);
     expect(loaded.stateDir).toBe(join(dirname(path), "state"));
     expect(loaded.headCwd).toBe(realpathSync(dirname(path)));
+    expect(loaded.command).toEqual([discoverInstalledOmp()]);
   });
   test("requires an explicit Discord owner rather than a permissive default", async () => {
     await expect(loadConfig(await config({ discord: { tokenEnv: "TOKEN", allowedGuildIds: [], allowedChannelIds: [] } })))
@@ -82,5 +85,103 @@ describe("operator execution limits", () => {
     await expect(loadConfig(await config({
       modelPresets: { high: { provider: "local", id: "chat" } },
     }))).rejects.toThrow("native OMP settings");
+  });
+  test.each(["--session-settings", "--rpc-socket=/tmp/old.sock", "--model-preset", "attach"])(
+    "rejects patched-only launch argument %s", async flag => {
+      await expect(loadConfig(await config({ command: ["omp", flag] }))).rejects.toThrow("unsupported patched OMP arguments");
+    },
+  );
+  test("removed attach command cannot start another session writer", async () => {
+    await expect(main(["attach", "main", "--config", "unused.json"])).rejects.toThrow("Unknown command: attach");
+  });
+  test("retains explicit custom stock command argv", async () => {
+    const command = [process.execPath, "--no-env-file", "/external/stock-omp.ts", "--profile", "attach"];
+    expect((await loadConfig(await config({ command }))).command).toEqual(command);
+    await expect(inspectInstalledOmp(command)).rejects.toThrow("not a runtime/script wrapper");
+  });
+});
+
+describe("installed OMP prerequisite", () => {
+  async function executable(version = "18.20.2", help = "--mode rpc --resume PATH --extension FILE --model MODEL") {
+    const directory = mkdtempSync(join(tmpdir(), "superagent-installed-"));
+    dirs.push(directory);
+    const command = join(directory, "omp");
+    const audit = join(directory, "calls.jsonl");
+    writeFileSync(command, `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(audit)}, JSON.stringify({ args: process.argv.slice(2), credential: process.env.INSTALLED_OMP_TEST_TOKEN ?? null, scope: process.env.INSTALLED_OMP_TEST_SCOPE ?? null, parentOnly: process.env.INSTALLED_OMP_PARENT_ONLY ?? null }) + "\\n");
+if (process.argv.at(-1) === "--version") console.log(${JSON.stringify(`omp/${version}`)});
+else if (process.argv.at(-1) === "--help") console.log(${JSON.stringify(help)});
+else process.exit(8);
+`);
+    chmodSync(command, 0o700);
+    return { directory, command, audit };
+  }
+
+  test("ignores dependency shims prepended by Bun lifecycle scripts", async () => {
+    const f = await executable();
+    const shimDirectory = join(f.directory, "node_modules", ".bin");
+    mkdirSync(shimDirectory, { recursive: true });
+    symlinkSync("/unavailable/project-sdk", join(shimDirectory, "omp"));
+    expect(discoverInstalledOmp(`${shimDirectory}:${f.directory}`)).toBe(realpathSync(f.command));
+    expect(() => discoverInstalledOmp(shimDirectory)).toThrow("installed stock OMP");
+  });
+
+  test("inspects only help/version in the supplied environment and removes messenger credentials", async () => {
+    const f = await executable();
+    const previous = process.env.INSTALLED_OMP_TEST_TOKEN;
+    const previousParent = process.env.INSTALLED_OMP_PARENT_ONLY;
+    process.env.INSTALLED_OMP_TEST_TOKEN = "private-messenger-token";
+    process.env.INSTALLED_OMP_PARENT_ONLY = "private-parent-variable";
+    try {
+      const result = await inspectInstalledOmp(["omp", "--profile", "isolated", "-e", "/must-not-load.ts"], ["INSTALLED_OMP_TEST_TOKEN"], {
+        PATH: f.directory, INSTALLED_OMP_TEST_TOKEN: "provided-token", INSTALLED_OMP_TEST_SCOPE: "isolated",
+      });
+      expect(result).toMatchObject({ version: "18.20.2", testedVersion: "18.20.2", stdioRpc: true, sessions: true });
+      const rows = (await Bun.file(f.audit).text()).trim().split("\n").map(line => JSON.parse(line));
+      expect(rows).toEqual([
+        { args: ["--version"], credential: null, scope: "isolated", parentOnly: null },
+        { args: ["--help"], credential: null, scope: "isolated", parentOnly: null },
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.INSTALLED_OMP_TEST_TOKEN;
+      else process.env.INSTALLED_OMP_TEST_TOKEN = previous;
+      if (previousParent === undefined) delete process.env.INSTALLED_OMP_PARENT_ONLY;
+      else process.env.INSTALLED_OMP_PARENT_ONLY = previousParent;
+    }
+  });
+
+  test.each(["18.20.1", "17.99.0", "19.0.0", "18.20.2-preview"])("rejects unsupported version %s", async version => {
+    const f = await executable(version);
+    await expect(inspectInstalledOmp([f.command])).rejects.toThrow("Install a supported stock OMP");
+  });
+
+  test("does not confuse patched flags or prefix matches with public capabilities", async () => {
+    const f = await executable("18.20.2", "--mode rpc-ui --session-settings FILE --extensions FILE --model-preset high");
+    await expect(inspectInstalledOmp([f.command])).rejects.toThrow("public stdio RPC");
+    const ui = await executable("18.20.2", "--mode rpc-ui --resume PATH --extension FILE --model MODEL");
+    await expect(inspectInstalledOmp([ui.command])).rejects.toThrow("public stdio RPC");
+  });
+
+  test("doctor reports installed capabilities without activating services or native settings", async () => {
+    const f = await executable();
+    const path = await config({ command: [f.command] });
+    const child = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/cli.ts"), "doctor", "--config", path], {
+      env: { PATH: process.env.PATH, HOME: f.directory, PI_CODING_AGENT_DIR: join(f.directory, "agent") },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(JSON.parse(stdout)).toMatchObject({
+      omp: { version: "18.20.2", testedVersion: "18.20.2", stdioRpc: true },
+      nativeTuiAttach: false, messengersActivated: false,
+      credentials: { DISCORD_BOT_TOKEN: false },
+    });
+    expect(await Bun.file(join(dirname(path), "state/coordination.sqlite")).exists()).toBe(false);
+    expect(await Bun.file(join(f.directory, "agent/agent.db")).exists()).toBe(false);
+    const rows = (await Bun.file(f.audit).text()).trim().split("\n").map(line => JSON.parse(line));
+    expect(rows.map(row => row.args)).toEqual([["--version"], ["--help"]]);
   });
 });

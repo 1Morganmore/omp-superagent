@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Api, InputFile } from "grammy";
+import { AbortController as ApiAbortController, type AbortSignal as ApiAbortSignal } from "abort-controller";
 import type { CallbackQuery, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, UserFromGetMe } from "grammy/types";
 import { physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
@@ -62,6 +63,19 @@ function record(value: unknown): Record<string, unknown> { return value !== null
 function code(error: unknown): number | undefined { const value = record(error).error_code; return typeof value === "number" ? value : undefined; }
 function notModified(error: unknown): boolean { return code(error) === 400 && String(record(error).description).includes("message is not modified"); }
 
+/** grammY's Node entrypoint requires its SDK signal; keep caller cancellation scoped to the API call. */
+export async function withTelegramSignal<T>(
+  signal: AbortSignal | undefined, call: (signal: ApiAbortSignal | undefined) => Promise<T>,
+): Promise<T> {
+  if (!signal) return call(undefined);
+  const controller = new ApiAbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  try { return await call(controller.signal); }
+  finally { signal.removeEventListener("abort", abort); }
+}
+
 /** Never retain SDK errors: their nested HTTP causes/payloads can contain tokens. */
 export function telegramDeliveryError(error: unknown): DeliveryError {
   if (error instanceof DeliveryError) return error;
@@ -117,9 +131,9 @@ export class TelegramMessenger implements Messenger {
     // authentication reads are still in flight. No raw startup error is logged.
     const ready = handlers.ready?.then(() => true, () => false);
     try {
-      this.me = await this.api.getMe(this.abort.signal);
+      this.me = await withTelegramSignal(this.abort.signal, signal => this.api.getMe(signal));
       if (!this.me.is_bot || !Number.isSafeInteger(this.me.id)) throw new DeliveryError("Telegram getMe did not identify a bot", "rejected");
-      const webhook = await this.api.getWebhookInfo(this.abort.signal);
+      const webhook = await withTelegramSignal(this.abort.signal, signal => this.api.getWebhookInfo(signal));
       if (webhook.url) throw new DeliveryError("Telegram bot already has a webhook; refusing to remove or replace it", "rejected");
       const offset = this.options.store.getMeta(this.offsetKey);
       if (offset !== null && !integer(offset)) throw new DeliveryError("Telegram stored update offset is invalid", "rejected");
@@ -153,8 +167,10 @@ export class TelegramMessenger implements Messenger {
         // acknowledge a new, lower random update sequence before admission.
         if (offset !== undefined && (savedObservedAt === null || !integer(savedObservedAt) ||
           Number(savedObservedAt) > now || now - Number(savedObservedAt) >= CURSOR_IDLE_MS)) offset = undefined;
-        const updates = await this.api.getUpdates({ ...(offset === undefined ? {} : { offset }), timeout: 30, limit: 100,
-          allowed_updates: ["message", "edited_message", "callback_query"] }, signal);
+        const updates = await withTelegramSignal(signal, sdkSignal => this.api.getUpdates({
+          ...(offset === undefined ? {} : { offset }), timeout: 30, limit: 100,
+          allowed_updates: ["message", "edited_message", "callback_query"],
+        }, sdkSignal));
         const observedAt = Date.now();
         if (recovering) { await this.handlers?.reconnect?.(); recovering = false; }
         for (const update of updates) {
@@ -619,7 +635,7 @@ export class TelegramMessenger implements Messenger {
         this.options.store.getMeta(this.fileKey(route, attachment.id)) !== this.fileIdentity(attachment)) {
         throw new DeliveryError("Telegram attachment does not belong to an admitted message on this route", "rejected");
       }
-      const file = await this.api.getFile(attachment.id, signal);
+      const file = await withTelegramSignal(signal, sdkSignal => this.api.getFile(attachment.id, sdkSignal));
       const path = file.file_path;
       if (file.file_id !== attachment.id || (file.file_size !== undefined &&
         (typeof file.file_size !== "number" || !Number.isSafeInteger(file.file_size) || file.file_size < 0 || file.file_size > DOWNLOAD_LIMIT)) || !path ||

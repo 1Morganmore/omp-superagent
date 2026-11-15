@@ -15,7 +15,7 @@ export interface RestartPlan {
   stateDir: string;
   configHash: string;
   socket: { pid: number; dev: number; ino: number };
-  head: { pid: number; sessionId: string; sessionFile: string; dev: number; ino: number };
+  head: { pid: number; ownerPid: number; sessionId: string; sessionFile: string; dev: number; ino: number };
   runnerPid?: number;
   runnerReady?: boolean;
   launchPid?: number;
@@ -36,6 +36,7 @@ export async function restartConfigHash(path: string): Promise<string> {
 export async function validateRestartPlan(config: Config, record: GatewayRestartRecord | null, plan: RestartPlan | null): Promise<void> {
   if (!record || !plan || resolve(plan.configPath) !== resolve(config.path) || resolve(plan.stateDir) !== resolve(config.stateDir) ||
       record.gatewayPid !== plan.socket.pid || record.headPid !== plan.head.pid ||
+      !Number.isSafeInteger(plan.head.ownerPid) || plan.head.ownerPid < 1 ||
       record.sessionId !== plan.head.sessionId || resolve(record.sessionFile) !== resolve(plan.head.sessionFile) ||
       resolve(record.sessionFile) !== resolve(hostPaths(config, "main").sessionFile))
     throw new Error("Restart durable ownership does not match the original configuration and session");
@@ -109,7 +110,8 @@ export async function runGatewayRestart(configPath: string, requestId: string, o
         }).immediate();
       }
       if (record.state === "head-stopped" && processAlive(record.headPid)) throw new Error("Predecessor HEAD shutdown is not confirmed");
-      if (record.state === "head-stopped" && plan.runnerPid === process.pid && !processAlive(record.gatewayPid)) {
+      if (record.state === "head-stopped" && plan.runnerPid === process.pid &&
+          !processAlive(record.gatewayPid) && !processAlive(plan.head.ownerPid)) {
         try { lock = new GatewayStore(config.stateDir); }
         catch { /* A released process identity is not yet a released lifetime lock. */ }
         if (lock) break;
@@ -123,7 +125,7 @@ export async function runGatewayRestart(configPath: string, requestId: string, o
     await validateRestartPlan(config, current, currentPlan);
     if (!current || !currentPlan || current.state !== "head-stopped" || currentPlan.runnerPid !== process.pid ||
         lock.getMeta("gateway:restart-active") !== requestId || currentPlan.launchPid ||
-        processAlive(current.gatewayPid) || processAlive(current.headPid)) return;
+        processAlive(current.gatewayPid) || processAlive(current.headPid) || processAlive(currentPlan.head.ownerPid)) return;
     const socket = JSON.parse(lock.getMeta("gateway:socket") ?? "null") as RestartPlan["socket"] | null;
     if (!socket || socket.pid !== currentPlan.socket.pid || socket.dev !== currentPlan.socket.dev || socket.ino !== currentPlan.socket.ino ||
         lock.getMeta("gateway:head") !== "null") throw new Error("Predecessor endpoint ownership changed");

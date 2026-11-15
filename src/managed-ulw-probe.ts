@@ -1,16 +1,12 @@
 // Finite native prompt-composition gate, not a model turn or workflow execution.
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { getBundledModel, getBundledProviders } from "../.upstream/omp/packages/catalog/src/models";
-import { ModelRegistry } from "../.upstream/omp/packages/coding-agent/src/config/model-registry";
-import { Settings } from "../.upstream/omp/packages/coding-agent/src/config/settings";
-import { listPackageExtensionModules, loadExtensions } from "../.upstream/omp/packages/coding-agent/src/extensibility/extensions/loader";
-import { ExtensionRunner } from "../.upstream/omp/packages/coding-agent/src/extensibility/extensions/runner";
-import nativeSystemPromptTemplate from "../.upstream/omp/packages/coding-agent/src/prompts/system/system-prompt.md" with { type: "text" };
-import { AuthStorage } from "../.upstream/omp/packages/coding-agent/src/session/auth-storage";
-import { SessionManager } from "../.upstream/omp/packages/coding-agent/src/session/session-manager";
-import { buildSystemPrompt } from "../.upstream/omp/packages/coding-agent/src/system-prompt";
+import { getBundledModel, getBundledProviders } from "@oh-my-pi/pi-catalog";
+import { ModelRegistry, Settings, AuthStorage, SessionManager, createAgentSession } from "@oh-my-pi/pi-coding-agent";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { listPackageExtensionModules, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 
 const packagePath = process.argv[2];
 if (!packagePath) throw new Error("Managed ULW probe requires a package path");
@@ -25,7 +21,7 @@ globalThis.fetch = Object.assign(async () => refuseNetwork(), { preconnect: refu
 const modules = await listPackageExtensionModules([packagePath], process.cwd(), { plugins: false });
 if (!modules.length) throw new Error("Managed ULW has no discoverable extension");
 // Use the same supported identity as the native composition fixture, but take
-// every model field from the pinned catalog rather than inventing a provider.
+// every model field from the declared published catalog rather than inventing a provider.
 const model = getBundledModel("xai", "grok-4.5");
 assert(model, "Pinned OMP catalog is missing the native composition model xai/grok-4.5");
 await mkdir(agentDir, { recursive: true, mode: 0o700 });
@@ -42,10 +38,10 @@ try {
   const loaded = await loadExtensions(modules.map(module => module.path), home);
   assert.deepEqual(loaded.errors, [], "Native OMP rejected managed ULW");
   assert.equal(loaded.extensions.length, modules.length, "Native OMP must load every advertised extension");
-  // Render the pinned bundled template through OMP, with no ambient discovery,
+  // Render the published SDK's bundled template in the isolated HOME without
   // tools, memory backend, SDK Agent, services, or provider/model execution.
   const { systemPrompt: nativeBase } = await buildSystemPrompt({
-    cwd: home, model: `${model.provider}/${model.id}`, systemPromptTemplate: nativeSystemPromptTemplate,
+    cwd: home, model: `${model.provider}/${model.id}`,
     contextFiles: [], noContextFiles: true, rules: [], skills: [],
     toolNames: [], activeRepoContext: null, personality: "none",
   });
@@ -79,7 +75,7 @@ try {
   try {
     await runner.emit({ type: "session_start" });
     assert(nativeBase[0] && nativeBase[0].length > 500, "Probe must use OMP's actual rendered native prompt");
-    const nativeRole = /\n[§⁂] Role\n([\s\S]*?)\n[§⁂] Runtime\n/.exec(nativeBase[0])?.[1];
+    const nativeRole = /(?:^|\n[§⁂] Role\n)([\s\S]*?)\n[§⁂] Runtime\n/.exec(nativeBase[0])?.[1];
     assert(nativeRole && nativeRole.trim(), "Native prompt has no recognizable role to replace");
     const initialBranch = structuredClone(sessionManager.getBranch());
     const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
@@ -123,9 +119,45 @@ try {
     }
     assert(sessionManager.getBranch().every(entry => entry.type !== "message"),
       "Workflow activation inspection must not create user/model messages");
+    // An independent, unstarted SDK session proves native tools and skill://
+    // resources without input, MCP/LSP, Python preflight, or a provider turn.
+    const { session: resources, extensionsResult } = await createAgentSession({
+      cwd: home, agentDir, settings, authStorage,
+      modelRegistry: new ModelRegistry(authStorage, join(home, "models.yml"), { settings }),
+      model, sessionManager: SessionManager.inMemory(home),
+      additionalExtensionPaths: [packagePath], disableExtensionDiscovery: true,
+      contextFiles: [], rules: [], promptTemplates: [], slashCommands: [],
+      preloadedCustomToolPaths: [], toolNames: ["read", "task"],
+      enableMCP: false, enableLsp: false, skipPythonPreflight: true,
+    });
+    const resourceReads: string[] = [];
+    try {
+      assert.deepEqual(extensionsResult.errors, [], "Published SDK rejected managed ULW resources");
+      assert.deepEqual(extensionsResult.extensions.filter(extension => !extension.path.startsWith("<inline-"))
+        .map(extension => extension.resolvedPath), loaded.extensions.map(extension => extension.resolvedPath),
+      "Resource inspection must load exactly the candidate modules, apart from SDK-owned inline factories");
+      assert(resources.getEnabledToolNames().includes("read"), "Native read must remain available");
+      assert(resources.getEnabledToolNames().includes("task"), "Native task must remain available");
+      const root = await realpath(packagePath);
+      const skills = resources.skills.filter(skill => skill.filePath.startsWith(root + "/"));
+      assert(skills.length, "Managed ULW must expose its actual skills through native discovery");
+      const read = resources.getToolByName("read")!;
+      for (const skill of skills) {
+        const uri = `skill://${skill.name}:raw`;
+        const output = await read.execute(`managed-ulw-resource-${resourceReads.length}`, { path: uri });
+        const text = output.content.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
+        assert.equal(text, await readFile(skill.filePath, "utf8"), `Native resource differs from ${skill.filePath}`);
+        resourceReads.push(uri);
+      }
+      assert.equal(resources.isStreaming, false);
+      assert(!resources.sessionManager.getBranch().some(entry => entry.type === "message"),
+        "Resource inspection must not activate a model turn");
+      assert.equal(networkAttempts, 0);
+    } finally { await resources.dispose(); }
     console.log(JSON.stringify({ extensions: loaded.extensions.length,
-      compatibility: "native-prompt-composition", model: `${model.provider}/${model.id}`,
-      ordinaryTurns: 2, activatedTurns: 2, sessionPersistence: "memory", networkAttempts }));
+      compatibility: "published-sdk-prompt-composition", model: `${model.provider}/${model.id}`,
+      ordinaryTurns: 2, activatedTurns: 2, tools: ["read", "task"], resourceReads,
+      sessionPersistence: "memory", networkAttempts }));
   } finally {
     try {
       await runner.emit({ type: "session_shutdown" });

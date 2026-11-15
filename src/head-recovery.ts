@@ -32,7 +32,13 @@ export function headRecoveryEvidence(entries: unknown[], owner: Pick<HeadRecover
   const latestAssistant = assistants.at(-1);
   const latestRunStatus = object(latestAssistant?.message).stopReason;
   let outcome: "done" | "cancelled" | undefined;
-  if (frame.status === "aborted" && (!latestStart || slice.indexOf(receipt) > latestStartIndex)) outcome = "cancelled";
+  const receiptData = object(receipt.data);
+  const startData = object(latestStart?.data);
+  const receiptAfterStart = typeof receiptData.runOrdinal === "number" && typeof startData.runOrdinal === "number"
+    && receiptData.hostPid === startData.hostPid
+    ? receiptData.runOrdinal >= startData.runOrdinal
+    : slice.indexOf(receipt) > latestStartIndex;
+  if (frame.status === "aborted" && (!latestStart || receiptAfterStart)) outcome = "cancelled";
   if (frame.status === "completed") {
     if (frame.agentInvoked === false && !latestStart) outcome = "done";
     else if (latestStart && (latestRunStatus === "stop" || latestRunStatus === "length")) outcome = "done";
@@ -47,6 +53,8 @@ export function headRecoveryEvidence(entries: unknown[], owner: Pick<HeadRecover
     fingerprint: createHash("sha256").update(JSON.stringify(slice.map(entry => [
       entry.id, entry.type, entry.customType,
       matches(entry, "rpc_prompt_result") ? object(entry.data).frame : null,
+      matches(entry, "rpc_prompt_result") || matches(entry, "rpc_agent_start")
+        ? [object(entry.data).hostPid ?? null, object(entry.data).instanceKey ?? null, object(entry.data).runOrdinal ?? null] : null,
       entry.type === "message" ? object(entry.message).role : null,
       entry.type === "message" ? object(entry.message).stopReason : null,
     ]))).digest("hex") };

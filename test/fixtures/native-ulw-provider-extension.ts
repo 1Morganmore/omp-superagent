@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { createMockModel, type MockResponse } from "../../.upstream/omp/packages/ai/src/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 export default function nativeUlwProvider(pi: ExtensionAPI): void {

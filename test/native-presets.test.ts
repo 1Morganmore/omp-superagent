@@ -3,7 +3,7 @@ import { mkdirSync, renameSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort } from "../.upstream/omp/packages/catalog/src/effort";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Settings as NativeSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LanePresetSnapshot } from "../src/contracts";
 import type { NativeModel, NativePresetChoices } from "../src/native-presets";
@@ -44,7 +44,10 @@ if (!workerRoot) {
   const { resolveModelRoleValue, pickDefaultAvailableModel } = await import("@oh-my-pi/pi-coding-agent/config/model-resolver");
   const { cfgDefaultThinkingLevel } = await import("@oh-my-pi/pi-coding-agent/session/settings");
   const { AgentStorage } = await import("@oh-my-pi/pi-coding-agent/session/agent-storage");
-  const { getBundledModel, getBundledModels, getBundledProviders } = await import("../.upstream/omp/packages/catalog/src/models");
+  const nativeLocks = await import("@oh-my-pi/pi-utils/file-lock");
+  const { getAgentDbPath } = await import("@oh-my-pi/pi-utils/dirs");
+  const { readNativeSettings } = await import("../src/native-settings");
+  const { getBundledModel, getBundledModels, getBundledProviders } = await import("@oh-my-pi/pi-catalog/models");
   const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5");
   const opus = getBundledModel("anthropic", "claude-opus-4-5");
   if (!sonnet || !opus) throw new Error("Required bundled native fixture models are absent");
@@ -94,6 +97,77 @@ if (!workerRoot) {
     for (const { root, settings } of fixtures.splice(0)) {
       settings.cancelPendingSaves();
       await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("read-only stock settings initialize and persist defaults without creating or opening account storage", async () => {
+    const root = await fs.mkdtemp(path.join(workerRoot!, "readonly-"));
+    const agent = path.join(root, "agent");
+    const cwd = path.join(root, "project");
+    await fs.mkdir(agent, { recursive: true });
+    await fs.mkdir(cwd, { recursive: true });
+    const settings = await Settings.loadReadOnly({ cwd, agentDir: agent });
+    fixtures.push({ root, settings });
+    const manager = new NativePresetManager(settings, async () => models, () => true);
+    const created = await manager.initialize({ high: choice(opus) });
+    expect(created.created).toEqual(["high"]);
+    const selection = await manager.resolve("high");
+    expect(selection.model).toEqual(id(opus));
+    expect(await manager.persistSelection(selection)).toEqual(selection.snapshot);
+    expect((await manager.inspect()).settings).toEqual(selection.snapshot);
+    expect(await Bun.file(getAgentDbPath(agent)).exists()).toBe(false);
+    expect(await fs.readdir(agent)).not.toContain("auth.json");
+    const account = "opaque account storage must remain unopened";
+    await fs.mkdir(path.dirname(getAgentDbPath(agent)), { recursive: true });
+    await fs.writeFile(getAgentDbPath(agent), account);
+    expect((await manager.initialize({ low: choice(sonnet) })).created).toEqual(["low"]);
+    expect(await manager.persistSelection(selection)).toEqual(selection.snapshot);
+    expect(await fs.readFile(getAgentDbPath(agent), "utf8")).toBe(account);
+  });
+
+  test("unresolved legacy-only config refuses edits without opening or migrating it", async () => {
+    const root = await fs.mkdtemp(path.join(workerRoot!, "legacy-"));
+    const agent = path.join(root, "agent");
+    const cwd = path.join(root, "project");
+    await fs.mkdir(agent, { recursive: true });
+    await fs.mkdir(cwd, { recursive: true });
+    const database = getAgentDbPath(agent);
+    await fs.mkdir(path.dirname(database), { recursive: true });
+    const legacyPath = path.join(agent, "settings.json");
+    const legacy = "opaque legacy configuration";
+    const account = "opaque account storage";
+    await fs.writeFile(legacyPath, legacy);
+    await fs.writeFile(database, account);
+    const settings = await Settings.loadReadOnly({ cwd, agentDir: agent });
+    fixtures.push({ root, settings });
+    const manager = new NativePresetManager(settings, async () => models, () => true);
+    await expect(manager.initialize({ high: choice(opus) })).rejects.toThrow("legacy migration");
+    await expect(manager.persistSelection({
+      preset: "high", model: id(opus), snapshot: { modelRoles: { default: selector(opus) } },
+    })).rejects.toThrow("legacy migration");
+    expect(await fs.readFile(legacyPath, "utf8")).toBe(legacy);
+    expect(await fs.readFile(database, "utf8")).toBe(account);
+    expect(await Bun.file(path.join(agent, "config.yml")).exists()).toBe(false);
+  });
+
+  test("read-only refresh retains native overlay order without replaying environment overlays twice", async () => {
+    const f = await fixture();
+    const environmentPath = path.join(f.root, "environment.yml");
+    const explicitPath = path.join(f.root, "explicit.yml");
+    await fs.writeFile(environmentPath, JSON.stringify({ modelRoles: { judge: selector(sonnet) } }));
+    await fs.writeFile(explicitPath, JSON.stringify({ modelRoles: { judge: selector(opus) } }));
+    const previous = process.env.PI_CONFIG_FILES;
+    process.env.PI_CONFIG_FILES = environmentPath;
+    try {
+      const settings = await Settings.loadReadOnly({ cwd: f.cwd, agentDir: f.agent, configFiles: [explicitPath] });
+      fixtures.push({ root: path.join(f.root, "unused"), settings });
+      const reloaded = await readNativeSettings(settings);
+      expect(reloaded.getConfigFiles()).toEqual([environmentPath, explicitPath]);
+      expect(reloaded.mirrorState().configOverlay).toEqual(settings.mirrorState().configOverlay);
+      expect(reloaded.getModelRole("judge")).toBe(selector(opus));
+    } finally {
+      if (previous === undefined) delete process.env.PI_CONFIG_FILES;
+      else process.env.PI_CONFIG_FILES = previous;
     }
   });
 
@@ -421,20 +495,24 @@ if (!workerRoot) {
     const before = await f.bytes();
     const backup = `${f.configPath}.fixture-backup`;
     let blocked = false;
-    const unsubscribe = f.settings.onLayersChange(() => {
-      if (blocked || !Bun.deepEquals(f.settings.getGlobalSettings().modelRoles, selection.snapshot.modelRoles)) return;
-      blocked = true;
-      // Fail the real native YAML save after staging, not an earlier lookup.
-      renameSync(f.configPath, backup);
-      mkdirSync(f.configPath);
-    });
+    const withFileLock = nativeLocks.withFileLock;
+    const wrapped = spyOn(nativeLocks, "withFileLock").mockImplementation((file, callback, options) =>
+      withFileLock(file, async () => {
+        if (!blocked && file === f.configPath) {
+          blocked = true;
+          // Fail at the locked application edit, not an earlier preset lookup.
+          renameSync(f.configPath, backup);
+          mkdirSync(f.configPath);
+        }
+        return callback();
+      }, options));
     try {
       await expect(f.manager.persistSelection(selection)).rejects.toThrow();
       expect(blocked).toBe(true);
       expect(await fs.readFile(backup, "utf8")).toBe(before[0]);
       expect(selection.snapshot.modelRoles.default).toBe(selector(opus));
     } finally {
-      unsubscribe();
+      wrapped.mockRestore();
       f.settings.cancelPendingSaves();
       if (blocked) {
         await fs.rm(f.configPath, { recursive: true, force: true });
@@ -450,16 +528,18 @@ if (!workerRoot) {
     const selection = await f.manager.resolve("high");
     const operator = await Settings.loadIsolated({ cwd: f.cwd, agentDir: f.agent });
     fixtures.push({ root: path.join(f.root, "unused"), settings: operator });
-    const flush = f.settings.flush.bind(f.settings);
+    const reload = f.settings.reloadFromDisk.bind(f.settings);
     let changed = false;
-    const wrapped = spyOn(f.settings, "flush").mockImplementation(async () => {
-      await flush();
-      if (changed || !Bun.deepEquals(f.settings.getGlobalSettings().modelRoles, selection.snapshot.modelRoles)) return;
-      changed = true;
-      // A separate native writer changes the saved role before final readback.
-      await operator.reloadFromDisk();
-      cfgModelRoles.set(operator, { default: selector(sonnet) });
-      await operator.flush();
+    let reloads = 0;
+    const wrapped = spyOn(f.settings, "reloadFromDisk").mockImplementation(async () => {
+      if (++reloads === 2) {
+        changed = true;
+        // A separate native writer changes the saved role before final readback.
+        await operator.reloadFromDisk();
+        cfgModelRoles.set(operator, { default: selector(sonnet) });
+        await operator.flush();
+      }
+      await reload();
     });
     try {
       await expect(f.manager.persistSelection(selection)).rejects.toThrow("do not match the applied preset after native readback");
@@ -470,6 +550,35 @@ if (!workerRoot) {
     expect(persisted.defaultThinkingLevel).toBe(Effort.Low);
     expect(persisted.modelPresets).toEqual({ high: selection.snapshot });
     expect(selection.snapshot.modelRoles.default).toBe(selector(opus));
+  });
+
+  test("global edits preserve a same-key operator update and merge disjoint fields under the native lock", async () => {
+    const f = await fixture({ global: { modelPresets: {
+      high: { modelRoles: { default: selector(opus) }, defaultThinkingLevel: Effort.Low },
+    } } });
+    const selection = await f.manager.resolve("high");
+    const withFileLock = nativeLocks.withFileLock;
+    let changed = false;
+    const wrapped = spyOn(nativeLocks, "withFileLock").mockImplementation(async (file, callback, options) => {
+      if (!changed && file === f.configPath) {
+        changed = true;
+        const current = await f.persisted();
+        await fs.writeFile(f.configPath, JSON.stringify({
+          ...current, modelRoles: { default: selector(sonnet), task: selector(sonnet) },
+          customFixture: { keep: "operator edit" },
+        }));
+      }
+      return withFileLock(file, callback, options);
+    });
+    try {
+      await expect(f.manager.persistSelection(selection)).rejects.toThrow("do not match the applied preset after native readback");
+    } finally { wrapped.mockRestore(); }
+    expect(changed).toBe(true);
+    const persisted = await f.persisted();
+    expect(persisted.modelRoles).toEqual({ default: selector(sonnet), task: selector(sonnet) });
+    expect(persisted.defaultThinkingLevel).toBe(Effort.Low);
+    expect(persisted.customFixture).toEqual({ keep: "operator edit" });
+    expect(persisted.modelPresets).toEqual({ high: selection.snapshot });
   });
 
   test("automatic native fallback honors concrete-provider preference and refuses an empty coding pool", async () => {

@@ -54,7 +54,7 @@ class RecordingMessenger implements Messenger {
 export async function nativeAutonomyRuntime(): Promise<void> {
   const command: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
   if (!Array.isArray(command) || !command.every((arg): arg is string => typeof arg === "string" && arg.length > 0)
-    || command.length === 0) throw new Error("Native autonomy requires OMP_TEST_COMMAND as patched CLI argv JSON");
+    || command.length === 0) throw new Error("Native autonomy requires OMP_TEST_COMMAND as installed CLI argv JSON");
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osa-"));
   const home = path.join(root, "home");
   const agentDir = path.join(root, "agent");
@@ -330,8 +330,8 @@ export async function nativeAutonomyRuntime(): Promise<void> {
     await firstConnection.client.getState();
     expect(starts()).toBe(2);
 
-    // Real native serial admission: the UI response is a control frame and can
-    // release compact even while an older goal resume remains on the serial tail.
+    // A real native compact holds its serial queue. Stop must cancel that UI
+    // barrier and complete without an operator manually releasing compaction.
     const queuePaths = hostPaths(config, "queue-proof");
     privateDirectory(path.dirname(queuePaths.sessionFile));
     const queueStarted = await startHost({
@@ -355,30 +355,42 @@ export async function nativeAutonomyRuntime(): Promise<void> {
         && frame.title === "Autonomy serial barrier" && typeof frame.id === "string") barrier.resolve(frame.id);
     });
     let compactSettled = false;
-    const compact = queue.request({ type: "compact" }, "queue-held-compact").finally(() => { compactSettled = true; });
+    const compact = queue.request({ type: "compact", customInstructions: "queue-stop-restoration" },
+      "queue-held-compact").finally(() => { compactSettled = true; });
     const barrierId = await within(barrier.promise, "serial native compact barrier");
     serialBarrier = { connection: queue, id: barrierId };
     const queuedResume = queue.request({ type: "goal", op: "resume" }, "queue-old-resume");
-    // The priority read is processed after the preceding resume frame was accepted,
-    // but before compact releases the serial command tail.
-    expect(await queue.client.getState()).toMatchObject({ goal: { goal: { status: "paused" } } });
+    // Stock native state reads share the compact command's serial tail. Observe
+    // only the private owner's actual admission fence while that tail is held.
+    expect(await queue.request({ type: "get_host_admission" })).toMatchObject({ success: true, data: {
+      pendingGoalResumes: [expect.objectContaining({ id: "queue-old-resume", current: true })],
+    } });
     const stopped = queue.client.abortAndRestoreQueue();
-    expect(await queue.client.getState()).toMatchObject({ isCompacting: true, goal: { goal: { status: "paused" } } });
-    expect(compactSettled).toBe(false);
-    queue.uiResponse(barrierId, { confirmed: true });
+    const restored = await within(stopped, "priority stop while native compaction is held");
+    expect(restored).toEqual({
+      steering: [
+        { text: "Already admitted steering\nKeep the exact first draft." },
+        { text: "Already admitted second steering: preserve ordering." },
+      ],
+      followUp: [{ text: "Already admitted follow-up\nKeep the exact final draft." }],
+    });
     serialBarrier = undefined;
-    await stopped;
-    await compact;
+    expect(await compact).toMatchObject({ success: false });
+    expect(compactSettled).toBe(true);
     expect(await queuedResume).toMatchObject({ success: false, error: "Goal resume cancelled before admission" });
     await queue.request({ type: "get_available_commands" }, "queue-drained-barrier");
     const queueState = await queue.client.getState();
-    expect(queueState).toMatchObject({ isSettled: true, isStreaming: false, goal: { goal: { status: "paused" } } });
+    expect(queueState).toMatchObject({ isSettled: true, isStreaming: false, queuedMessageCount: 0,
+      goal: { enabled: false, goal: { status: "paused" } } });
     expect(frames.filter(event => event.socketPath === queuePaths.socketPath && event.frame.type === "agent_start")).toHaveLength(2);
     detachBarrier();
     await queue.client.goal("drop");
-    await queue.client.shutdownHost();
+    await queue.request({ type: "shutdown_host" });
     await within(queue.exited, "queue proof native shutdown");
     owned.delete(queuePaths.socketPath);
+    const queueJournal = parseSessionEntries(await fs.readFile(queuePaths.sessionFile, "utf8"));
+    expect(queueJournal.filter(entry => entry.type === "custom_message" && entry.customType === "fixture-stop-context"))
+      .toEqual([expect.objectContaining({ content: "Preserve admitted internal context without a model turn.", display: true })]);
 
     const secondRoute = { ...route, threadId: "9002" };
     await runtime.receive(input("200", secondRoute, "Continue entrusted work [pause-goal]"));
@@ -462,7 +474,8 @@ export async function nativeAutonomyRuntime(): Promise<void> {
       laneProgress: { sourceId: "500", receiptId: receipt.id, route: progressLane.route,
         deliveredBeforeToolRelease: true, separateFinal: true, nativeRuns: 1 },
       first: { sessionId: firstState.sessionId, runs: 2 },
-      queuedResume: { sessionId: queueState.sessionId, sourceId: "queue-source", route: queueRoute, runs: 2, cancelled: true },
+      queuedResume: { sessionId: queueState.sessionId, sourceId: "queue-source", route: queueRoute, runs: 2,
+        cancelled: true, restored },
       resumed: { sessionId: resumedState.sessionId, runs: 3, sourceId: "202", route: second.route, correctionRuns: 1 },
       globalSettingsUnchanged: true }));
     success = true;
@@ -480,7 +493,7 @@ export async function nativeAutonomyRuntime(): Promise<void> {
         if (state.hostPid !== pid) throw new Error("Refusing cleanup of a foreign native Host");
         await connection.client.abortAndRestoreQueue();
         if (state.goal) await connection.client.goal("drop");
-        await connection.client.shutdownHost();
+        await connection.request({ type: "shutdown_host" });
         await within(connection.exited, "owned native shutdown");
       } finally { await connection.close(); }
     }

@@ -1,12 +1,21 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Board, BoardMembershipError, type BoardPost } from "../src/board";
 import boardExtension from "../src/board-extension";
 import { BoardFixture } from "./fixtures/board";
 
 const fixtures: BoardFixture[] = [];
-afterEach(() => {
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   for (const fixture of fixtures.splice(0)) fixture.close();
 });
 
@@ -14,6 +23,63 @@ function fixture(): BoardFixture {
   const value = new BoardFixture();
   fixtures.push(value);
   return value;
+}
+
+async function extensionFixture(role: "head" | "lane", kind: "main" | "sub" = "main",
+  selected = ["read", "write", "task", "board_post", "board_read", "board_subscribe"]) {
+  const f = fixture();
+  const actor = role === "head" ? "head" : "lane-one";
+  const sessionId = `${actor}-session`;
+  const sessionFile = f.bind(actor, sessionId);
+  const admit = () => {
+    if (role === "head") f.store.setMeta("gateway:head", JSON.stringify({ pid: process.pid, sessionId, sessionFile }));
+    else f.store.updateLane(actor, 0, { runtimeState: "idle", pid: process.pid });
+  };
+  // Native session_start runs before Gateway/runtime binds the owned Host.
+  if (role === "head") f.store.setMeta("gateway:head", "null");
+  else f.store.updateLane(actor, 0, { runtimeState: "unloaded", pid: null });
+  const configPath = join(f.directory, "superagent.json");
+  writeFileSync(configPath, JSON.stringify({
+    stateDir: f.directory, headCwd: f.directory, command: [process.execPath],
+    maxHosts: 2, maxSubagents: 2, idleMs: 0,
+    discord: { tokenEnv: "UNUSED_BOARD_FIXTURE_TOKEN", ownerId: "1", allowedGuildIds: [], allowedChannelIds: [] },
+  }), { mode: 0o600 });
+  const auth = await AuthStorage.create(":memory:");
+  cleanups.push(async () => { await auth.close(); });
+  const session = await SessionManager.open(sessionFile, undefined, undefined, { initialCwd: f.directory, suppressBreadcrumb: true });
+  cleanups.push(async () => { await session.close(); });
+  expect(session.getSessionId()).toBe(sessionId);
+  const agentDir = join(f.directory, "agent");
+  mkdirSync(agentDir);
+  const settings = await Settings.loadIsolated({ cwd: f.directory, agentDir });
+  const environment = {
+    OMP_SUPERAGENT_ROLE: role, OMP_SUPERAGENT_CONFIG: configPath, OMP_SUPERAGENT_LANE: actor,
+  };
+  const previous = Object.fromEntries(Object.keys(environment).map(name => [name, process.env[name]]));
+  let loaded;
+  try {
+    Object.assign(process.env, environment);
+    loaded = await loadExtensions([resolve(import.meta.dir, "../src/board-extension.ts")], f.directory);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+  expect(loaded.errors).toEqual([]);
+  const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, f.directory, session,
+    new ModelRegistry(auth, join(f.directory, "models.yml"), { ignoreLocalModelConfig: true, settings }),
+    undefined, settings, undefined, undefined,
+    { kind, id: kind === "main" ? "Main" : "child", name: kind, depth: kind === "main" ? 0 : 1 });
+  cleanups.push(async () => { await runner.emit({ type: "session_shutdown" }); runner.clearManagedTimers(); });
+  const errors: unknown[] = [];
+  runner.onError(error => errors.push(error));
+  // Bind the real public runner selection API without invoking a provider.
+  let active = selected.slice();
+  loaded.runtime.getActiveTools = () => active.slice();
+  loaded.runtime.setActiveTools = async names => { active = names.slice(); };
+  return { f, runner, session, admit, errors, active: () => active,
+    select: (names: string[]) => loaded.runtime.setActiveTools(names) };
 }
 
 describe("shared durable bulletin board", () => {
@@ -259,6 +325,63 @@ describe("shared durable bulletin board", () => {
     f.store.updateLane(stored.id, next.generation, { runtimeState: "idle", pid: process.pid });
     expect(() => lane.read()).toThrow(BoardMembershipError);
   });
+
+  for (const role of ["head", "lane"] as const) {
+    test(`${role} restores only suppressed board tools after native startup adds goal`, async () => {
+      const f = await extensionFixture(role, "main", ["read", "write", "task", "board_post", "board_subscribe"]);
+      await f.runner.emit({ type: "session_start" });
+      expect(f.active()).toEqual(["read", "write", "task"]);
+      // Stock Host uses setActiveTools to add goal after our session_start.
+      // Reconciliation may also reorder names between top-level and xd://.
+      await f.select(["goal", ...f.active().toReversed()]);
+      f.admit();
+      const preparation = await f.runner.emitBeforeAgentStart("Read the shared board", undefined, []);
+      expect(preparation?.systemPrompt?.join("\n")).toContain("Shared bulletin board identity:");
+      expect(f.active()).toEqual(["goal", "task", "write", "read", "board_post", "board_subscribe"]);
+      expect(f.active()).not.toContain("board_read");
+      expect(f.active()).not.toContain("bash");
+      const tool = f.runner.getRegisteredTool("board_post")!.definition;
+      const posted = await tool.execute("restored-post", { text: "Authoritative restored session", channel: "general" },
+        undefined, undefined, f.runner.createContext());
+      expect(JSON.stringify(posted.content)).toContain("Authoritative restored session");
+      expect(f.errors).toEqual([]);
+    });
+
+    test(`${role} does not restore after an intentional tool withdrawal`, async () => {
+      const f = await extensionFixture(role);
+      await f.runner.emit({ type: "session_start" });
+      await f.select(["read", "write", "goal"]);
+      f.admit();
+      await f.runner.emitBeforeAgentStart("Read the shared board", undefined, []);
+      expect(f.active()).toEqual(["read", "write", "goal"]);
+      await f.runner.emitBeforeAgentStart("Read the shared board again", undefined, []);
+      expect(f.active()).toEqual(["read", "write", "goal"]);
+      expect(f.errors).toEqual([]);
+    });
+
+    test(`${role} environment and native tool additions do not grant unregistered roots or children board authority`, async () => {
+      const root = await extensionFixture(role);
+      await root.runner.emit({ type: "session_start" });
+      await root.select([...root.active(), "goal"]);
+      expect(await root.runner.emitBeforeAgentStart("Read the shared board", undefined, [])).toBeUndefined();
+      expect(root.active()).toEqual(["read", "write", "task", "goal"]);
+      const tool = root.runner.getRegisteredTool("board_read")!.definition;
+      await expect(tool.execute("unregistered-read", {}, undefined, undefined, root.runner.createContext()))
+        .rejects.toThrow("This native session is not currently connected to this superagent's shared board");
+      expect(root.errors).toEqual([]);
+
+      const child = await extensionFixture(role, "sub");
+      child.admit(); // Even matching ledger identity cannot turn a native child into a root.
+      await child.runner.emit({ type: "session_start" });
+      await child.select([...child.active(), "goal"]);
+      expect(await child.runner.emitBeforeAgentStart("Read the shared board", undefined, [])).toBeUndefined();
+      expect(child.active()).toEqual(["read", "write", "task", "goal"]);
+      const childTool = child.runner.getRegisteredTool("board_read")!.definition;
+      await expect(childTool.execute("child-read", {}, undefined, undefined, child.runner.createContext()))
+        .rejects.toThrow("restricted to managed head/lane root sessions");
+      expect(child.errors).toEqual([]);
+    });
+  }
 
   test("the explicit extension entrypoint is inactive without managed role and config", () => {
     const role = process.env.OMP_SUPERAGENT_ROLE;

@@ -1,7 +1,5 @@
 import { Database } from "bun:sqlite";
 import { expect } from "bun:test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionEntries, type FileEntry, type SessionHeader } from "@oh-my-pi/pi-coding-agent";
@@ -12,7 +10,7 @@ import { buildHostArgs, HostConnection, startHost, type HostOptions } from "../.
 import { Superagent } from "../../src/runtime";
 import { NativePresetManager } from "../../src/native-presets";
 import { Store } from "../../src/store";
-import { Effort } from "../../.upstream/omp/packages/catalog/src/effort";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { nativeDisabledProviders } from "./native-extension";
 import { modelAbortMarker, modelCompactAbortInstructions, modelCompactInstructions, modelCompactMarker, modelCompactSummary,
   modelFixtureModels, modelFixtureProvider, modelJudgeMarker, modelRolesMarker } from "./model-selection-extension";
@@ -62,32 +60,6 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
     setImmediate(drain.resolve);
     await drain.promise;
   }
-}
-
-async function readyHead(socketPath: string, child: ChildProcess, exited: Promise<unknown>): Promise<HostConnection> {
-  let change = Promise.withResolvers<void>();
-  const failure = Promise.withResolvers<never>();
-  const watcher = watch(path.dirname(socketPath), () => change.resolve());
-  watcher.on("error", failure.reject);
-  const deadline = Date.now() + 45_000;
-  const earlyExit = exited.then(() => { throw new Error("Native head exited before socket readiness"); });
-  void earlyExit.catch(() => {});
-  void failure.promise.catch(() => {});
-  try {
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error("Native head exited during startup");
-      try {
-        if (((await fs.lstat(socketPath)).mode & 0o777) === 0o600) {
-          return await HostConnection.connect(socketPath, Math.max(1, deadline - Date.now()));
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      await within(Promise.race([change.promise, earlyExit, failure.promise]), Math.max(1, deadline - Date.now()), "Native head socket was not ready");
-      change = Promise.withResolvers<void>();
-    }
-    throw new Error("Native head startup exceeded its deadline");
-  } finally { watcher.close(); }
 }
 
 function requestIds(entries: readonly FileEntry[]): string[] {
@@ -149,7 +121,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     : "Use the available deterministic local text chat model for the native lifecycle proof.";
   const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
   if (!Array.isArray(parsed) || !parsed.length || parsed.some(arg => typeof arg !== "string" || !arg)) {
-    throw new Error("Native runtime smoke requires OMP_TEST_COMMAND as an explicit patched CLI argv JSON array");
+    throw new Error("Native runtime smoke requires OMP_TEST_COMMAND as an explicit installed CLI argv JSON array");
   }
   const nativeCommand: string[] = parsed;
   const natives = process.env.OMP_TEST_NATIVES_DIR;
@@ -210,10 +182,9 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH: managedUlwPath,
     TMPDIR: root, TMP: root, TEMP: root, ...(natives ? { PI_NATIVES_DIR: natives } : {}),
   };
-  // startHost uses the supplied complete child environment. An exec-only env
-  // wrapper keeps the real production launcher while isolating model providers for
-  // every child, without mutating the test runner's process.env or its siblings.
-  const command = ["/usr/bin/env", "-i", ...Object.entries(env).map(([name, value]) => `${name}=${value}`), ...nativeCommand, "-e", networkGuardFixture];
+  // Isolate provider credentials without an env -i wrapper, which would discard
+  // the pipe owner's private native-control endpoint.
+  const command = [...nativeCommand, "-e", networkGuardFixture];
   const config: Config = {
     path: path.join(root, "superagent.json"), stateDir: root, headCwd, command,
     maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model: `${mainModel.provider}/${mainModel.id}`,
@@ -226,16 +197,13 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     ...mainPaths, command, cwd: headCwd, env, extensionPath: providerFixture, managedUlwPath,
     model: config.model, subagentConcurrency: 1,
   };
-  const nativeConfig = path.join(root, "head-config.json");
-  await fs.writeFile(nativeConfig, JSON.stringify({ task: { maxConcurrency: 1 }, disabledProviders: nativeDisabledProviders }), { mode: 0o600 });
-  const log = await fs.open(mainPaths.logPath, "wx", 0o600);
   const databasePath = path.join(root, "coordination.sqlite");
   const store = new Store(databasePath);
   const ledger = new Database(databasePath, { readonly: true, strict: true });
   const messenger = new RecordingMessenger();
   const errors: unknown[] = [];
   let headConnection: HostConnection | undefined;
-  const presetSettings = modelSelection ? await Settings.loadIsolated({ cwd: headCwd, agentDir: agent }) : undefined;
+  const presetSettings = modelSelection ? await Settings.loadReadOnly({ cwd: headCwd, agentDir: agent }) : undefined;
   const presetManager = presetSettings ? new NativePresetManager(presetSettings, async () => {
     if (!headConnection) throw new Error("Native head catalog is not connected");
     const response = await headConnection.request({ type: "get_available_models" });
@@ -246,7 +214,8 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   const runtime = new Superagent(config, store, messenger, providerFixture, error => {
     errors.push(error);
   }, {
-    startHost: options => startHost({ ...options, managedUlwPath }),
+    startHost: options => startHost({ ...options, managedUlwPath, env: { ...env,
+      ...Object.fromEntries(Object.entries(options.env).filter(([name]) => name.startsWith("OMP_SUPERAGENT_"))) } }),
     connect: async socketPath => {
       const connection = await HostConnection.connect(socketPath);
       connection.onFrame(frame => {
@@ -259,9 +228,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       persistPreset: selection => presetManager.persistSelection(selection),
     } : {}),
   });
-  const exit = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
-  void exit.promise.catch(() => {});
-  let child: ChildProcess | undefined;
+  let child: { pid: number } | undefined;
   let succeeded = false;
   const connections = new Set<HostConnection>();
   const headEvents: Array<Record<string, unknown>> = [];
@@ -297,12 +264,8 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     finally { await connection.close(); }
   };
   try {
-    child = spawn(command[0]!, [...command.slice(1), ...buildHostArgs(headOptions, nativeConfig)], {
-      cwd: headCwd, env, detached: true, shell: false, stdio: ["ignore", log.fd, log.fd],
-    });
-    child.once("error", exit.reject);
-    child.once("exit", (code, signal) => exit.resolve({ code, signal }));
-    const initial = await readyHead(mainPaths.socketPath, child, exit.promise);
+    child = await startHost(headOptions);
+    const initial = await HostConnection.connect(mainPaths.socketPath);
     headConnection = initial;
     connections.add(initial);
     initial.onFrame(frame => {
@@ -404,9 +367,15 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     let changedModelReason: string | undefined;
     if (modelSelection) {
       await unchangedNativeSettings();
+      const closing = await HostConnection.connect(firstLane.socketPath);
+      connections.add(closing);
+      const closingState = await closing.client.getState();
+      expect(closingState).toMatchObject({ hostPid: firstLane.pid, sessionId: firstLane.sessionId });
       // Real native shutdown, not a disconnected controller or a simulated store transition.
       await runtime.closeLane(created.id, "completed", "Observed a settled native answer and durable thread receipt.");
+      await within(closing.exited, 10_000, "Native persistence and adapter shutdown did not complete");
       await processExited(firstLane.pid!);
+      await processExited(closingState.adapterOwnerPid);
       await expect(fs.lstat(firstLane.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
       // Process/socket observations precede the controller's durable release
       // reconciliation; ACK alone must never clear native ownership.
@@ -885,13 +854,15 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       await processExited(host.pid);
       await expect(fs.lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
     }
-    expect(await within(exit.promise, 10_000, "Native head process did not exit cleanly")).toEqual({ code: 0, signal: null });
+    expect(JSON.parse(await fs.readFile(`${mainPaths.socketPath}.exit.json`, "utf8"))).toMatchObject({
+      pid: child.pid, sessionId: headState.sessionId, code: 0, signal: null, persisted: true, observationsFlushed: true,
+    });
     if (modelSelection) {
       // Frozen roles/policy are a private config overlay; native transcript
       // model and effort remain independent and win over that role default.
       const restartOptions: HostOptions = { ...headOptions, model: undefined,
         modelSettings: confirmedHeadSettings, clearedModelRoles: confirmedClearedRoles };
-      const restartArgs = buildHostArgs(restartOptions, nativeConfig);
+      const restartArgs = buildHostArgs(restartOptions);
       expect(restartArgs).not.toContain("--model-preset");
       expect(restartArgs).not.toContain("--model");
       const restarted = await startHost(restartOptions);
@@ -1026,7 +997,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
             throw new Error("Refusing foreign host cleanup");
           }
           if (!state.isSettled) await connection.client.abortAndRestoreQueue();
-          await connection.client.shutdownHost();
+          await connection.request({ type: "shutdown_host" });
           await within(connection.exited, 10_000, "Owned native cleanup did not finish");
           await processExited(host.pid);
         } catch (error) {
@@ -1037,14 +1008,10 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       }
     } finally {
       for (const connection of connections) await connection.close();
-      if (child?.pid && child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await exit.promise.catch(() => {});
-      }
+      if (child?.pid && alive(child.pid)) process.kill(child.pid, "SIGKILL");
       ledger.close();
       store.close();
       presetSettings?.cancelPendingSaves();
-      await log.close();
       if (succeeded) await fs.rm(root, { recursive: true, force: true });
     }
   }

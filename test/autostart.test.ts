@@ -124,6 +124,25 @@ describe("macOS login registration", () => {
     expect(existsSync(join(f.root, "actual", "not-created"))).toBe(false);
   });
 
+  test("login PATH can rediscover a separately installed OMP without capturing shell PATH", async () => {
+    const f = fixture();
+    const directory = join(f.root, "separate-omp-bin");
+    mkdirSync(directory);
+    const executable = join(directory, "omp");
+    writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    const config = { ...f.config, command: [executable] };
+    const installed = await installAutostart(config, f.adapters);
+    const bytes = readFileSync(installed.plistPath!, "utf8");
+    expect(bytes).toContain(directory);
+    expect(bytes).toContain("<key>KeepAlive</key><false/>");
+    expect(f.calls.every(args => ["print", "print-disabled", "enable"].includes(args[0]!))).toBe(true);
+    // A definition written before OMP's directory was added remains ours.
+    writeFileSync(installed.plistPath!, bytes.replace(`${directory}:`, ""));
+    expect((await autostartStatus(config, f.adapters)).ownership).toBe("owned");
+    const removed = await uninstallAutostart(config, f.adapters);
+    expect(removed.installed).toBe(false);
+  });
+
   test("default-enabled installation does not create a launchctl override", async () => {
     const f = fixture();
     f.setManager({ disabled: false });

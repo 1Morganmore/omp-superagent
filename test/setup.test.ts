@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { parseEnv } from "node:util";
 import { parseConfig } from "../src/config";
 import {
@@ -244,9 +243,11 @@ async function nativeMemoryCase(before: string, after = "") {
   const helper = new URL("../src/setup-memory.ts", import.meta.url).href;
   const nativeSettings = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
   const nativeBackend = import.meta.resolve("@oh-my-pi/pi-coding-agent/memory-backend/settings");
-  const nativeDirs = Bun.resolveSync("@oh-my-pi/pi-utils/dirs", dirname(fileURLToPath(nativeSettings)));
+  const nativeDirs = import.meta.resolve("@oh-my-pi/pi-utils/dirs");
+  const nativeLocks = import.meta.resolve("@oh-my-pi/pi-utils/file-lock");
   const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `
     import { YAML } from "bun";
+    import { spyOn } from "bun:test";
     import { mkdir, readdir, rename, rm } from "node:fs/promises";
     import { join } from "node:path";
     import net from "node:net";
@@ -261,6 +262,7 @@ async function nativeMemoryCase(before: string, after = "") {
     globalThis.WebSocket = class { constructor() { deny(); } };
     // Intentional dynamic imports exercise the credential-safe config-only boundary.
     const { Settings } = await import(${JSON.stringify(nativeSettings)});
+    const nativeLocks = await import(${JSON.stringify(nativeLocks)});
     const { cfgMemoryBackend } = await import(${JSON.stringify(nativeBackend)});
     const { getAgentDir, getAgentDbPath, getProjectAgentDir, getMemoriesDir, MAIN_CONFIG_FILENAMES } =
       await import(${JSON.stringify(nativeDirs)});
@@ -282,7 +284,7 @@ async function nativeMemoryCase(before: string, after = "") {
     console.log(JSON.stringify({ result, effective, rpcEffective,
       global: actual.getGlobalSettings(), project: actual.getProjectSettings(), memoryFiles,
       agentDbExists: await Bun.file(getAgentDbPath(agentDir)).exists(),
-      disk: YAML.parse(await Bun.file(configPath).text()) }));
+      disk: await Bun.file(configPath).exists() ? YAML.parse(await Bun.file(configPath).text()) : null }));
   `], {
     cwd: directory, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     env: {
@@ -307,6 +309,35 @@ async function nativeMemoryCase(before: string, after = "") {
 }
 
 describe("deferred native Mnemopi preference", () => {
+  test("fresh read-only setup writes config without creating account storage", async () => {
+    const result = await nativeMemoryCase("");
+    expect(result.result.status).toBe("enabled");
+    expect(result.disk).toEqual({ memory: { backend: "mnemopi" } });
+    expect(result.agentDbExists).toBe(false);
+    expect(result.memoryFiles).toEqual([]);
+  }, 30_000);
+
+  test("legacy-only storage is refused without opening or migrating account data", async () => {
+    for (const legacy of ["json", "db", "both"]) {
+      const result = await nativeMemoryCase(`
+        const legacy = ${JSON.stringify(legacy)};
+        const legacyPath = join(agentDir, "settings.json");
+        const legacyBytes = "opaque legacy settings";
+        const accountBytes = "opaque account storage";
+        if (legacy !== "db") await Bun.write(legacyPath, legacyBytes);
+        if (legacy !== "json") await Bun.write(getAgentDbPath(agentDir), accountBytes);
+      `, `
+        if (legacy !== "db" && await Bun.file(legacyPath).text() !== legacyBytes)
+          throw new Error("Legacy settings changed");
+        if (legacy !== "json" && await Bun.file(getAgentDbPath(agentDir)).text() !== accountBytes)
+          throw new Error("Account storage changed");
+      `);
+      expect(result.result).toEqual({ status: "failed" });
+      expect(result.disk).toBeNull();
+      expect(result.memoryFiles).toEqual([]);
+    }
+  }, 90_000);
+
   test("sets only the native backend and survives RPC defaults without starting memory", async () => {
     const original = {
       memory: { backend: "local" }, modelRoles: { default: "vendor/model", judge: "vendor/judge" },
@@ -338,16 +369,16 @@ describe("deferred native Mnemopi preference", () => {
   test("native persistence preserves a disjoint edit made after staging", async () => {
     const result = await nativeMemoryCase(`
       await writeConfig({ memory: { backend: "off" }, modelRoles: { default: "vendor/old" } });
-      const flush = Settings.prototype.flush;
+      const withFileLock = nativeLocks.withFileLock;
       let edited = false;
-      Settings.prototype.flush = async function () {
-        if (!edited && this.getGlobalSettings().memory?.backend === "mnemopi") {
+      spyOn(nativeLocks, "withFileLock").mockImplementation(async (file, callback, options) => {
+        if (!edited) {
           edited = true;
           await writeConfig({ memory: { backend: "off" }, modelRoles: { default: "vendor/new" },
             mnemopi: { bank: "concurrent-bank", autoRetain: false } });
         }
-        return flush.call(this);
-      };
+        return withFileLock(file, callback, options);
+      });
     `);
     expect(result.result.status).toBe("enabled");
     expect(result.disk).toEqual({ memory: { backend: "mnemopi" }, modelRoles: { default: "vendor/new" },
@@ -358,15 +389,15 @@ describe("deferred native Mnemopi preference", () => {
   test("a same-setting external edit wins and authoritative readback refuses success", async () => {
     const result = await nativeMemoryCase(`
       await writeConfig({ memory: { backend: "off" } });
-      const flush = Settings.prototype.flush;
+      const withFileLock = nativeLocks.withFileLock;
       let edited = false;
-      Settings.prototype.flush = async function () {
-        if (!edited && this.getGlobalSettings().memory?.backend === "mnemopi") {
+      spyOn(nativeLocks, "withFileLock").mockImplementation(async (file, callback, options) => {
+        if (!edited) {
           edited = true;
           await writeConfig({ memory: { backend: "local" }, mnemopi: { bank: "external" } });
         }
-        return flush.call(this);
-      };
+        return withFileLock(file, callback, options);
+      });
     `);
     expect(result.result.status).toBe("not-saved");
     expect(result.effective).toBe("local");
@@ -407,17 +438,17 @@ describe("deferred native Mnemopi preference", () => {
   test("native write failures are reported without rewriting unrelated values", async () => {
     const result = await nativeMemoryCase(`
       await writeConfig({ memory: { backend: "off" }, mnemopi: { bank: "preserve-on-failure" } });
-      const flush = Settings.prototype.flush;
+      const withFileLock = nativeLocks.withFileLock;
       let replaced = false;
-      Settings.prototype.flush = async function () {
-        if (!replaced && this.getGlobalSettings().memory?.backend === "mnemopi") {
+      spyOn(nativeLocks, "withFileLock").mockImplementation(async (file, callback, options) => {
+        if (!replaced) {
           replaced = true;
           // A real filesystem failure at the native persistence boundary.
           await rename(configPath, configPath + ".original");
           await mkdir(configPath);
         }
-        return flush.call(this);
-      };
+        return withFileLock(file, callback, options);
+      });
     `, `await rm(configPath, { recursive: true }); await rename(configPath + ".original", configPath);`);
     expect(result.result).toEqual({ status: "failed" });
     expect(result.disk).toEqual({ memory: { backend: "off" }, mnemopi: { bank: "preserve-on-failure" } });
@@ -431,7 +462,7 @@ async function nativeJudgeCase(before: string) {
   mkdirSync(home);
   const helper = new URL("../src/setup-judge.ts", import.meta.url).href;
   const nativeSettings = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
-  const nativeDirs = Bun.resolveSync("@oh-my-pi/pi-utils/dirs", dirname(fileURLToPath(nativeSettings)));
+  const nativeDirs = import.meta.resolve("@oh-my-pi/pi-utils/dirs");
   const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `
     import { mkdir, readdir, lstat, readFile, readlink, symlink } from "node:fs/promises";
     import { dirname, join } from "node:path";

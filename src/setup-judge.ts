@@ -1,19 +1,8 @@
 import type { SettingProvenance } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 type JudgeConfiguration =
   | { status: "configured" | "missing"; source: SettingProvenance }
   | { status: "unknown" };
-
-async function isPresent(path: string): Promise<boolean> {
-  try { await stat(path); return true; }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-}
 
 /** Read configuration only, after a new setup has successfully published. */
 export async function inspectNativeJudge(cwd: string): Promise<JudgeConfiguration> {
@@ -27,20 +16,8 @@ export async function inspectNativeJudge(cwd: string): Promise<JudgeConfiguratio
       // Read-only settings intentionally skip legacy global migration. Only an
       // effective higher-layer assignment can settle the role without it; in
       // particular native project null falls through, unlike overlay null.
-      const nativeSettings = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
-      const nativeDirs = Bun.resolveSync("@oh-my-pi/pi-utils/dirs", dirname(fileURLToPath(nativeSettings)));
-      const { getAgentDir, getAgentDbPath, MAIN_CONFIG_FILENAMES } = await import(nativeDirs);
-      const agentDir = getAgentDir();
-      let hasModernConfig = false;
-      for (const filename of MAIN_CONFIG_FILENAMES) {
-        if (await isPresent(join(agentDir, filename))) {
-          hasModernConfig = true;
-          break;
-        }
-      }
-      if (!hasModernConfig && (await Promise.all([
-        isPresent(join(agentDir, "settings.json")), isPresent(getAgentDbPath(agentDir)),
-      ])).some(Boolean)) return { status: "unknown" };
+      const { hasUnresolvedNativeLegacy } = await import("./native-settings");
+      if (await hasUnresolvedNativeLegacy(settings.getAgentDir())) return { status: "unknown" };
     }
     // Native modelRoles defaults to an empty record. This accessor normalizes
     // string/array selectors, but does not resolve aliases or automatic fallbacks.

@@ -793,7 +793,7 @@ export class Superagent {
 
   private assertModelChangeIdle(lane: Lane, live?: Live, state?: RuntimeState): void {
     this.assertRestartOpen();
-    if (state && state.settingsScope !== "session") throw new Error(`Lane ${lane.id} is not using session-isolated native settings; restart it with --session-settings before managed model changes`);
+    if (state && state.settingsScope !== "session") throw new Error(`Lane ${lane.id} is not using a session-isolated owned native configuration overlay; restart it before managed model changes`);
     if ((this.connecting.has(lane.id) && !live) || live?.input || this.store.approvals(lane.id).length
       || this.store.inputs(lane.id).some(input => input.state !== "pending")) {
       throw new Error(`Lane ${lane.id} has active, submitted, uncertain, or approval-held work; resolve it before changing models`);
@@ -922,7 +922,7 @@ export class Superagent {
       const available = await this.availableModels();
       let state = await this.state(live);
       if (this.restartFence()) return state;
-      if (state.settingsScope !== "session") throw new Error(`Lane ${live.id} is not using session-isolated native settings; restart it with --session-settings before managed execution`);
+      if (state.settingsScope !== "session") throw new Error(`Lane ${live.id} is not using a session-isolated owned native configuration overlay; restart it before managed execution`);
       // Explicit idle switches keep the host generation. Compare readback with
       // the latest committed choice, not a snapshot from before catalog I/O.
       lane = this.requireLane(live.id);
@@ -1751,12 +1751,14 @@ export class Superagent {
         }
       }
       if (!live) { if (failures.length) throw new AggregateError(failures, "Approval dismissal incomplete; lane remains paused"); return; }
+      // State reads share stock RPC's serial tail. Interrupt maintenance before
+      // querying it, just as the priority HEAD stop path does.
+      try { await live.connection.client.abortAndRestoreQueue(); } catch (error) { failures.push(error); }
       const state = await this.state(live);
       if (state.goal?.enabled) {
         try { successful(await live.connection.request({ type: "goal", op: "pause" }), "pause goal"); }
         catch (error) { failures.push(error); }
       }
-      try { await live.connection.client.abortAndRestoreQueue(); } catch (error) { failures.push(error); }
       try {
         for (const child of await live.connection.client.getSubagents()) {
           try { await live.connection.client.cancelSubagent(child.id); } catch (error) { failures.push(error); }
@@ -2028,6 +2030,9 @@ export class Superagent {
     const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
     for (const name of credentialEnvNames(this.config)) delete env[name];
     delete env.OMP_RPC_SOCKET;
+    delete env.OMP_SUPERAGENT_HOST_SOCKET;
+    delete env.OMP_SUPERAGENT_NATIVE_SOCKET;
+    delete env.OMP_SUPERAGENT_HOST_CONFIG;
     delete env.OMP_SUPERAGENT_GATEWAY_TOKEN;
     env.OMP_SUPERAGENT_CONFIG = this.config.path;
     env.OMP_SUPERAGENT_ROLE = "lane";

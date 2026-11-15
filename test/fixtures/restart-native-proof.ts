@@ -28,6 +28,7 @@ interface Event {
   readonly sessionId?: string;
   readonly sessionFile?: string;
   readonly headPid?: number;
+  readonly producerPid?: number;
   readonly headAlive?: boolean;
   readonly ack?: { readonly state: string; readonly remote_id: string | null };
   readonly goal?: { readonly id: string; readonly status: string };
@@ -42,7 +43,7 @@ interface Event {
     readonly data: { readonly entries: readonly FileEntry[]; readonly leafId: string | null } };
   readonly nativeFrame?: { readonly type?: string; readonly message?: { readonly role?: string; readonly stopReason?: string } };
   readonly bytes?: string;
-  readonly destroyed?: boolean;
+  readonly connected?: boolean;
   readonly error?: string;
 }
 interface InputRow { readonly state: string; readonly request_id: string | null }
@@ -60,7 +61,7 @@ const abortedLane = scenario === "lane-abort" || scenario === "lane-abort-recove
 const detachedLane = scenario === "lane-failure" || scenario === "lane-abort" || recoveryWindow;
 const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
 assert(Array.isArray(parsed) && parsed.length > 0 && parsed.every((value: unknown) => typeof value === "string" && value.length > 0),
-  "OMP_TEST_COMMAND must explicitly name the patched native CLI argv");
+  "OMP_TEST_COMMAND must explicitly name the installed native CLI argv");
 const command = parsed.filter((value: unknown): value is string => typeof value === "string");
 const interrupted = new AbortController();
 const terminate = () => { interrupted.abort(new Error("Owned native restart proof interrupted")); };
@@ -97,9 +98,7 @@ await fs.writeFile(path.join(root, "agent/models.yml"), "providers: {}\n", { mod
 const settingsBytes = await fs.readFile(path.join(root, "agent/config.yml"));
 const configPath = path.join(root, "config.json");
 const providerPath = path.resolve(import.meta.dir, "restart-native-provider.ts");
-const nativeCommand = recoveryWindow
-  ? command.flatMap((argument, index) => index === 0 ? [argument, "--preload", providerPath] : [argument])
-  : command;
+const nativeCommand = command;
 await fs.writeFile(configPath, JSON.stringify({
   stateDir: root, headCwd: path.join(root, "head"),
   command: [...nativeCommand, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e", providerPath],
@@ -155,7 +154,7 @@ async function ownedProcesses(): Promise<OwnedProcess[]> {
     const [, pid, group, argv] = match;
     if (!pid || !group || !argv) return [];
     const gateway = argv.includes(loader) && argv.includes(`--config ${config.path}`);
-    const native = argv.includes(`--session ${path.join(root, "sessions")}/`) && argv.includes(`--rpc-socket ${path.join(root, "run")}/`);
+    const native = argv.includes(`--session ${path.join(root, "sessions")}/`) && argv.includes("--mode rpc-ui");
     return gateway || native ? [{ pid: Number(pid), group: Number(group), argv, native, runner: gateway && argv.includes("--runner ") }] : [];
   });
 }
@@ -189,7 +188,7 @@ async function cleanup() {
       if (!native.isSettled) await within(observer.client.abortAndRestoreQueue(), 5_000, "Owned native cleanup abort timed out");
       if ((await observer.client.getState()).goal?.enabled) await observer.request({ type: "goal", op: "pause" });
       await until(async () => (await observer?.client.getState())?.isSettled === true, "owned native cleanup quiescence", true);
-      await within(observer.client.shutdownHost(), 5_000, "Owned native cleanup shutdown timed out");
+      await within(observer.request({ type: "shutdown_host" }), 5_000, "Owned native cleanup shutdown timed out");
       await within(observer.exited, 5_000, "Owned native cleanup transport stayed open");
     }
     } finally { await observer?.close(); }
@@ -393,9 +392,9 @@ try {
       assert.equal(active.isSettled, false);
       await fs.writeFile(path.join(root, "arm-lane-recovery-entries"), "Hold only the next real HEAD restoration journal response.\n", { mode: 0o600 });
       await fs.writeFile(path.join(root, "release-successor-attach"), "Attach replacement HEAD while the real lane continuation remains active.\n", { mode: 0o600 });
-      await until(async () => (await events("native-events.jsonl")).some(event => event.kind === "lane-recovery-entries-held" && event.pid === lane.pid),
-        "actual replacement restoration get_entries snapshot held at the independent native lane socket");
-      heldResponse = (await events("native-events.jsonl")).find(event => event.kind === "lane-recovery-entries-held" && event.pid === lane.pid);
+      await until(async () => (await events("native-events.jsonl")).some(event => event.kind === "head-recovery-snapshot-held" && event.producerPid === lane.pid),
+        "actual replacement restoration snapshot held before the HEAD controller consumes it");
+      heldResponse = (await events("native-events.jsonl")).find(event => event.kind === "head-recovery-snapshot-held" && event.producerPid === lane.pid);
       assert(heldResponse?.response);
       assert(heldResponse.requestId?.startsWith("restart-recovery-head:"));
       assert.equal(heldResponse.response.id, heldResponse.requestId);
@@ -425,6 +424,7 @@ try {
       const successorOwner = metadata<{ pid: number }>("gateway:head");
       assert(successorOwner);
       assert.equal(requested.pid, successorOwner.pid);
+      assert.equal(heldResponse.pid, successorOwner.pid);
       assert.notEqual(requested.pid, before.hostPid);
       assert.notEqual(requested.pid, lane.pid);
       assert.equal(requests.some(event => event.kind === "head-recovery-entries-received" && event.requestId === heldResponse?.requestId), false);
@@ -457,21 +457,16 @@ try {
       }, "replacement HEAD consumes actual terminal assistant and native settlement while its earlier restoration response remains held");
       const native = await events("native-events.jsonl");
       const requestIndex = native.findIndex(event => event.kind === "head-recovery-entries-request" && event.requestId === heldResponse?.requestId);
-      const snapshotIndex = native.findIndex(event => event.kind === "lane-recovery-entries-held" && event.requestId === heldResponse?.requestId);
-      const forwardedTerminalIndex = native.findIndex(event => event.kind === "lane-recovery-native-forward" && event.requestId === heldResponse?.requestId
-        && event.nativeFrame?.type === "message_end" && event.nativeFrame.message?.stopReason === stopReason);
+      const snapshotIndex = native.findIndex(event => event.kind === "head-recovery-snapshot-held" && event.requestId === heldResponse?.requestId);
       const observedTerminalIndex = native.findIndex(event => event.kind === "head-recovery-native-event" && event.requestId === heldResponse?.requestId
         && event.nativeFrame?.type === "message_end" && event.nativeFrame.message?.stopReason === stopReason);
       const observedAgentEndIndex = native.findIndex(event => event.kind === "head-recovery-native-event" && event.requestId === heldResponse?.requestId
         && event.nativeFrame?.type === "agent_end");
-      const forwardedSettlementIndex = native.findIndex(event => event.kind === "lane-recovery-native-forward" && event.requestId === heldResponse?.requestId
-        && event.nativeFrame?.type === "session_settled");
       const observedSettlementIndex = native.findIndex(event => event.kind === "head-recovery-native-event" && event.requestId === heldResponse?.requestId
         && event.nativeFrame?.type === "session_settled");
-      assert(requestIndex >= 0 && snapshotIndex > requestIndex && forwardedTerminalIndex > snapshotIndex && observedTerminalIndex > forwardedTerminalIndex);
+      assert(requestIndex >= 0 && snapshotIndex > requestIndex && observedTerminalIndex > snapshotIndex);
       assert(observedAgentEndIndex > observedTerminalIndex && observedSettlementIndex > observedAgentEndIndex);
-      assert(forwardedSettlementIndex > forwardedTerminalIndex && observedSettlementIndex > forwardedSettlementIndex);
-      assert.equal(native.some(event => event.kind === "lane-recovery-entries-released" && event.requestId === heldResponse?.requestId), false);
+      assert.equal(native.some(event => event.kind === "head-recovery-snapshot-released" && event.requestId === heldResponse?.requestId), false);
       assert.equal(native.some(event => event.kind === "head-recovery-entries-received" && event.requestId === heldResponse?.requestId), false);
       const terminalIndex = entries.findIndex(entry => entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === stopReason);
       assert(terminalIndex >= 0);
@@ -479,23 +474,22 @@ try {
         "The delayed original response must omit the later journaled terminal assistant");
       recoveryWindowReceipt = { ...recoveryWindowReceipt, nativeEntriesBeforeResponseRelease: entries,
         nativeStateBeforeResponseRelease: await observer.client.getState(), terminalEntryId: entries[terminalIndex]?.id,
-        ordering: { requestIndex, snapshotIndex, forwardedTerminalIndex, observedTerminalIndex, observedAgentEndIndex,
-          forwardedSettlementIndex, observedSettlementIndex } };
+        ordering: { requestIndex, snapshotIndex, observedTerminalIndex, observedAgentEndIndex, observedSettlementIndex } };
       await fs.writeFile(path.join(root, "release-lane-recovery-entries"), "Deliver the unchanged earlier snapshot only after HEAD observed native termination and settlement.\n", { mode: 0o600 });
       await until(async () => (await events("native-events.jsonl")).some(event => event.kind === "head-recovery-entries-received"
         && event.requestId === heldResponse?.requestId), "original held restoration journal response delivered unchanged after actual terminal events");
       const released = await events("native-events.jsonl");
-      const releaseIndex = released.findIndex(event => event.kind === "lane-recovery-entries-released" && event.requestId === heldResponse?.requestId);
+      const releaseIndex = released.findIndex(event => event.kind === "head-recovery-snapshot-released" && event.requestId === heldResponse?.requestId);
       const receiveIndex = released.findIndex(event => event.kind === "head-recovery-entries-received" && event.requestId === heldResponse?.requestId);
       assert(releaseIndex > observedSettlementIndex && receiveIndex > releaseIndex);
-      assert.equal(released.filter(event => event.kind === "lane-recovery-entries-held").length, 1);
-      assert.equal(released.filter(event => event.kind === "lane-recovery-entries-released").length, 1);
-      assert.equal(released[releaseIndex]?.destroyed, false);
+      assert.equal(released.filter(event => event.kind === "head-recovery-snapshot-held").length, 1);
+      assert.equal(released.filter(event => event.kind === "head-recovery-snapshot-released").length, 1);
+      assert.equal(released[releaseIndex]?.connected, true);
       assert.equal(released[releaseIndex]?.bytes, heldResponse.bytes);
       assert.deepEqual(released[receiveIndex]?.response, heldResponse.response);
       recoveryWindowReceipt = { ...recoveryWindowReceipt, responseReleased: released[releaseIndex], responseReceived: released[receiveIndex],
-        ordering: { requestIndex, snapshotIndex, forwardedTerminalIndex, observedTerminalIndex, observedAgentEndIndex,
-          forwardedSettlementIndex, observedSettlementIndex, releaseIndex, receiveIndex } };
+        ordering: { requestIndex, snapshotIndex, observedTerminalIndex, observedAgentEndIndex,
+          observedSettlementIndex, releaseIndex, receiveIndex } };
     } else {
       assert.equal(stateOf("handoff:904:lane")?.state, "submitted", "Only the gated replacement may recover the detached native outcome");
       assert.equal(stateOf("report:handoff:904:lane"), null);

@@ -199,6 +199,8 @@ if (runnerRequest) {
   }
   starting = startGateway(config, {
     messenger: new RecordingMessenger(), restartRequestId: arg("--restart-request"),
+    ...(["lane-failure-recovery-window", "lane-abort-recovery-window"].includes(process.env.OMP_RESTART_NATIVE_SCENARIO ?? "")
+      ? { extensionPath: fileURLToPath(new URL("./restart-native-provider.ts", import.meta.url)) } : {}),
     managedUlwPath: fileURLToPath(new URL("./managed-ulw", import.meta.url)),
     onError: error => { record("gateway-error", { error: String(error) }); },
     launchRestartRunner: (path, requestId, fd) => spawn(process.execPath,
