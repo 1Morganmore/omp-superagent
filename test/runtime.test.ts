@@ -17,6 +17,7 @@ import { GatewayStore } from "../src/gateway-store";
 import { compareMessageIds } from "../src/message-order";
 import { Superagent, type RuntimeAdapters, type RuntimeHost, type RuntimeState } from "../src/runtime";
 import { Store } from "../src/store";
+import type { LaneReport } from "../src/lane-report";
 
 const executionModel: LaneModel = { provider: "fixture", id: "capable" };
 const otherModel: LaneModel = { provider: "fixture", id: "efficient" };
@@ -405,6 +406,129 @@ function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], pre
 }
 
 describe("event-driven nonterminal progress", () => {
+  test("structured lane observations reach inspect/status without repeated chatter resetting evidence or waiting clocks", async () => {
+    const { runtime, config, store, hosts, main, messenger } = fixture();
+    const lane = savedLane(store, config, "structured-progress", route("work-topic"));
+    await runtime.start();
+    await admit(runtime, message("structured-busy-head", route("other-topic")));
+    await delegate(runtime, message("structured-source", lane.route));
+    const worker = hosts.get(lane.socketPath)!;
+    const input = delegated(store, "structured-source")!;
+    const emit = (id: string, report: LaneReport, timestamp: number) => {
+      const details = { type: "superagent-lane-report", sessionId: worker.state.sessionId, reportId: id, report };
+      worker.emit({
+        type: "message_end", message: { role: "toolResult", toolName: id === "proof" ? "write" : "lane_report", toolCallId: id, timestamp,
+          details: id === "proof" ? { xdev: { tool: "lane_report", mode: "execute", inner: details } } : details },
+      });
+    };
+    const now = Date.now();
+    const progress: LaneReport = { status: "progress", summary: "Selected result artifact changed",
+      evidence: [{ kind: "file", ref: "/workspace/result", fingerprint: "a".repeat(64) }] };
+    emit("proof", progress, now - 1000);
+    emit("same-proof", progress, now - 900);
+    const waiting: LaneReport = { status: "waiting", summary: "Native verification is running",
+      waiting: { kind: "tool", id: "verification", target: "Native verification command" }, evidence: [] };
+    emit("wait", waiting, now - 800);
+    emit("same-wait", waiting, now - 700);
+    worker.emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse",
+      content: [{ type: "text", text: "Still waiting; this is not new proof." }] } });
+    await runtime.kick();
+    const inspection = await runtime.inspect(lane.id);
+    expect(inspection).toMatchObject({ observation: {
+      inputId: input.id, requestId: input.requestId, sessionId: worker.state.sessionId,
+      lastEvidenceAt: now - 1000, waiting: { since: now - 800, target: waiting.waiting },
+    }, observationState: { ownerCurrent: true } });
+    expect("observationState" in inspection && inspection.observationState?.waitingAgeMs).toBeGreaterThanOrEqual(800);
+    await admit(runtime, message("structured-status", lane.route, "/status"));
+    const status = messenger.sent.find(output => output.sourceId === "structured-status")!.text;
+    expect(status).toContain("Recorded lane observation (not verified acceptance or live-target proof)");
+    expect(status).toContain("Native verification command");
+    expect(status).toContain('"ownerCurrent":true');
+    worker.emit({ type: "tool_execution_end", toolName: "bash", toolCallId: "other-verification", isError: false });
+    expect(store.lane(lane.id)?.observation?.waiting?.since).toBe(now - 800);
+    worker.emit({ type: "tool_execution_end", toolName: "bash", toolCallId: "verification", isError: true });
+    expect(store.lane(lane.id)?.observation).toMatchObject({ waiting: null, lastEvidenceAt: now - 1000 });
+    expect(store.input(input.id)?.state).toBe("submitted");
+    expect(worker.prompts).toHaveLength(1);
+    expect(main.prompts).toHaveLength(1);
+    expect(store.lane(lane.id)?.workState).toBe("open");
+  });
+
+  test("native eval reports arrive through their source-bound journal, not printed receipt text", async () => {
+    const { runtime, config, store, hosts, errors } = fixture();
+    const lane = savedLane(store, config, "eval-observation", route("work-topic"));
+    await runtime.start();
+    await admit(runtime, message("eval-observation-head", route("other-topic")));
+    await delegate(runtime, message("eval-observation-source", lane.route));
+    const worker = hosts.get(lane.socketPath)!;
+    const report: LaneReport = { status: "waiting", summary: "Native eval owns this dependency",
+      waiting: { kind: "dependency", target: "Selected verification artifact" }, evidence: [] };
+    const event = { type: "superagent-lane-report", sessionId: worker.state.sessionId, reportId: "js-lane_report-native", report };
+    worker.emit({ type: "message_end", message: { role: "toolResult", toolName: "eval", toolCallId: "printed-only",
+      content: [{ type: "text", text: JSON.stringify(event) }] } });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toBeUndefined();
+    worker.entries.push({ id: "native-eval-receipt", type: "custom", customType: "superagent-lane-report",
+      timestamp: new Date(1000).toISOString(), data: event });
+    worker.emit({ type: "message_end", message: { role: "toolResult", toolName: "eval", toolCallId: "actual-eval",
+      timestamp: 2000, content: [{ type: "text", text: "No structured result forwarded by the eval bridge" }] } });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toMatchObject({ waiting: { since: 1000, target: report.waiting }, lastEvidenceAt: null });
+    worker.entries.push({ id: "native-eval-duplicate", type: "custom", customType: "superagent-lane-report",
+      timestamp: new Date(3000).toISOString(), data: { ...event, reportId: "js-lane_report-repeated" } });
+    worker.emit({ type: "message_end", message: { role: "toolResult", toolName: "eval", toolCallId: "next-eval", timestamp: 4000 } });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toMatchObject({ waiting: { since: 1000 }, lastReportAt: 3000 });
+    worker.entries.push({ id: "earlier-hidden-report", type: "custom", customType: "superagent-lane-report",
+      timestamp: new Date(5000).toISOString(), data: { ...event, reportId: "earlier-hidden",
+        report: { ...report, waiting: { kind: "dependency", target: "Earlier hidden target" } } } });
+    worker.emit({ type: "message_end", message: { role: "toolResult", toolName: "lane_report", toolCallId: "later-direct", timestamp: 6000,
+      details: { ...event, reportId: "later-direct", report: { ...report, waiting: { kind: "dependency", target: "Latest direct target" } } } } });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toMatchObject({
+      waiting: { since: 6000, target: { kind: "dependency", target: "Latest direct target" } }, lastReportAt: 6000,
+    });
+    expect(worker.prompts).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  test("structured report identity/role rejection and pause fences preserve the last recorded observation", async () => {
+    const { runtime, config, store, hosts, errors } = fixture();
+    const lane = savedLane(store, config, "structured-fence", route("work-topic"));
+    await runtime.start();
+    await admit(runtime, message("structured-fence-head", route("other-topic")));
+    await delegate(runtime, message("structured-fence-source", lane.route));
+    const worker = hosts.get(lane.socketPath)!;
+    const report: LaneReport = { status: "waiting", summary: "Owner decision pending",
+      waiting: { kind: "approval", id: "native-approval", target: "Native tool permission" }, evidence: [] };
+    const reportMessage = { role: "toolResult", toolName: "lane_report", toolCallId: "wait", timestamp: 1000,
+      details: { type: "superagent-lane-report", sessionId: worker.state.sessionId, reportId: "wait", report } };
+    worker.emit({ type: "message_end", message: reportMessage });
+    await runtime.kick();
+    const before = store.lane(lane.id)?.observation;
+    for (const invalid of [
+      { ...reportMessage, toolName: "read", toolCallId: "quoted-fake" },
+      { ...reportMessage, details: { ...reportMessage.details, sessionId: "foreign-session" } },
+      { ...reportMessage, details: { ...reportMessage.details, reportId: "foreign-call" } },
+      { ...reportMessage, isError: true },
+    ]) worker.emit({ type: "message_end", message: invalid });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toEqual(before);
+    worker.emit({ type: "tool_execution_start", toolName: "bash", toolCallId: "unrelated-approval" });
+    expect(store.lane(lane.id)?.observation?.waiting).not.toBeNull();
+    worker.emit({ type: "tool_execution_start", toolName: "bash", toolCallId: "native-approval" });
+    expect(store.lane(lane.id)?.observation).toMatchObject({ waiting: null, lastEvidenceAt: null });
+    await runtime.pause(lane.id);
+    const paused = store.lane(lane.id)?.observation;
+    worker.emit({ type: "message_end", message: { ...reportMessage, toolCallId: "late", details: { ...reportMessage.details, reportId: "late" } } });
+    expect(store.lane(lane.id)?.observation).toEqual(paused);
+    expect(await runtime.inspect(lane.id)).toMatchObject({ observationState: { ownerCurrent: false } });
+    store.nextGeneration(lane.id);
+    worker.emit({ type: "message_end", message: { ...reportMessage, toolCallId: "obsolete", details: { ...reportMessage.details, reportId: "obsolete" } } });
+    expect(store.lane(lane.id)?.observation).toEqual(paused);
+    expect(errors).toEqual([]);
+  });
+
   test.each(["toolUse", "commentary"] as const)("HEAD sends %s progress before completion once and never repeats it as final fallback", async kind => {
     const { runtime, main, messenger, store } = fixture();
     await runtime.start();
@@ -1581,6 +1705,74 @@ describe("controlled Gateway AND HEAD restart", () => {
     else expect(instance.store.getMeta("head:restart-fence")).toBeTruthy();
     expect(instance.requests).toEqual([]);
     expect(instance.main.prompts).toEqual([]);
+  });
+
+  test.each(["journal", "buffered", "eval-journal"] as const)("restart restores source-bound lane observations in %s order without resetting clocks or replaying work", async timing => {
+    const instance = restartFixture();
+    const { store, config, hosts, main, runtime } = instance;
+    const lane = savedLane(store, config, "observation-recovery", route("observation-topic"), process.pid);
+    const native = new HostTransport(lane.sessionFile, `session-${lane.id}`);
+    native.state.isSettled = false;
+    native.state.isStreaming = true;
+    hosts.set(lane.socketPath, native);
+    main.local = true;
+    const original = message("observation-original", lane.route);
+    store.receive(original, lane.id);
+    store.submit(original.id, "observation-request", lane.generation);
+    const { restart } = savedRestart(instance);
+    const checkpoint = { ...restart, checkpoint: {
+      goalActive: false, model: executionModel, thinkingLevel: "high",
+      residents: [{ id: lane.id, generation: lane.generation, pid: process.pid, sessionId: native.state.sessionId,
+        inputId: original.id, requestIds: ["observation-request"], ownedRuns: 1, entryId: "observation-cursor" }],
+    } };
+    store.setMeta(`head:restart:${restart.inputId}`, JSON.stringify(checkpoint));
+    store.setMeta("head:restart-fence", JSON.stringify(checkpoint));
+    const toolResult = (id: string, target: string, timestamp: number) => ({
+      role: "toolResult", toolName: "lane_report", toolCallId: id, timestamp, details: {
+        type: "superagent-lane-report", sessionId: native.state.sessionId, reportId: id,
+        report: { status: "waiting", summary: `Waiting on ${target}`,
+          waiting: { kind: "dependency", target }, evidence: [] },
+      },
+    });
+    const originalWait = toolResult("journal-wait", "original-dependency", 1000);
+    native.entries = [
+      { type: "message", id: "unowned-before", message: toolResult("old-unowned", "wrong-before-checkpoint", 500) },
+      { id: "observation-cursor", type: "custom", customType: "checkpoint" },
+      { type: "message", id: "journal-wait", message: originalWait },
+    ];
+    if (timing === "eval-journal") {
+      native.entries = [
+        native.entries[0],
+        { id: "observation-source-start", type: "custom", customType: "source-start" },
+        { id: "native-eval-report", type: "custom", customType: "superagent-lane-report",
+          timestamp: new Date(1000).toISOString(), data: originalWait.details },
+        { id: "observation-cursor", type: "custom", customType: "checkpoint" },
+      ];
+      store.setMeta(`lane-observation-owner:${original.id}`, JSON.stringify({
+        sessionId: native.state.sessionId, sessionFile: lane.sessionFile, generation: lane.generation,
+        requestId: "observation-request", cursor: "observation-source-start",
+      }));
+    }
+    if (timing === "buffered") native.afterEntries = () => {
+      native.afterEntries = undefined;
+      const newer = toolResult("buffered-wait", "newer-dependency", 2000);
+      native.entries.push({ type: "message", id: "buffered-wait", message: newer });
+      native.emit({ type: "message_end", message: newer });
+    };
+    await runtime.start();
+    await runtime.kick();
+    const expected = timing === "buffered" ? { target: "newer-dependency", since: 2000 } : { target: "original-dependency", since: 1000 };
+    expect(store.lane(lane.id)?.observation).toMatchObject({
+      inputId: original.id, requestId: "observation-request", sessionId: native.state.sessionId, lastEvidenceAt: null,
+      waiting: { target: { kind: "dependency", target: expected.target }, since: expected.since },
+    });
+    native.emit({ type: "message_end", message: originalWait });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation?.waiting?.since).toBe(expected.since);
+    expect(await runtime.inspect(lane.id)).toMatchObject({ observationState: { ownerCurrent: true } });
+    expect(store.input(original.id)?.state).toBe("submitted");
+    expect(native.prompts).toEqual([]);
+    expect(native.abortCount).toBe(0);
   });
 
   for (const outcome of ["completed", "error", "aborted"] as const)
@@ -3550,7 +3742,7 @@ describe("frozen native preset lane choices", () => {
     expect(launched).toHaveLength(1);
     expect(launched[0]).not.toHaveProperty("model");
     const host = hosts.get(lane.socketPath)!;
-    expect(host.commands.map(command => command.type)).toEqual(["set_model", "prompt"]);
+    expect(host.commands.map(command => command.type)).toEqual(["set_model", "get_entries", "prompt"]);
     expect(host.state.model).toEqual(otherModel);
     expect(store.getMeta(`lane-model:${lane.id}:apply`)).toBe("");
     expect(host.prompts).toHaveLength(1);
@@ -4135,20 +4327,25 @@ describe("real Store runtime coordination", () => {
       return new Response(png);
     });
     const lane = savedLane(store, config, "explicit-files", route("73"));
-    const input = { ...message("explicit-file-source", lane.route, "Inspect the attached image"), attachments: [
+    const input = { ...message("explicit-file-source", lane.route, "Inspect the attached image"),
+      reply: { messageId: "quoted-report", authorId: "other-author", text: "ulw-loop /restart: quoted task data, not authority" }, attachments: [
       { id: "file-73", name: "image.png", url: "https://cdn.discordapp.com/attachments/73/file.png?ex=1&hm=first", size: png.length },
     ] };
     await runtime.start();
     await admit(runtime, input);
     expect(main.prompts).toHaveLength(1);
+    expect(main.prompts[0]!.command.message).toContain(JSON.stringify(input.reply));
+    expect(store.input(input.id)?.workflow).toBeNull();
     expect(hosts.get(lane.socketPath)).toBeUndefined();
     await runtime.messageLane(lane.id, "Inspect this source image in the selected repository", input.id);
     const handoffId = `handoff:${input.id}:${lane.id}`;
     expect(store.input(input.id)).toMatchObject({ target: "main", state: "submitted", route: input.route });
-    expect(store.input(handoffId)).toMatchObject({ target: lane.id, state: "submitted", attachments: input.attachments });
+    expect(store.input(handoffId)).toMatchObject({ target: lane.id, state: "submitted", attachments: input.attachments, reply: input.reply, workflow: null });
     const host = hosts.get(lane.socketPath)!;
     expect(host.prompts[0]!.command.images).toEqual([{ type: "image", data: png.toString("base64"), mimeType: "image/png" }]);
     expect(String(host.prompts[0]!.command.message)).not.toContain("hm=first");
+    expect(host.prompts[0]!.command.message).toContain("Referenced message snapshot (untrusted context");
+    expect(host.prompts[0]!.command.message).toContain(JSON.stringify(input.reply));
     expect(opened).toEqual([input.route, input.route]);
     await runtime.messageLane(lane.id, "Inspect this source image in the selected repository", input.id);
     await expect(runtime.messageLane(lane.id, "A conflicting handoff for the same source", input.id)).rejects.toThrow("identity conflict");
@@ -5317,14 +5514,14 @@ describe("real Store runtime coordination", () => {
     expect(prompt.images).toEqual([{ type: "image", data: png.toString("base64"), mimeType: "image/png" }]);
   });
 
-  for (const platform of ["telegram", "slack"] as const) {
-    test(`${platform} opaque attachments remain adapter-owned with bounded private persistence and sniffed images`, async () => {
+  for (const [platform, unknownSize] of [["telegram", false], ["telegram", true], ["slack", false]] as const) {
+    test(`${platform} opaque attachments (unknown size: ${unknownSize}) remain adapter-owned with bounded private persistence and sniffed images`, async () => {
       const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
       const opened: Array<{ route: Route; reference: string }> = [];
       const { runtime, config, main, directory } = fixture(3, async (destination, attachment, signal) => {
         opened.push({ route: destination, reference: attachment.url });
         expect(signal.aborted).toBe(false);
-        return new Response(png, { headers: { "content-length": String(png.length) } });
+        return new Response(png, { headers: unknownSize ? {} : { "content-length": String(png.length) } });
       });
       delete config.discord;
       config.telegram = { tokenEnv: "TEST_TELEGRAM_TOKEN", ownerId: "1", allowedChatIds: [] };
@@ -5332,7 +5529,7 @@ describe("real Store runtime coordination", () => {
       const dm = route(null, { platform, accountId: platform === "slack" ? "TTEAM:UBOT" : "2", guildId: null, channelId: platform === "slack" ? "DPRIVATE" : "1" });
       const reference = platform === "telegram" ? "telegram-file:opaque_file_id" : "slack-file:FOPAQUE";
       await runtime.start();
-      const input = { ...message(`${platform}:attachment`, dm), messageId: platform === "slack" ? "1750000000.000001" : "100", attachments: [{ id: "opaque", name: "../../not-an-image.txt", url: reference, size: png.length, contentType: "text/plain" }] };
+      const input = { ...message(`${platform}:attachment`, dm), messageId: platform === "slack" ? "1750000000.000001" : "100", attachments: [{ id: "opaque", name: "../../not-an-image.txt", url: reference, size: unknownSize ? null : png.length, contentType: "text/plain" }] };
       await admit(runtime, input);
       expect(opened).toEqual([{ route: dm, reference }]);
       expect(main.prompts[0]!.command.images).toEqual([{ type: "image", data: png.toString("base64"), mimeType: "image/png" }]);
@@ -5342,9 +5539,53 @@ describe("real Store runtime coordination", () => {
       expect(files).toHaveLength(1);
       expect(files[0]).not.toContain(".download");
       expect(statSync(join(requestDirectory, files[0]!)).mode & 0o777).toBe(0o600);
+      expect(statSync(join(requestDirectory, files[0]!)).size).toBe(png.length);
       expect(statSync(requestDirectory).mode & 0o777).toBe(0o700);
     });
   }
+
+  test("unknown-size voice attachments retain actual byte length and media context in native prompts", async () => {
+    const { runtime, config, main } = fixture(3, async () => new Response("OggS", { headers: { "content-length": "4" } }));
+    delete config.discord;
+    config.telegram = { tokenEnv: "TEST_TELEGRAM_TOKEN", ownerId: "1", allowedChatIds: [] };
+    const dm = route(null, { platform: "telegram", guildId: null, channelId: "1" });
+    await runtime.start();
+    await admit(runtime, { ...message("unknown-voice", dm), attachments: [
+      { id: "voice", name: "voice.ogg", url: "telegram-file:voice", size: null, voice: true, durationSeconds: 1.5 },
+    ] });
+    expect(main.prompts[0]!.command.message).toContain("4 bytes; voice message; duration 1.5 seconds");
+  });
+
+  test.each(["file", "request", "image"] as const)("unknown attachment sizes still enforce the actual %s byte budget", async mode => {
+    const mib = 1024 * 1024;
+    const chunk = new Uint8Array(mib);
+    if (mode === "image") chunk.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    let opened = 0;
+    const { runtime, config, main, store, directory } = fixture(3, async () => {
+      opened++;
+      let remaining = mode === "request" ? 15 : mode === "image" ? 9 : 21;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (remaining-- > 0) controller.enqueue(chunk);
+          else controller.close();
+        },
+      }));
+    });
+    delete config.discord;
+    config.telegram = { tokenEnv: "TEST_TELEGRAM_TOKEN", ownerId: "1", allowedChatIds: [] };
+    const dm = route(null, { platform: "telegram", guildId: null, channelId: "1" });
+    const input: Inbound = { ...message(`unknown-limit-${mode}`, dm),
+      attachments: Array.from({ length: mode === "request" ? 3 : 1 }, (_, index) => ({
+        id: `file-${index}`, name: "file", url: `telegram-file:file-${index}`, size: null,
+      })) };
+    await runtime.start();
+    await admit(runtime, input);
+    expect(store.input(input.id)?.state).toBe("cancelled");
+    expect(main.prompts).toEqual([]);
+    expect(opened).toBe(input.attachments.length);
+    const requestDirectory = join(directory, "attachments", createHash("sha256").update(input.id).digest("hex").slice(0, 24));
+    expect(readdirSync(requestDirectory).filter(name => name.endsWith(".download"))).toEqual([]);
+  });
 
   test("attachment count, individual size and aggregate bounds reject before adapter access", async () => {
     let opened = 0;

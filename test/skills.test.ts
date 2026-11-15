@@ -5,7 +5,7 @@ import * as path from "node:path";
 const scenarios = [
   ["head", "main", "default"], ["head", "main", "narrow"],
   ["head", "sub", "default"], ["head", "sub", "narrow"],
-  ["lane", "main", "default"], ["lane", "sub", "narrow"],
+  ["lane", "main", "default"], ["lane", "main", "narrow"], ["lane", "sub", "default"], ["lane", "sub", "narrow"],
 ] as const;
 // Ordinary tests need no external extension checkout. The parent explicitly
 // supplies a local read-only entrypoint when proving real ULW composition.
@@ -61,8 +61,11 @@ test.each(cases)("native packaged skills, scoped tools, and preserved selections
     expect(proof.networkAttempts).toBe(0);
     if (selection === "narrow") expect(proof.active).not.toContain("bash");
     else expect(proof.active).toContain("bash");
-    if (role === "lane") expect(proof.schemas).toEqual({});
-    else {
+    if (role === "lane") {
+      expect(Object.keys(proof.schemas)).toEqual(["lane_report"]);
+      if (kind === "sub" || selection === "narrow") expect(proof.active).not.toContain("lane_report");
+      else expect(proof.active).toContain("lane_report");
+    } else {
       expect(Object.keys(proof.schemas).sort()).toEqual(["lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start"]);
       if (kind === "sub") expect(proof.active.some(name => name.startsWith("lane_"))).toBe(false);
       else if (selection === "narrow") expect(proof.active).not.toContain("lane_message");

@@ -105,6 +105,20 @@ SOFTWARE.
 - 해당 upstream 유래 자료는 [SUL 및 NOTICE](https://github.com/vntrevx/omp-dori/blob/3b5487df12540cdd428ebcf7455375d72921e2dc/NOTICE)의 적용을 받는다.
   `LICENSE.omp-dori`를 전체 저장소에 대한 MIT 허가로 해석하지 않는다.
 
+## Dori PR 동작 비교 — 독립 구현
+
+- 조사 snapshot: [vntrevx/omp-dori `dc7402efce8adc87aeac808a1b1f50100f9f53d9`](https://github.com/vntrevx/omp-dori/tree/dc7402efce8adc87aeac808a1b1f50100f9f53d9).
+- [#9](https://github.com/vntrevx/omp-dori/pull/9)의 Git 환경 격리,
+  [#32/#41](https://github.com/vntrevx/omp-dori/pull/41)의 답장·음성 문맥,
+  [#8/#27](https://github.com/vntrevx/omp-dori/pull/27)·[#31](https://github.com/vntrevx/omp-dori/pull/31)의
+  native prompt 호환성 회귀 사례를 비교했다.
+- 같은 snapshot의 [#45](https://github.com/vntrevx/omp-dori/pull/45)·
+  [#46](https://github.com/vntrevx/omp-dori/pull/46)의 근거 기반 진척·구조화 대기·시각 보존 개념도
+  비교했다. 기존 native custom journal·도구 결과·SQLite 레인·progress receipt에 독립 구현하며,
+  별도 supervisor·상태 레지스트리·타이머나 Dori 실행 코드는 가져오지 않았다.
+- 기존 SQLite/Gateway 입력 계약, discord.js·grammY API, pinned OMP renderer·ExtensionRunner로
+  독립 구현했다. Dori 코드·스킬·프롬프트·테스트를 복사하지 않았으며 SUL 고지를 재해석하지 않는다.
+
 ## Telegram transport — grammY
 
 - 재사용 API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553)

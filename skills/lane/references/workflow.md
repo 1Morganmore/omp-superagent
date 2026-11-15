@@ -285,12 +285,23 @@ Continue authorized work without waiting for acknowledgement. These are nontermi
 head reports, not board posts or direct messenger sends; omit repetitive tool logs,
 secrets, invented progress percentages, and timer-driven keepalive chatter.
 
+Record selected evidence or a concrete wait with `lane_report`. For `progress`,
+select real files or completed successful native tool-call IDs; native code hashes
+the bytes/results. A timestamp, another report, board chatter, and the same result
+under a new call ID are not new evidence. `waiting` records an observable pending
+tool/approval/job identity, or a precise dependency label; a repeated target retains
+its original `since`. `resolved` must match that target and include evidence. Native
+tool/approval completion clears only its matching recorded wait, not work authority.
+Job/dependency resolution requires the matching explicit evidence-backed report.
+Complete an eval reporting cell before a long wait. Its native custom journal entry
+survives the eval bridge and restart; printed receipt text is never parsed as proof.
+
 Use ordinary assistant output in English for this internal head report, preserving
 exact original source text or quotations when relevant. The integration records it
 as a durable report to the head; it does **not** send lane output directly to the
 messenger topic. The head checks/coordinates the result and owns the external answer
 through Gateway on the original route. Do not bypass head, send a messenger copy,
-invent a head-report tool, or claim delivery. Put the outcome and critical blocker
+invent another reporting channel, or claim delivery. Put the outcome and critical blocker
 first so a short coordination summary remains useful. Informational board posts are
 not a substitute for this report.
 General model-profile references to `final`, `delivered`, or the human surface mean

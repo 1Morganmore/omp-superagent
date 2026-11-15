@@ -149,11 +149,18 @@ Windows service installation are not supported.
 - Long-running work gets concise intermediate progress in that topic: findings,
   current steps, and blockers. Updates follow meaningful execution events, not a
   fixed heartbeat; the lane keeps working while the head relays progress.
+- Bound-topic `/status` also shows recorded selected evidence and concrete waits,
+  including their original times and whether the native owner is still current.
+  Repeated reports do not count as new evidence. These observations are not verified
+  completion and never automatically resume or close work.
 - Ask for work normally. The head creates a supported native
   thread/topic and binds its work session; private chats without native topics use
   logical topics. `/new` (Slack `!new`) remains an explicit DM topic control.
 - Follow up in the same conversation. The head receives the message, coordinates any
   lane work, and returns the result. Separate repository work keeps its own lane context.
+  Discord/Telegram replies retain the referenced message as untrusted context, including
+  Telegram's selected quote. Voice attachments retain their voice/duration metadata;
+  this does not add automatic transcription.
   Ordinary same-topic follow-ups steer active work by default; no `/steer` is needed.
   Different conversations, controls, and workflow selections remain separate.
 - Work continues within the entrusted project objective until acceptance or a real
@@ -211,6 +218,8 @@ benefits from it. Ordinary work can stay in a direct session, native task, or re
 The Gateway checks upstream commits at startup and hourly. New Hosts use the prepared
 revision; running heads and lanes keep theirs. Failed updates leave the previous active
 revision in place.
+Activation checks actual offline native prompt composition for both the model profile
+and an explicitly activated workflow, not just successful extension loading.
 
 ## Documentation & credits
 

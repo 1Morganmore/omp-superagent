@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { ApplicationCommandOptionType, ChannelType, Collection, Events, MessageFlags, type Client, type Message, type MessageCreateOptions } from "discord.js";
+import { ApplicationCommandOptionType, Attachment as DiscordAttachment, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, type Client, type Message, type MessageCreateOptions } from "discord.js";
 import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "../src/discord.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import { parseDialog } from "../src/dialog.ts";
@@ -35,6 +35,7 @@ class Channel {
   remote = new Map<string, RemoteMessage>();
   fetched: unknown[] = [];
   history = new Collection<string, Message>();
+  references = new Collection<string, Message>();
   failure: unknown;
   recipientId = owner;
   constructor(readonly id = "parent", readonly guildId: string | null = "guild", readonly parentId: string | null = null) {}
@@ -48,8 +49,13 @@ class Channel {
     this.remote.set(message.id, message);
     return message;
   }
-  messages = { fetch: async (query: unknown) => {
+  messages = { cache: new Collection<string, Message>(), fetch: async (query: unknown) => {
     this.fetched.push(query);
+    if (query && typeof query === "object" && "message" in query) {
+      const message = this.references.get(String(query.message));
+      if (!message) throw Object.assign(new Error("Unknown message"), { code: 10008, status: 404 });
+      return message;
+    }
     if (typeof query !== "string") return this.history;
     const message = this.remote.get(query);
     if (!message) throw Object.assign(new Error("Unknown message"), { code: 10008, status: 404 });
@@ -183,6 +189,91 @@ describe("shared native dialog normalization", () => {
 });
 
 describe("Discord routing and parsing", () => {
+  test("empty creates and contentless edits cannot become tasks, but supported attachment-only messages can", async () => {
+    const { messenger, gateway, channel, received } = await fixture();
+    const supported = new Collection([["200", { id: "200", name: "empty.txt", size: 0,
+      url: "https://cdn.discordapp.com/attachments/100/200/empty.txt" }]]);
+    const reference = { channelId: channel.id, guildId: channel.guildId, messageId: "99" };
+    for (const patch of [
+      { content: "" }, { content: " \n\t" }, { content: "", stickers: new Collection([["sticker", {}]]) },
+      { content: "", type: 19, reference },
+      { content: "", attachments: new Collection([["bad", { id: "bad", size: 3, url: "https://evil.invalid/file" }]]) },
+      { content: "", attachments: new Collection([["200", { ...supported.get("200"), size: null }]]) },
+    ]) gateway.emit(Events.MessageCreate, inbound(channel, patch));
+    gateway.emit(Events.MessageCreate, inbound(channel, { id: "101", content: "", attachments: supported }));
+    gateway.emit(Events.MessageCreate, inbound(channel, { id: "102", content: "original intent" }));
+    gateway.emit(Events.MessageUpdate, inbound(channel), inbound(channel, { id: "102", content: "", editedTimestamp: 2000 }));
+    await drain();
+    expect(received.map(input => [input.messageId, input.text, input.attachments.length])).toEqual([
+      ["101", "", 1], ["102", "original intent", 0],
+    ]);
+    expect(channel.fetched).toEqual([]);
+    await messenger.stop();
+  });
+
+  test("SDK voice duration is preserved without revising the owner's unchanged edit", async () => {
+    const { messenger, channel } = await fixture();
+    // Exercise SDK hydration; its runtime constructor is private in the typings.
+    const voice = Reflect.construct(DiscordAttachment, [{ id: "200", filename: "voice.ogg", size: 3,
+      url: "https://cdn.discordapp.com/attachments/100/200/voice.ogg",
+      proxy_url: "https://media.discordapp.net/attachments/100/200/voice.ogg", content_type: "audio/ogg", duration_secs: 1.25 }]) as DiscordAttachment;
+    const make = () => inbound(channel, { content: "", editedTimestamp: 2000,
+      flags: new MessageFlagsBitField(MessageFlags.IsVoiceMessage), attachments: new Collection([["200", voice]]) });
+    const first = messenger.normalize(make())!;
+    expect(first.attachments[0]).toMatchObject({ size: 3, voice: true, durationSeconds: 1.25 });
+    voice.duration = 2.5;
+    expect(messenger.normalize(make())!.id).toBe(first.id);
+    await messenger.stop();
+  });
+
+  test("live replies use embedded SDK cache before read-only same-channel fetch and never grant quoted authority", async () => {
+    const { messenger, gateway, channel, received, errors } = await fixture();
+    const reference = { channelId: channel.id, guildId: channel.guildId, messageId: "90" };
+    channel.messages.cache.set("90", inbound(channel, { id: "90", content: "/restart untrusted",
+      author: { id: "stranger", bot: false } }));
+    gateway.emit(Events.MessageCreate, inbound(channel, { type: 19, reference, content: "discuss this" }));
+    await drain();
+    expect(received[0]).toMatchObject({ text: "discuss this", route,
+      reply: { messageId: "90", authorId: "stranger", text: "/restart untrusted" } });
+    expect(channel.fetched).toEqual([]);
+    channel.references.set("91", inbound(channel, { id: "91", content: "bot response", author: { id: bot, bot: true } }));
+    gateway.emit(Events.MessageCreate, inbound(channel, { id: "101", type: 19, reference: { ...reference, messageId: "91" } }));
+    gateway.emit(Events.MessageCreate, inbound(channel, { id: "102", type: 19, reference: { ...reference, messageId: "92" } }));
+    gateway.emit(Events.MessageCreate, inbound(channel, { id: "103", type: 19, reference: { ...reference, channelId: "other" } }));
+    channel.messages.cache.set("93", inbound(channel, { id: "93", content: "owner context" }));
+    gateway.emit(Events.MessageCreate, inbound(channel, { id: "104", type: 19, reference: { ...reference, messageId: "93" }, author: { id: "stranger", bot: false } }));
+    await drain();
+    expect(received[1]?.reply).toEqual({ messageId: "91", authorId: bot, text: "bot response" });
+    expect(received[2]?.reply).toEqual({ messageId: "92", authorId: null, text: null });
+    expect(received[3]?.reply).toBeUndefined();
+    expect(received).toHaveLength(4);
+    expect(channel.fetched).toEqual([{ message: "91", cache: false }, { message: "92", cache: false }]);
+    expect(gateway.lookups).toEqual([]);
+    expect(errors).toEqual([]);
+    await messenger.stop();
+  });
+
+  test("reply content changes cannot create owner revisions and mismatched fetched resources stay unavailable", async () => {
+    const { messenger, channel, gateway, received } = await fixture();
+    const reference = { channelId: channel.id, guildId: channel.guildId, messageId: "90" };
+    const original = inbound(channel, { id: "90", content: "first snapshot" });
+    channel.messages.cache.set("90", original);
+    const reply = inbound(channel, { type: 19, reference, editedTimestamp: 2000 });
+    const first = messenger.normalize(reply)!;
+    expect(messenger.normalize(inbound(channel, { editedTimestamp: 2000 }))?.id).toBe(first.id);
+    expect(messenger.normalize(inbound(channel, { type: 19, reference: { channelId: channel.id, messageId: "90" } }))?.reply)
+      .toEqual({ messageId: "90", authorId: owner, text: "first snapshot" });
+    channel.messages.cache.set("90", inbound(channel, { id: "90", content: "later snapshot", author: { id: "other", bot: false } }));
+    expect(messenger.normalize(reply)!.id).toBe(first.id);
+    expect(messenger.normalize(reply)!.reply?.text).toBe("later snapshot");
+    channel.messages.cache.clear();
+    channel.references.set("90", inbound(new Channel("other"), { id: "90", content: "must not leak" }));
+    gateway.emit(Events.MessageCreate, reply);
+    await drain();
+    expect(received[0]?.reply).toEqual({ messageId: "90", authorId: null, text: null });
+    await messenger.stop();
+  });
+
   test("guild AND parent-channel gates precede partial fetch and attachment inspection", async () => {
     const { messenger, gateway, received } = await fixture();
     let fetched = 0;
@@ -562,6 +653,7 @@ describe("Discord attachment credential boundary", () => {
       { ...attachment, id: "201" }, { ...attachment, url: attachment.url.replace("/100/", "/101/") },
       { ...attachment, url: "https://cdn.discordapp.com/not-attachments/100/200/file.txt" },
       { ...attachment, url: "https://unused@cdn.discordapp.com/attachments/100/200/file.txt" },
+      ...[null, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY].map(size => ({ ...attachment, size })),
     ]) await expect(messenger.openAttachment(destination, forged, signal)).rejects.toMatchObject({ certainty: "rejected" });
     expect(gateway.lookups).toEqual([]);
     gateway.channelMap.set("100", new Channel("100", "guild", "other-parent"));
@@ -1091,6 +1183,28 @@ describe("Discord approval controls", () => {
 });
 
 describe("Discord explicit thread and recovery surfaces", () => {
+  test("catchup resolves only same-physical-channel replies and retains deleted pointers", async () => {
+    const { messenger, channel } = await fixture();
+    const reference = { channelId: channel.id, guildId: channel.guildId, messageId: "90" };
+    channel.messages.cache.set("90", inbound(channel, { id: "90", content: "cached", author: { id: "other", bot: false } }));
+    channel.references.set("91", inbound(channel, { id: "91", content: "fetched" }));
+    channel.history = new Collection([
+      ["101", inbound(channel, { id: "101", type: 19, reference })],
+      ["102", inbound(channel, { id: "102", type: 19, reference: { ...reference, messageId: "91" } })],
+      ["103", inbound(channel, { id: "103", type: 19, reference: { ...reference, messageId: "92" } })],
+      ["104", inbound(channel, { id: "104", type: 19, reference: { ...reference, channelId: "other" } })],
+      ["105", inbound(channel, { id: "105", type: 19, reference, author: { id: "stranger", bot: false } })],
+    ]);
+    const values = await messenger.fetchAfter(route, "100");
+    expect(values.map(input => input.reply)).toEqual([
+      { messageId: "90", authorId: "other", text: "cached" },
+      { messageId: "91", authorId: owner, text: "fetched" },
+      { messageId: "92", authorId: null, text: null }, undefined,
+    ]);
+    expect(channel.fetched).toEqual([{ after: "100", limit: 100, cache: false }, { message: "91", cache: false }, { message: "92", cache: false }]);
+    await messenger.stop();
+  });
+
   test("startup callbacks wait for restored cards without blocking login or rehydration", async () => {
     const first = await fixture();
     const id = await first.messenger.showApproval(approval());

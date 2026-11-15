@@ -28,6 +28,11 @@ async function command(args: string[], cwd: string): Promise<string> {
   if (exit) throw new Error(`${args[0]} failed: ${stderr}`);
   return stdout.trim();
 }
+async function promptExtension(revision: string, defect = "none"): Promise<string> {
+  const source = await readFile(join(import.meta.dir, "fixtures/managed-ulw-prompt-extension.ts"), "utf8");
+  return source.replace('const defect: string = "none";', `const defect: string = ${JSON.stringify(defect)};`)
+    + `\nexport const revision = ${JSON.stringify(revision)};\n`;
+}
 async function fixture() {
   const root = await mkdtemp(join(await realpath("/tmp"), "omu-"));
   cleanups.push(async () => { await writable(root); await rm(root, { recursive: true, force: true }); });
@@ -42,7 +47,7 @@ async function fixture() {
   await writeFile(join(remote, "resource.txt"), "resource-v1");
   await writeFile(join(remote, "package.json"), JSON.stringify({ name: "omp-ulw", version: "0.0.0-fixture", type: "module",
     omp: { extensions: ["./index.ts"] }, scripts: { postinstall: "exit 91", build: "exit 92" } }));
-  await writeFile(join(remote, "index.ts"), "export const revision = 'v1'; export default function fixture() {}\n");
+  await writeFile(join(remote, "index.ts"), await promptExtension("v1"));
   const commit = async () => {
     await command(["git", "add", "."], remote);
     await command(["git", "commit", "-m", "fixture revision"], remote);
@@ -88,7 +93,7 @@ test("changed remote activates atomically; unchanged remote and failed updates r
   await updateManagedUlw(f.options);
   expect(activeManagedUlw(f.options)).toBe(firstPath);
   expect((await lstat(join(firstPath, "index.ts"))).ino).toBe(inode);
-  await writeFile(join(f.remote, "index.ts"), "export const revision = 'v2'; export default function fixture() {}\n");
+  await writeFile(join(f.remote, "index.ts"), await promptExtension("v2"));
   const second = await f.commit();
   const updated = await updateManagedUlw(f.options);
   expect(updated.revision).toBe(second);
@@ -116,6 +121,59 @@ test("changed remote activates atomically; unchanged remote and failed updates r
   expect(activeManagedUlw(f.options)).toBe(secondPath);
   expect(managedUlwStatus(f.options).error).not.toBeNull();
   expect(await readFile(join(secondPath, "index.ts"), "utf8")).toBe(secondBytes);
+}, 90_000);
+
+for (const defect of ["no-effect", "empty-preset", "missing-workflow", "duplicate-preset", "duplicate-workflow"]) {
+  test(`loadable ${defect} candidate fails native prompt composition before changing the active pointer`, async () => {
+    const f = await fixture();
+    await updateManagedUlw(f.options);
+    const active = activeManagedUlw(f.options);
+    const pointer = await readFile(join(f.managed, "active.json"), "utf8");
+    const installed = await readFile(join(active, "index.ts"), "utf8");
+    await writeFile(join(f.remote, "index.ts"), await promptExtension("incompatible", defect));
+    const candidate = await f.commit();
+    await expect(updateManagedUlw(f.options)).rejects.toThrow("previous active revision retained");
+    expect(await readFile(join(f.managed, "active.json"), "utf8")).toBe(pointer);
+    expect(activeManagedUlw(f.options)).toBe(active);
+    expect(await readFile(join(active, "index.ts"), "utf8")).toBe(installed);
+    const status = managedUlwStatus(f.options);
+    expect(status.revision).toBe(f.first);
+    expect(status.upstreamRevision).toBe(candidate);
+    expect(status.updating).toBe(false);
+    expect(status.error).toContain(defect === "missing-workflow" || defect === "duplicate-workflow"
+      ? "exactly one explicitly activated ULW policy" : defect === "empty-preset"
+        ? "working instructions" : "exactly one applied model preset");
+    expect((await readdir(f.managed)).filter(entry => entry.startsWith(".stage-"))).toEqual([]);
+    expect(await readdir(join(f.managed, "revisions"))).toEqual([f.first]);
+  }, 90_000);
+}
+
+test("a previously prepared loadable no-op revision must pass the new composition gate before activation", async () => {
+  const f = await fixture();
+  await updateManagedUlw(f.options);
+  const active = activeManagedUlw(f.options);
+  const pointer = await readFile(join(f.managed, "active.json"), "utf8");
+  await writeFile(join(f.remote, "index.ts"), "export default function legacyLoadOnlyFixture() {}\n");
+  const candidate = await f.commit();
+  // Simulate an immutable package accepted by the former import-only gate.
+  const revisionRoot = join(f.managed, "revisions", candidate);
+  const prepared = join(revisionRoot, "package");
+  await mkdir(join(prepared, "skills"), { recursive: true });
+  for (const file of ["index.ts", "package.json", "resource.txt"]) {
+    await writeFile(join(prepared, file), await readFile(join(f.remote, file)), { mode: 0o444 });
+  }
+  await writeFile(join(revisionRoot, "provenance.json"), JSON.stringify({
+    revision: candidate, repository: f.remote, branch: "refs/heads/main", preparedAt: new Date().toISOString(),
+  }));
+  await chmod(join(prepared, "skills"), 0o555);
+  await chmod(prepared, 0o555);
+  await expect(updateManagedUlw(f.options)).rejects.toThrow("exactly one applied model preset");
+  expect(await readFile(join(f.managed, "active.json"), "utf8")).toBe(pointer);
+  expect(activeManagedUlw(f.options)).toBe(active);
+  expect(managedUlwStatus(f.options).upstreamRevision).toBe(candidate);
+  expect(managedUlwStatus(f.options).updating).toBe(false);
+  expect(await readFile(join(prepared, "index.ts"), "utf8")).toContain("legacyLoadOnlyFixture");
+  expect((await readdir(f.managed)).filter(entry => entry.startsWith(".stage-"))).toEqual([]);
 }, 90_000);
 
 test("concurrent real installer processes serialize and never publish an incomplete revision", async () => {
@@ -156,7 +214,7 @@ server.listen(socket,()=>fs.chmodSync(socket,0o600));`);
   const head = await launch("head", {}, f.managed);
   expect(head.packagePath).toBe(firstPath);
   expect(head.managedRoot).toBe(f.managed);
-  await writeFile(join(f.remote, "index.ts"), "export const revision='v2'; export default function fixture() {}\n");
+  await writeFile(join(f.remote, "index.ts"), await promptExtension("v2"));
   await f.commit();
   await updateManagedUlw(f.options);
   const secondPath = activeManagedUlw(f.options);

@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Board, BoardMembershipError, boardRepositoryChannel } from "./board";
 import { loadConfig } from "./config";
+import { repositoryRoot } from "./repository";
 
 const tools = new Set(["board_post", "board_read", "board_subscribe"]);
 const result = (value: unknown) => ({
@@ -101,9 +102,7 @@ export default function boardExtension(pi: ExtensionAPI): void {
         watcher.on("error", error => pi.logger.error("Shared board watcher failed", { error: String(error) }));
         watcher.unref();
       }
-      const git = Bun.spawn(["git", "-C", ctx.cwd, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "ignore" });
-      const root = (await new Response(git.stdout).text()).trim();
-      const repository = await git.exited === 0 ? realpathSync(root) : realpathSync(ctx.cwd);
+      const repository = await repositoryRoot(ctx.cwd) ?? realpathSync(ctx.cwd);
       requireMain(ctx);
       current?.board.close();
       current = undefined;

@@ -190,6 +190,26 @@ test("slash commands cross durable Gateway IPC without receipt reactions or null
   expect(f.messenger.activities).toEqual([]);
 });
 
+test("Gateway preserves the first reply snapshot and voice metadata across detached intake and redelivery", async () => {
+  const f = await fixture();
+  const first = f.client();
+  await first.start({ message: async () => {}, answer: async () => {} });
+  await f.server.initialReady.promise;
+  await first.stop();
+  const original: Inbound = { ...input("quoted-voice"),
+    reply: { messageId: "quoted", authorId: "other", text: "Original context" },
+    attachments: [{ id: "voice", name: "voice.ogg", url: "telegram-file:voice", size: null, voice: true, durationSeconds: 2 }],
+  };
+  await f.messenger.emit(original);
+  await f.messenger.emit({ ...original, reply: { messageId: "quoted", authorId: null, text: null } });
+  expect(f.store.pending()).toBe(1);
+  const received: Inbound[] = [];
+  const replacement = f.client();
+  await replacement.start({ message: async message => { received.push(message); }, answer: async () => {} });
+  await eventually(() => received.length === 1 && f.store.pending() === 0);
+  expect(received).toEqual([original]);
+});
+
 test("initial native approval readiness gates admission, while head detach preserves durable intake and dedup", async () => {
   const f = await fixture();
   const first = f.client();
@@ -619,6 +639,42 @@ test("attachment IPC streams before completion, forwards abort, and rejects over
   f.messenger.download = () => new Response(new Uint8Array([1, 2, 3, 4]));
   const complete = await client.openAttachment(route, attachment, AbortSignal.timeout(2000));
   expect(new Uint8Array(await complete.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]));
+});
+
+test("unknown-size attachment IPC requires bounded bytes and a complete framed delivery", async () => {
+  const f = await fixture();
+  const client = f.client();
+  await client.start({ message: async () => {}, answer: async () => {} });
+  const attachment: Attachment = { id: "file", name: "voice.ogg", url: "telegram-file:file", size: null };
+  for (const headers of [{}, { "content-length": "4" }]) {
+    f.messenger.download = () => new Response("OggS", { headers });
+    const response = await client.openAttachment(route, attachment, AbortSignal.timeout(2000));
+    expect(await response.text()).toBe("OggS");
+  }
+  f.messenger.download = () => new Response("OggS", { headers: { "content-length": "5" } });
+  await expect((async () => {
+    const response = await client.openAttachment(route, attachment, AbortSignal.timeout(2000));
+    await response.arrayBuffer();
+  })()).rejects.toThrow();
+  f.messenger.download = () => new Response("OggS");
+  await expect((async () => {
+    const response = await client.openAttachment(route, { ...attachment, size: 0 }, AbortSignal.timeout(2000));
+    await response.arrayBuffer();
+  })()).rejects.toThrow();
+  f.messenger.download = () => {
+    let remaining = 21;
+    const chunk = new Uint8Array(1024 * 1024);
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (remaining-- > 0) controller.enqueue(chunk);
+        else controller.close();
+      },
+    }));
+  };
+  await expect((async () => {
+    const response = await client.openAttachment(route, attachment, AbortSignal.timeout(4000));
+    await response.arrayBuffer();
+  })()).rejects.toThrow();
 });
 
 test("only supervised head may attach and explicit stop is a service request, not native RPC forwarding", async () => {

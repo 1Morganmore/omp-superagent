@@ -120,6 +120,12 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     }
     if (!requestId) throw new Error("Ordinary native input requires its durable request identity");
     if (role === "head") {
+      if (requestId.startsWith("progress:")) {
+        const snapshot = /Structured lane observation: (\{[^\n]+\})/.exec(text)?.[1];
+        if (!snapshot) throw new Error("Structured native progress lost its observation");
+        const observation = JSON.parse(snapshot);
+        return { content: [`OBSERVATION:202:${observation.waiting ? "waiting" : "resolved"}`] };
+      }
       if (requestId === "202") {
         if (!called("board_post")) return invoke("board_post", {
           channel: "general", text: "native-gateway:head-brief", mentions: [],
@@ -175,6 +181,40 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     if (!called("board_post")) return invoke("board_post", {
       channel: "general", text: `native-gateway:lane-finding:${requestId}`, mentions: ["head"],
     });
+    if (requestId === "handoff:202:lane" && process.env.OMP_NATIVE_GATEWAY_PRESETS === "valid") {
+      const observations = results.flatMap(result => {
+        const details = result.details as { type?: string; report?: { status?: string }; xdev?: { tool?: string; inner?: { type?: string; report?: { status?: string } } } } | undefined;
+        const receipt = details?.xdev?.tool === "lane_report" ? details.xdev.inner : details;
+        return receipt?.type === "superagent-lane-report" ? [receipt] : [];
+      });
+      const waiting = { kind: "dependency", target: "Native observation smoke release" };
+      const resolvedByEval = results.some(result => {
+        const call = calls.get(result.toolCallId);
+        const args = call?.name === "eval" ? call.arguments
+          : call?.name === "write" && call.arguments.path === "xd://eval" ? JSON.parse(String(call.arguments.content)) : undefined;
+        return args?.title === "Native lane resolved report";
+      });
+      if (!observations.some(receipt => receipt.report?.status === "waiting")) {
+        return invoke("lane_report", { status: "waiting", summary: "Waiting for the isolated verification release", waiting });
+      }
+      const released = async (name: string) => {
+        const ready = Promise.withResolvers<void>();
+        const watcher = watch(root, (_event, file) => { if (String(file) === name) ready.resolve(); });
+        try {
+          try { await access(join(root, name)); }
+          catch { await ready.promise; }
+        } finally { watcher.close(); }
+      };
+      if (!observations.some(receipt => receipt.report?.status === "resolved") && !resolvedByEval) {
+        await released("release-observation");
+        const artifact = join(root, "topic", "native-observation-evidence.txt");
+        await writeFile(artifact, "Native observation evidence\n", { mode: 0o600 });
+        return invoke("eval", { language: "js", title: "Native lane resolved report",
+          code: `await tool.lane_report(${JSON.stringify({ status: "resolved", summary: "The isolated release produced the selected evidence file",
+            waiting, evidence: [{ kind: "file", path: artifact }] })});` });
+      }
+      await released("release-observation-final");
+    }
     return { content: [activeUsers.map(user => `LANE:${user.requestId}`).join("\n")] };
   } });
   pi.registerProvider(provider, {

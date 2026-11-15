@@ -17,6 +17,16 @@ Host 15개·58 assertion과 최종 tsc를 확인했으며 그 뒤 전체 root �
 실제 제공자 호출·비용의 기존 미확인 사고도 [운영·설치 가이드](docs/OPERATIONS.md)의 제한을 그대로 유지한다.
 조사 기준일: 2026-11-13.
 
+후속 Dori PR 비교에서 Git 저장소 탐색·Telegram 크기 미상 첨부·Discord 무내용 입력을 수정하고,
+답장/음성 문맥과 ULW 활성화 전 실제 프롬프트 합성 검사를 독립 구현했다. Bun 1.4.4에서 대상
+8파일 553개·4,779 assertion과 타입 검사, 실제 native Gateway→head→lane 답장 문맥 1개,
+공식 managed ULW의 offline 합성(일반/활성화 각 2턴·network 0)을 확인했다. 전체 suite나
+실계정·운영 재시작 검증으로 확대하지 않으며 아래 계약과 운영 가이드의 해당 검증 행을 따른다.
+
+이후 PR #45/#46의 근거 기반 관측·구조화 대기·시각 보존을 기존 native journal/SQLite/report
+경로에 독립 구현했다. 타입 검사·대상 회귀의 실패 수정 재검증과 격리 native Gateway의
+대기→`/status`→eval 내부 근거 보고→헤드 전달을 확인했으며, 정확한 묶음과 제한은 운영 가이드를 따른다.
+
 ## 1. 목표와 기본 결정
 
 일반 코드 Gateway가 메신저 연결과 헤드 수명을 유지한다. 단일 OMP 메인 헤드가 모든 요청을 받고, 작은 일은 직접 처리하며,
@@ -75,7 +85,7 @@ flowchart TB
     H <--> S[(기존 coordination.sqlite<br/>요청 · lane · 승인 · delivery)]
     subgraph LaneProcesses[슬롯에 따라 상주하는 독립 OMP 레인]
         L[레인 OMP Host<br/>native tools · task · 세션 기록]
-        LE[src/lane-extension.ts<br/>lane 역할 계약만]
+        LE[src/lane-extension.ts<br/>lane 역할·관측 보고]
         LB[src/board-extension.ts]
         LE --> L
         L --- LB
@@ -114,7 +124,7 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 | `src/gateway*.ts` | detached Gateway 기동·소유권·영속 수신/receipt·헤드 감독·로컬 transport 효과 proxy |
 | `src/gateway-client.ts` | `createGatewayMessenger(config): Messenger`. 헤드 runtime에 기존 Messenger 계약을 제공하며 stop은 client만 detach |
 | `src/extension.ts` | `role=head`인 부모 없는 root에서만 runtime 시작과 9개 관리 도구 등록 |
-| `src/lane-extension.ts` | `role=lane`에서만 레인 지침 주입. 헤드 manager를 로드하지 않음 |
+| `src/lane-extension.ts`, `src/lane-report.ts` | root lane의 역할 지침·근거/대기 관측 보고. 헤드 manager·메신저 권한 없음 |
 | `src/board.ts`, `src/board-extension.ts` | 독립 SQLite 정보 게시판과 head/lane 공통 도구·세션별 알림/구독 |
 | `src/messengers.ts` | Gateway 안에서 구성된 실제 어댑터·자격 증명을 hub에 연결, 원래 platform으로 발송·승인·첨부 API dispatch |
 | `skills/head/SKILL.md`, `skills/head/references/`, `skills/lane/SKILL.md` | `before_agent_start`의 필수 역할 계약과 native `skill://superagent-head`, `skill://superagent-lane` 진입점. root head에는 헤드 계약과 재귀적인 전체 Markdown 절차를 매 턴 주입하고, 레인의 `references/workflow.md`는 필요할 때 읽음 |
@@ -155,7 +165,11 @@ active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startu
 
 확인한 commit의 전체 소스·submodule을 프로젝트 소유
 `.upstream/ulw/revisions/<commit>/package`에 materialize한다. 의존성 설치는 임의 lifecycle
-script를 무시하고 정해진 materialization과 유한 offline native loader probe를 거친다.
+script를 무시하고 정해진 materialization과 유한 offline native prompt-composition probe를 거친다.
+probe는 pinned OMP의 실제 system prompt와 ExtensionRunner로 일반 모델 프로필 및 명시적
+ULW 활성화의 합성을 각각 검사한다. 프로필·활성화 policy가 비어 있거나 중복되거나 native 역할
+교체가 빠지면 활성화하지 않는다. provider 호출·Agent 실행·goal 생성 없이 메모리 세션과
+격리된 HOME에서 검사하며, 이미 준비된 revision을 다시 활성화할 때도 같은 검사를 거친다.
 SQLite update lock으로 동시 준비를 직렬화하고 완전한 staging/probe 성공 뒤에만 `active.json`을
 원자적으로 전환한다. `status.json`에 확인·오류 상태를 기록하며 실패 시 이전 active를 보존한다.
 기존 active가 있으면 동일 source repository에서 active commit의 후손인 **fast-forward만**
@@ -402,6 +416,8 @@ runtime은 해당 목적지로 이 메시지가 발송됐다는 영수증을 확
 - 새 레인을 만들어도 이미 헤드에 접수된 후속 메시지나 대기 입력을 자동으로 레인에 옮기지 않는다.
   각 새 지시는 실제 저장된 입력 ID와 명시적인 head dispatch를 요구한다.
 - 새 레인은 메인 헤드의 전체 대화를 상속하지 않는다. 원본 요청, 관련 근거, 제약만 인계한다.
+- 레인의 `repoRoot`와 게시판 저장소 채널은 해당 cwd에서 Git으로 탐색하되, 시작 셸의
+  `GIT_*` 선택·설정 환경을 상속하지 않는다. 일반 도구의 실행 환경 전체를 격리하는 것은 아니다.
 - 별도 주제로 분리된 요청은 새 연결을 만든다. 불명확한 주제 전환을 모델 추측만으로 확정하지 않는다.
 - 스레드 없는 DM은 메인 대화를 기본으로 한다. 명확한 독립 주제는 별도 사용자 명령 없이
   헤드가 `lane_start`로 분리하며 native thread/topic을 우선 생성하고 미지원 private chat만
@@ -630,6 +646,26 @@ OMP 고정 revision `c308970263ae13744ea15ab67302e3dac840e266`의 기존
 2026-11-15 upstream `main`의 같은 타입도 확인했으나 별도 SHA를 수집하거나 핀을 갱신하지
 않았다. phase가 없는 provider는 `toolUse`의 일반 텍스트를 중간 보고로 해석하며,
 native 코어 패치·새 메신저 API·의존성을 추가하지 않는다.
+
+PR #45/#46의 관측 개념은 별도 감독자가 아니라 기존 레인 기록에 적용한다.
+root lane 전용 `lane_report`가 선택한 실제 파일 바이트·성공한 native 도구 결과를 해시하고,
+`progress`/`waiting`/`resolved`를 native custom journal과 도구 결과에 기록한다. 보고 ID와
+세션 ID는 실제 native 호출에서 부여하며, 인쇄된 텍스트·board 채터는 근거가 아니다.
+동일 파일 내용·동일 도구 결과의 다른 호출 ID·반복 대기는 근거 시각이나 `since`를 갱신하지
+않는다. 일반 활동·commentary·대기 해소도 새 근거 자체가 아니며 `progress`는 대기를 지우지 않는다.
+대기는 실제 tool/approval/job ID 또는 정확한 dependency 이름을 보존한다. native tool/approval
+종료는 일치하는 대상만 해소하고, job/dependency는 같은 대상과 근거를 포함한 `resolved`로 해소한다.
+
+`Lane.observation`은 원본 input/request/session/generation에 묶인 보고 시각·최근 변경 근거·
+대상별 대기 시작을 기존 SQLite 레인 JSON에 저장한다. 새 근거나 대기 전이만 기존 영속
+progress receipt를 통해 헤드에 전달한다. `lane_inspect`와 연결 주제의 `/status`는 이 기록과
+경과 시간·`ownerCurrent`를 표시하되 검증된 완료나 실제 대상의 현재 상태라고 주장하지 않는다.
+제출 전 native journal cursor를 원본 실행에 묶어 보존하고, native 도구 종료 경계와 재연결에서
+기존 `get_entries`로 순서대로 회수한다. 따라서 eval 내부 결과가 RPC 도구 결과에 노출되지 않아도
+기록은 유실되지 않으며 checkpoint 전의 미회수 보고도 원본 cursor 이후만 복구한다.
+이 읽기도 기존 준비 작업 수명에 포함해 완료·idle 회수와 경합하지 않는다. native children은
+보고 도구를 제외하고 실행 시에도 차단한다. 타이머·polling·자동 독촉·재개·종료·새 상태 레지스트리나
+감독용 모델 턴은 추가하지 않는다.
 
 중간 진척과 별개인 같은 요청의 마지막 비어 있지 않은 assistant 답변은 native 정착까지 보존한다. TODO 알림
 등으로 이어진 빈 응답·공백·thinking-only 메시지는 그 답변을 지우지 않으며 새 답변이 있으면
@@ -1192,6 +1228,16 @@ route와 원래 source를 보존하고 동일 결과를 lane/head 양쪽에서 �
   `telegram-file:<id>`를 원래 접수 route에 대조한 뒤 getFile·즉시 다운로드로 해석하고,
   Slack은 `slack-file:<id>`를 files.info의 소유자/team/share에 대조한 뒤 허용 private 파일 URL을
   bot 헤더로 다운로드한다. 토큰/서명 URL은 장부·프롬프트·SDK 오류에 남기지 않고 redirect를 금지한다.
+  Telegram의 선택적 `file_size`가 없으면 크기는 `null`로 보존하며 0바이트로 추정하지 않는다.
+  알려진 크기는 실제 바이트와 일치해야 하고, 미상 크기도 Gateway 완료 프레임·실제 파일/요청/
+  이미지 바이트 한도를 통과해야 한다. 프롬프트에는 실제 저장 바이트를 표시한다.
+- Discord·Telegram 일반 답장은 참조 메시지 ID·작성자 ID·본문을 최초 접수 시의 스냅샷으로
+  보존하고 Telegram의 선택 인용문도 전달한다. 참조가 삭제되었거나 조회 불가면 알려진 ID와
+  `null` 필드를 유지한다. Discord 참조 본문은 같은 허가된 물리 채널에서만 조회한다.
+  인용은 명령·승인·route/source 선택 권한이 아닌 데이터이며 기존 승인 카드 처리보다 앞서지 않는다.
+  참조 원문의 후속 수정·삭제·재전달은 접수한 스냅샷이나 작업을 바꾸지 않는다.
+  음성 여부·길이는 첨부 메타데이터와 head/lane 프롬프트에 보존하지만 자동 전사 기능은 추가하지 않는다.
+  Discord의 의미 있는 텍스트·지원 첨부가 모두 없는 입력/수정은 새 작업으로 접수하지 않는다.
 - 일반 출력 한계는 Discord 2,000자·Telegram 4,096 UTF-16 단위·Slack 3,000자이며 긴 출력은
   각각 최대 8 MiB·50 MiB·8 MiB의 단일 텍스트 첨부다. Slack은 upload URL 발급 → 바이트 업로드 →
   `files.completeUploadExternal`로 원래 목적지에 게시한다. Telegram·Slack SDK의 mutation 자동 재시도는 끄며

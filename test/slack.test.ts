@@ -935,7 +935,9 @@ describe("Slack private attachment credential boundaries", () => {
       f.http.file = { ...clone(original), ...patch };
       await expect(f.messenger.openAttachment(route, attachment, new AbortController().signal)).rejects.toBeInstanceOf(DeliveryError);
     }
-    for (const patch of [{ id: "FOTHER" }, { url: "https://attacker.invalid/token" }]) await expect(f.messenger.openAttachment(route, { ...attachment, ...patch }, new AbortController().signal)).rejects.toBeInstanceOf(DeliveryError);
+    for (const patch of [{ id: "FOTHER" }, { url: "https://attacker.invalid/token" },
+      ...[null, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY].map(size => ({ size })),
+    ]) await expect(f.messenger.openAttachment(route, { ...attachment, ...patch }, new AbortController().signal)).rejects.toBeInstanceOf(DeliveryError);
     expect(f.http.external).toEqual([]);
     await f.messenger.stop();
   });

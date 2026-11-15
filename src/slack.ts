@@ -734,7 +734,8 @@ export class SlackMessenger implements Messenger {
 
   async openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response> {
     await this.destination(route);
-    if (!/^F[A-Z0-9]+$/.test(attachment.id) || attachment.url !== `slack-file:${attachment.id}`) throw new DeliveryError("Slack attachment reference is not an authorized file ID", "rejected");
+    if (typeof attachment.size !== "number" || !Number.isSafeInteger(attachment.size) || attachment.size < 0 ||
+      !/^F[A-Z0-9]+$/.test(attachment.id) || attachment.url !== `slack-file:${attachment.id}`) throw new DeliveryError("Slack attachment reference is not an authorized file ID", "rejected");
     const result = await this.api("files.info", { file: attachment.id });
     const file = result.file;
     if (!object(file) || file.id !== attachment.id || file.user !== this.options.ownerId || file.mode !== "hosted" || file.is_external !== false || file.file_access === "check_file_info" ||

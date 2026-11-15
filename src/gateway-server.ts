@@ -329,7 +329,7 @@ export class GatewayServer {
 
   private async attachment(data: Record<string, unknown>, response: ServerResponse): Promise<void> {
     const attachment = record(data.attachment) as unknown as Attachment;
-    if (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_GATEWAY_ATTACHMENT)
+    if (attachment.size !== null && (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_GATEWAY_ATTACHMENT))
       throw new DeliveryError("Invalid attachment size", "rejected");
     const controller = new AbortController();
     let cancelRead: (() => Promise<void>) | undefined;
@@ -339,8 +339,9 @@ export class GatewayServer {
       const upstream = await this.options.messenger.openAttachment(data.route as Route, attachment, controller.signal);
       if (!upstream.body) throw new DeliveryError("Attachment response has no body", "rejected");
       const length = upstream.headers.get("content-length");
-      if (length !== null && (!/^\d+$/.test(length) || Number(length) > attachment.size))
+      if (length !== null && (!/^\d+$/.test(length) || Number(length) > (attachment.size ?? MAX_GATEWAY_ATTACHMENT)))
         throw new DeliveryError("Attachment response exceeds declared size", "rejected");
+      const expectedSize = attachment.size ?? (length === null ? null : Number(length));
       response.writeHead(upstream.status, {
         "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
         "x-gateway-attachment-protocol": "1",
@@ -354,7 +355,7 @@ export class GatewayServer {
         const chunk = await reader.read();
         if (chunk.done) break;
         bytes += chunk.value.byteLength;
-        if (bytes > attachment.size || bytes > MAX_GATEWAY_ATTACHMENT) throw new Error("Attachment stream exceeds declared size");
+        if (bytes > (attachment.size ?? MAX_GATEWAY_ATTACHMENT) || bytes > MAX_GATEWAY_ATTACHMENT) throw new Error("Attachment stream exceeds declared size");
         if (!chunk.value.byteLength) continue;
         // Socket closure alone is not a completion receipt: some HTTP stacks
         // expose a destroyed response as an empty/truncated successful body.
@@ -363,7 +364,7 @@ export class GatewayServer {
         if (!response.write(frame)) await once(response, "drain", { signal: controller.signal });
         if (!response.write(chunk.value)) await once(response, "drain", { signal: controller.signal });
       }
-      if (bytes !== attachment.size) throw new Error("Attachment stream was truncated");
+      if (expectedSize !== null && bytes !== expectedSize) throw new Error("Attachment stream was truncated");
       response.end(Buffer.alloc(4));
     } finally {
       response.off("close", abort);

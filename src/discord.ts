@@ -5,7 +5,7 @@ import {
   Routes, TextInputBuilder, TextInputStyle,
   type ChatInputCommandInteraction, type ForumChannel, type Interaction, type MediaChannel, type Message, type MessageCreateOptions, type PartialMessage,
 } from "discord.js";
-import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type Route } from "./contracts.ts";
+import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
@@ -195,7 +195,10 @@ export class DiscordMessenger implements Messenger {
       if (!message.guildId && "recipientId" in message.channel && message.channel.recipientId !== this.options.ownerId) return;
       const full = message.partial ? await message.fetch() : message;
       const inbound = this.normalize(full);
-      if (inbound) await this.handlers?.message(inbound);
+      if (inbound) {
+        await this.resolveReply(full, inbound);
+        await this.handlers?.message(inbound);
+      }
     }).catch(this.report);
   }
 
@@ -205,18 +208,56 @@ export class DiscordMessenger implements Messenger {
     const route = this.route(message.channel);
     if (!route || (message.type !== 0 && message.type !== 19)) return null;
     if (!route.guildId && (message.channel.type !== ChannelType.DM || message.channel.recipientId !== this.options.ownerId)) return null;
-    const attachments = [...message.attachments.values()].filter(file => discordAttachmentAllowed(file.url)).map(file => ({
+    const attachments = [...message.attachments.values()].filter(file => discordAttachmentAllowed(file.url) &&
+      typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0).map(file => ({
       id: file.id, name: file.name, url: file.url, size: file.size,
       ...(file.contentType ? { contentType: file.contentType } : {}),
+      ...(message.flags?.has(MessageFlags.IsVoiceMessage) ? { voice: true as const } : {}),
+      ...(typeof file.duration === "number" && Number.isFinite(file.duration) && file.duration >= 0 ? { durationSeconds: file.duration } : {}),
     }));
+    // Stickers, whitespace, and filtered attachments are not instructions. This
+    // also ignores contentless edits instead of replacing an admitted intent.
+    if (!message.content.trim() && attachments.length === 0) return null;
+    const reply = this.replyPointer(message);
+    if (reply) this.snapshotReply(message, message.channel.messages.cache?.get(reply.messageId), reply);
     // CDN URLs carry expiring signatures; refreshing one must not create a new
     // input revision for an unchanged Discord edit.
+    // Reply/voice snapshots are context, not a new edit or download identity.
     const attachmentIdentity = attachments.map(file => [file.id, file.name, file.size, file.contentType]).sort((left, right) => String(left[0]).localeCompare(String(right[0])));
     const revision = message.editedTimestamp === null ? "original" : `edit:${message.editedTimestamp}:${hash(JSON.stringify([message.content, attachmentIdentity]))}`;
     return {
       id: `discord:${route.accountId}:${message.id}:${revision}`, route, messageId: message.id,
       text: message.content, receivedAt: message.editedTimestamp ?? message.createdTimestamp, attachments,
+      ...(reply ? { reply } : {}),
     };
+  }
+
+  private replyPointer(message: Message): ReplyContext | undefined {
+    const reference = message.reference;
+    // discord.js caches embedded referenced_message in this channel's manager.
+    // Never use fetchReference(): it follows the reference's channel selector.
+    if (message.type !== 19 || !reference?.messageId || !/^[0-9]{1,20}$/.test(reference.messageId) ||
+      reference.channelId !== message.channelId || (reference.guildId !== undefined && reference.guildId !== message.guildId)) return;
+    return { messageId: reference.messageId, authorId: null, text: null };
+  }
+
+  private snapshotReply(message: Message, referenced: Message | undefined, reply: ReplyContext): boolean {
+    if (!referenced || referenced.partial || referenced.id !== reply.messageId ||
+      referenced.channelId !== message.channelId || referenced.guildId !== message.guildId) return false;
+    reply.authorId = referenced.author?.id ?? null;
+    reply.text = typeof referenced.content === "string" ? referenced.content : null;
+    return true;
+  }
+
+  private async resolveReply(message: Message, input: Inbound): Promise<void> {
+    if (!input.reply || this.snapshotReply(message, message.channel.messages.cache?.get(input.reply.messageId), input.reply)) return;
+    try {
+      const referenced = await message.channel.messages.fetch({ message: input.reply.messageId, cache: false });
+      this.snapshotReply(message, referenced, input.reply);
+    } catch {
+      // Missing/deleted/inaccessible originals retain only their same-channel
+      // pointer; failure to obtain context must not lose the owner's message.
+    }
   }
 
   private assertRoute(route: Route): void {
@@ -245,7 +286,8 @@ export class DiscordMessenger implements Messenger {
 
   async openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response> {
     this.assertRoute(route);
-    if (!discordAttachmentAllowed(attachment.url)) throw new DeliveryError("Attachment is not an authorized Discord CDN attachment", "rejected");
+    if (typeof attachment.size !== "number" || !Number.isSafeInteger(attachment.size) || attachment.size < 0 ||
+      !discordAttachmentAllowed(attachment.url)) throw new DeliveryError("Attachment is not an authorized Discord CDN attachment", "rejected");
     const url = new URL(attachment.url);
     const [, , channelId, attachmentId] = url.pathname.split("/");
     if (channelId !== (route.threadId ?? route.channelId) || attachmentId !== attachment.id) {
@@ -597,7 +639,10 @@ export class DiscordMessenger implements Messenger {
       if (!messages.length) break;
       for (const message of messages) {
         const input = this.normalize(message);
-        if (input && physicalRouteKey(input.route) === physicalRouteKey(route)) inputs.push(input);
+        if (input && physicalRouteKey(input.route) === physicalRouteKey(route)) {
+          await this.resolveReply(message, input);
+          inputs.push(input);
+        }
       }
       const next = messages[messages.length - 1]!.id;
       if (BigInt(next) <= BigInt(cursor)) throw new Error("Discord catchup cursor did not advance");

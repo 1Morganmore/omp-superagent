@@ -7,6 +7,7 @@ import { Client, Collection, type ClientUser, type Message } from "discord.js";
 import { physicalRouteKey, routeKey, type Approval, type Inbound, type Lane, type LaneModel, type Route } from "../src/contracts.ts";
 import { DiscordMessenger } from "../src/discord.ts";
 import { Store } from "../src/store.ts";
+import type { LaneReport } from "../src/lane-report";
 
 const stores: Store[] = [];
 const directories: string[] = [];
@@ -70,6 +71,124 @@ function storedOutput(path: string, id: string): { state: string; remote_id: str
 }
 
 describe("durable coordination store", () => {
+  test("structured observations separate new evidence from repeated reports and waiting", () => {
+    const { store } = fixture();
+    const managed = admitLane(store);
+    store.updateLane(managed.id, 0, { sessionId: "native-observation" });
+    store.submit("source-lane", "native-request", 0);
+    const report: LaneReport = { status: "progress", summary: "Verified the selected artifact changed",
+      evidence: [{ kind: "file", ref: "/workspace/repo/result", fingerprint: "a".repeat(64) }] };
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "first", report, 1000)).toBe(true);
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "first", report, 2000)).toBe(false);
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "repeat", report, 3000)).toBe(false);
+    expect(store.lane(managed.id)?.observation).toMatchObject({ lastReportAt: 3000, lastEvidenceAt: 1000, waiting: null });
+    store.progress("source-lane", 0, "native-observation", "commentary", "Still working");
+    expect(store.lane(managed.id)?.observation?.lastEvidenceAt).toBe(1000);
+    const waiting: LaneReport = { status: "waiting", summary: "Waiting for verification",
+      evidence: [], waiting: { kind: "tool", id: "native-check", target: "Verification command" } };
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "waiting", waiting, 4000)).toBe(true);
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "same-wait", {
+      ...waiting, waiting: { kind: "tool", id: "native-check", target: "Same verification, renamed" },
+    }, 5000)).toBe(false);
+    expect(store.lane(managed.id)?.observation).toMatchObject({ lastReportAt: 5000, lastEvidenceAt: 1000, waiting: { since: 4000 } });
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "same-proof", report, 6000)).toBe(false);
+    expect(store.lane(managed.id)?.observation?.waiting?.since).toBe(4000);
+    expect(store.resolveLaneWaiting("source-lane", 0, "native-observation", "tool", "unrelated")).toBe(false);
+    expect(store.resolveLaneWaiting("source-lane", 0, "native-observation", "approval", "native-check")).toBe(false);
+    expect(store.resolveLaneWaiting("source-lane", 0, "native-observation", "tool", "native-check")).toBe(true);
+    expect(store.resolveLaneWaiting("source-lane", 0, "native-observation", "tool", "native-check")).toBe(false);
+    expect(store.lane(managed.id)?.observation).toMatchObject({ lastEvidenceAt: 1000, waiting: null });
+    expect(store.input("source-lane")?.state).toBe("submitted");
+    expect(store.lane(managed.id)?.workState).toBe("open");
+    expect(store.inputs("main")).toHaveLength(1);
+    expect(store.inputs("main")[0]?.text).toContain("does not verify success");
+    expect(store.outputs()).toEqual([]);
+  });
+
+  test("identical successful tool results are not new evidence merely because their native call IDs differ", () => {
+    const { store, path } = fixture();
+    const managed = admitLane(store);
+    store.updateLane(managed.id, 0, { sessionId: "native-observation" });
+    store.submit("source-lane", "native-request", 0);
+    const report: LaneReport = { status: "progress", summary: "Selected native verification result",
+      evidence: [{ kind: "tool", ref: "first-native-call", fingerprint: "a".repeat(64) }] };
+    expect(store.recordLaneReport("source-lane", 0, "native-observation", "first", report, 1000)).toBe(true);
+    store.close();
+    const reopened = open(path);
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "same-output", {
+      ...report, evidence: [{ ...report.evidence[0]!, ref: "different-native-call" }],
+    }, 2000)).toBe(false);
+    expect(reopened.lane(managed.id)?.observation).toMatchObject({ lastEvidenceAt: 1000, lastReportAt: 2000 });
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "new-output", {
+      ...report, evidence: [{ kind: "tool", ref: "third-native-call", fingerprint: "b".repeat(64) }],
+    }, 3000)).toBe(true);
+    expect(reopened.lane(managed.id)?.observation).toMatchObject({ lastEvidenceAt: 3000 });
+  });
+
+  test("waiting clocks, evidence fingerprints and report receipts survive reopen without old reports restoring a resolved wait", () => {
+    const { store, path } = fixture();
+    const managed = admitLane(store);
+    store.updateLane(managed.id, 0, { sessionId: "native-observation" });
+    store.submit("source-lane", "native-request", 0);
+    const waiting: LaneReport = { status: "waiting", summary: "Blocked on the external schema",
+      waiting: { kind: "dependency", target: "/workspace/repo/schema.json" }, evidence: [] };
+    store.recordLaneReport("source-lane", 0, "native-observation", "original-wait", waiting, 1000);
+    store.close();
+    const reopened = open(path);
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "original-wait", waiting, 8000)).toBe(false);
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "repeat-wait", waiting, 9000)).toBe(false);
+    expect(reopened.lane(managed.id)?.observation).toMatchObject({ waiting: { since: 1000 }, lastEvidenceAt: null });
+    const resolved: LaneReport = { status: "resolved", summary: "The requested schema is available", waiting: waiting.waiting,
+      evidence: [{ kind: "file", ref: "/workspace/repo/schema.json", fingerprint: "b".repeat(64) }] };
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "wrong-resolution", {
+      ...resolved, waiting: { kind: "dependency", target: "/workspace/repo/other.json" },
+    }, 9500)).toBe(false);
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "resolved", resolved, 10000)).toBe(true);
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "resolved", resolved, 11000)).toBe(false);
+    expect(reopened.recordLaneReport("source-lane", 0, "native-observation", "original-wait", waiting, 12000)).toBe(false);
+    expect(reopened.lane(managed.id)?.observation).toMatchObject({ waiting: null, lastEvidenceAt: 10000, lastReportAt: 10000 });
+    expect(() => reopened.recordLaneReport("source-lane", 0, "native-observation", "resolved", {
+      ...resolved, summary: "A conflicting replay",
+    }, 13000)).toThrow("Lane report identity conflict");
+  });
+
+  test.each(["generation", "session", "paused", "cancelled", "uncertain"] as const)(
+    "structured reports and late native resolution cannot mutate an observation after %s changes", reason => {
+      const { store } = fixture();
+      const managed = admitLane(store);
+      store.updateLane(managed.id, 0, { sessionId: "native-observation" });
+      store.submit("source-lane", "native-request", 0);
+      const waiting: LaneReport = { status: "waiting", summary: "Waiting",
+        waiting: { kind: "approval", id: "native-approval", target: "Owner decision" }, evidence: [] };
+      store.recordLaneReport("source-lane", 0, "native-observation", "wait", waiting, 1000);
+      const before = store.lane(managed.id)?.observation;
+      if (reason === "generation") store.nextGeneration(managed.id);
+      else if (reason === "session") store.updateLane(managed.id, 0, { sessionId: "new-session" });
+      else if (reason === "paused") store.updateLane(managed.id, 0, { workState: "paused" });
+      else store.settle("source-lane", reason);
+      expect(store.recordLaneReport("source-lane", 0, "native-observation", "late", waiting, 2000)).toBe(false);
+      expect(store.resolveLaneWaiting("source-lane", 0, "native-observation", "approval", "native-approval")).toBe(false);
+      expect(store.lane(managed.id)?.observation).toEqual(before);
+    },
+  );
+
+  test("reply snapshots and voice metadata survive reopen without changing on redelivery", () => {
+    const { store, path } = fixture();
+    const original: Inbound = { ...inbound("reply-snapshot"),
+      reply: { messageId: "referenced", authorId: "other-author", text: "Original report", quote: "report" },
+      attachments: [{ id: "voice", name: "voice.ogg", url: "telegram-file:voice", size: null, voice: true, durationSeconds: 1.5 }],
+    };
+    expect(store.receive(original, "main")).toBe(true);
+    store.close();
+    const reopened = open(path);
+    expect(reopened.input(original.id)).toMatchObject({ reply: original.reply, attachments: original.attachments });
+    expect(reopened.receive({ ...original, reply: { messageId: "referenced", authorId: null, text: null } }, "main")).toBe(false);
+    expect(reopened.input(original.id)?.reply).toEqual(original.reply);
+    expect(reopened.receive({ ...original, reply: undefined, attachments: original.attachments.map(({ voice, durationSeconds, ...file }) => file) }, "main")).toBe(false);
+    expect(reopened.input(original.id)?.attachments).toEqual(original.attachments);
+    expect(() => reopened.receive({ ...original, text: "Changed owner instruction" }, "main")).toThrow("identity conflict");
+  });
+
   test("nonterminal lane progress coalesces durable receipts without settling or externally delivering lane work", () => {
     const { store, path } = fixture();
     const managed = admitLane(store);

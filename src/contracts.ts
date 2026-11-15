@@ -1,4 +1,5 @@
 import type { ModelPreset as NativeModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import type { LaneEvidence, LaneReport, LaneWaitTarget } from "./lane-report";
 
 /** Coordination records only. OMP owns transcripts and execution state. */
 export type Platform = "discord" | "telegram" | "slack";
@@ -38,8 +39,19 @@ export interface Attachment {
   name: string;
   /** Token-free resource reference; only the owning adapter resolves it. */
   url: string;
-  size: number;
+  /** null means the platform did not declare a size; zero is a known empty file. */
+  size: number | null;
   contentType?: string;
+  voice?: true;
+  durationSeconds?: number;
+}
+
+/** Untrusted contextual snapshot, never sender authority, command text, or routing. */
+export interface ReplyContext {
+  messageId: string;
+  authorId: string | null;
+  text: string | null;
+  quote?: string;
 }
 
 export interface Inbound {
@@ -54,6 +66,7 @@ export interface Inbound {
   text: string;
   receivedAt: number;
   attachments: Attachment[];
+  reply?: ReplyContext;
 }
 
 /** A real platform message that can be fetched, reacted to, or used as a thread source. */
@@ -80,6 +93,18 @@ export interface LaneModelChoice {
   model?: LaneModel;
   preset?: ModelPreset;
 }
+/** Observations, not verified acceptance, execution authority, or a live-state guarantee. */
+export interface LaneObservation {
+  inputId: string;
+  requestId: string;
+  sessionId: string;
+  generation: number;
+  lastReportAt: number;
+  summary: string;
+  lastEvidenceAt: number | null;
+  lastEvidence: (LaneEvidence & { at: number }) | null;
+  waiting: { target: LaneWaitTarget; since: number } | null;
+}
 export interface Lane {
   id: string;
   title: string;
@@ -104,6 +129,7 @@ export interface Lane {
   createdAt: number;
   lastActivityAt: number;
   result: string | null;
+  observation?: LaneObservation;
 }
 
 export type InputState = "pending" | "submitted" | "done" | "uncertain" | "cancelled";
@@ -158,6 +184,8 @@ export interface StorePort {
   submit(id: string, requestId: string, generation: number): boolean;
   /** Nonterminal native assistant observation; never settles or dispatches its owner. */
   progress(id: string, generation: number, sessionId: string, eventId: string, text: string): boolean;
+  recordLaneReport(id: string, generation: number, sessionId: string, eventId: string, report: LaneReport, observedAt?: number): boolean;
+  resolveLaneWaiting(id: string, generation: number, sessionId: string, kind: "tool" | "approval", nativeId: string): boolean;
   settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }): boolean;
   queueOutput(output: Omit<OutputRecord, "state" | "remoteId" | "error">): boolean;
   output(id: string): OutputRecord | null;

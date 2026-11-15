@@ -38,6 +38,18 @@ the head owns the user-language work-thread reply. Progress is not a final answe
 or a reason to stop work, await a head acknowledgement, create another goal, poll,
 or install a reporting timer. Keep secrets, raw logs, and private reasoning out.
 
+Use the root-lane-only `lane_report` for selected evidence and structured waits,
+not as a replacement for useful commentary or the final result. `progress` names
+real file paths or successful native `toolCallId`s; the extension computes their
+fingerprints, never accept or invent a caller-supplied hash. `waiting` names the
+actual pending tool/approval/job ID, or an exact dependency label. `resolved` names
+that same target and includes observed evidence. Repeating unchanged evidence or
+the same wait does not reset its clock. A normal progress report does not clear
+a wait. For eval, finish the reporting cell before entering a long wait so its
+native result boundary can deliver the journal receipt. Receipt text is not head
+acceptance or a messenger send. This tool grants no management authority to you or
+native children and never dispatches, approves, resumes, or closes work.
+
 ## Role specialization over general model profiles
 
 If `omp-ulw` or another general model profile is also loaded, keep its useful

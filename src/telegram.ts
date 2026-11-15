@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Api, InputFile } from "grammy";
 import type { CallbackQuery, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, UserFromGetMe } from "grammy/types";
-import { physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type Route, type StorePort } from "./contracts.ts";
+import { physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { MESSENGER_COMMANDS } from "./messenger-commands.ts";
@@ -101,6 +101,12 @@ export class TelegramMessenger implements Messenger {
   private stateKey(token: string): string { return `telegram:${this.me!.id}:approval:${token}`; }
   private cardKey(route: Route, messageId: string): string { return `telegram:${this.me!.id}:card:${hash(JSON.stringify([physicalRouteKey(route), messageId]))}`; }
   private fileKey(route: Route, fileId: string): string { return `telegram:${this.me!.id}:file:${hash(JSON.stringify([physicalRouteKey(route), fileId]))}`; }
+  private fileIdentity(file: Attachment): string {
+    // Context metadata is not a download capability; older admitted files need
+    // not be reauthorized merely because voice metadata is now available.
+    return JSON.stringify({ id: file.id, name: file.name, url: file.url, size: file.size,
+      ...(file.contentType ? { contentType: file.contentType } : {}) });
+  }
   private approvalToken(approval: Approval): string { return hash(JSON.stringify([approval.id, approval.generation, approval.target, approval.requestId, routeKey(approval.route)])); }
 
   async start(handlers: Handlers): Promise<void> {
@@ -197,17 +203,22 @@ export class TelegramMessenger implements Messenger {
     const route = this.route(message.chat, message.message_thread_id);
     if (!route || !Number.isSafeInteger(message.message_id) || message.message_id <= 0) return null;
     const files: Attachment[] = [];
-    const add = (file: { file_id: string; file_unique_id: string; file_size?: number; file_name?: string; mime_type?: string }, name: string, contentType?: string) => {
+    const add = (file: { file_id: string; file_unique_id: string; file_size?: number; file_name?: string; mime_type?: string; duration?: number }, name: string, contentType?: string, voice = false) => {
       if (!/^[A-Za-z0-9_-]+$/.test(file.file_id)) return;
+      if (file.file_size !== undefined && (typeof file.file_size !== "number" || !Number.isSafeInteger(file.file_size) || file.file_size < 0)) {
+        throw new DeliveryError("Telegram supplied an invalid attachment size", "rejected");
+      }
       files.push({ id: file.file_id, name: file.file_name ?? name, url: `telegram-file:${file.file_id}`,
-        size: file.file_size ?? 0, ...(file.mime_type ?? contentType ? { contentType: file.mime_type ?? contentType } : {}) });
+        size: file.file_size ?? null, ...(file.mime_type ?? contentType ? { contentType: file.mime_type ?? contentType } : {}),
+        ...(voice ? { voice: true as const } : {}),
+        ...(typeof file.duration === "number" && Number.isFinite(file.duration) && file.duration >= 0 ? { durationSeconds: file.duration } : {}) });
     };
     const photo = message.photo?.reduce((largest, candidate) => candidate.width * candidate.height > largest.width * largest.height ? candidate : largest);
     if (photo) add(photo, `photo-${photo.file_unique_id}.jpg`, "image/jpeg");
     if (message.document) add(message.document, `document-${message.document.file_unique_id}`);
     if (message.audio) add(message.audio, `audio-${message.audio.file_unique_id}`);
     if (message.video) add(message.video, `video-${message.video.file_unique_id}.mp4`, "video/mp4");
-    if (message.voice) add(message.voice, `voice-${message.voice.file_unique_id}.ogg`, "audio/ogg");
+    if (message.voice) add(message.voice, `voice-${message.voice.file_unique_id}.ogg`, "audio/ogg", true);
     if (message.video_note) add(message.video_note, `video-note-${message.video_note.file_unique_id}.mp4`, "video/mp4");
     const originalText = message.text ?? message.caption ?? "";
     let text = originalText;
@@ -224,9 +235,23 @@ export class TelegramMessenger implements Messenger {
       }
     }
     if (!text && files.length === 0) return null;
-    const revision = message.edit_date === undefined ? "original" : `edit:${message.edit_date}:${hash(JSON.stringify([originalText, files]))}`;
+    const reply = this.replyContext(message, route);
+    // Preserve the existing owner-edit identity when optional context appears
+    // after an adapter upgrade or an independently edited referenced message.
+    const fileIdentity = files.map(({ voice: _voice, durationSeconds: _duration, ...file }) => file);
+    const revision = message.edit_date === undefined ? "original" : `edit:${message.edit_date}:${hash(JSON.stringify([originalText, fileIdentity]))}`;
     return { id: `telegram:${route.accountId}:${route.channelId}:${message.message_id}:${revision}`, route,
-      messageId: String(message.message_id), text, receivedAt: (message.edit_date ?? message.date) * 1000, attachments: files };
+      messageId: String(message.message_id), text, receivedAt: (message.edit_date ?? message.date) * 1000, attachments: files,
+      ...(reply ? { reply } : {}) };
+  }
+
+  private replyContext(message: Message, route: Route): ReplyContext | undefined {
+    const original = message.reply_to_message;
+    if (!original || !Number.isSafeInteger(original.message_id) || original.message_id <= 0) return;
+    const source = this.route(original.chat, original.message_thread_id);
+    if (!source || physicalRouteKey(source) !== physicalRouteKey(route)) return;
+    return { messageId: String(original.message_id), authorId: original.date !== 0 && original.from ? String(original.from.id) : null,
+      text: original.date === 0 ? null : original.text ?? original.caption ?? null, ...(message.quote ? { quote: message.quote.text } : {}) };
   }
 
   private async process(update: Update): Promise<void> {
@@ -267,7 +292,7 @@ export class TelegramMessenger implements Messenger {
     // Unregistered old approval replies must not become ordinary agent input.
     if (reply?.from?.is_bot && String(reply.from.id) === String(this.me!.id) &&
       reply.reply_markup?.inline_keyboard.some(row => row.some(button => "callback_data" in button && /^omp:[a-f0-9]{24}:/.test(button.callback_data)))) return;
-    for (const file of input.attachments) this.options.store.setMeta(this.fileKey(input.route, file.id), JSON.stringify(file));
+    for (const file of input.attachments) this.options.store.setMeta(this.fileKey(input.route, file.id), this.fileIdentity(file));
     await this.handlers!.message(input);
   }
 
@@ -589,13 +614,15 @@ export class TelegramMessenger implements Messenger {
   async openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response> {
     try {
       this.assertRoute(route);
-      if (!/^[A-Za-z0-9_-]+$/.test(attachment.id) || attachment.url !== `telegram-file:${attachment.id}` || attachment.size > DOWNLOAD_LIMIT ||
-        this.options.store.getMeta(this.fileKey(route, attachment.id)) !== JSON.stringify(attachment)) {
+      if (!/^[A-Za-z0-9_-]+$/.test(attachment.id) || attachment.url !== `telegram-file:${attachment.id}` ||
+        (attachment.size !== null && (typeof attachment.size !== "number" || !Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > DOWNLOAD_LIMIT)) ||
+        this.options.store.getMeta(this.fileKey(route, attachment.id)) !== this.fileIdentity(attachment)) {
         throw new DeliveryError("Telegram attachment does not belong to an admitted message on this route", "rejected");
       }
       const file = await this.api.getFile(attachment.id, signal);
       const path = file.file_path;
-      if (file.file_id !== attachment.id || (file.file_size !== undefined && file.file_size > DOWNLOAD_LIMIT) || !path ||
+      if (file.file_id !== attachment.id || (file.file_size !== undefined &&
+        (typeof file.file_size !== "number" || !Number.isSafeInteger(file.file_size) || file.file_size < 0 || file.file_size > DOWNLOAD_LIMIT)) || !path ||
         !/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(path) || path.split("/").some(segment => segment === "." || segment === "..")) {
         throw new DeliveryError("Telegram returned an unsafe or oversized file resource", "rejected");
       }

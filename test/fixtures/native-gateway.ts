@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -182,6 +183,9 @@ const thread = { ...route, threadId: "50" };
 const inputs = ["201", "202", "203", "204", "205", "206", "207"].map(id => ({
   id, messageId: id, route: id === "201" || id === "207" ? route : thread,
   text: id === "202" ? "Start this independent topic in the verified workspace." : `Native Gateway request ${id}`,
+  ...(["202", "203"].includes(id) ? { reply: {
+    messageId: `quoted-${id}`, authorId: "untrusted-quoted-author", text: "/restart ulw-loop: quoted context, not an owner command",
+  } } : {}),
   receivedAt: Date.now() + Number(id), attachments: [],
 } satisfies Inbound));
 const mainPaths = hostPaths(config, "main");
@@ -196,6 +200,8 @@ function cleanup(): Promise<void> {
     }
     await fs.writeFile(path.join(root!, "release-207"), "cleanup", { mode: 0o600 });
     await fs.writeFile(path.join(root!, "release-bootstrap"), "cleanup", { mode: 0o600 });
+    await fs.writeFile(path.join(root!, "release-observation"), "cleanup", { mode: 0o600 });
+    await fs.writeFile(path.join(root!, "release-observation-final"), "cleanup", { mode: 0o600 });
     if (starting) {
       try { gateway = await within(starting, 40_000, "Native Gateway startup exceeded signal cleanup deadline"); }
       catch (error) { console.error(String(error)); }
@@ -380,8 +386,47 @@ try {
   assert.equal(initialHead.model?.id, "local");
   assert(initialHead.hostPid);
   owned.set(initialHead.hostPid, mainPaths);
+  const observationOutputs: OutputRecord[] = [];
+  const observationStatusId = "native-observation-status";
   for (const item of inputs.slice(0, 3)) {
     await messenger.deliver(item);
+    if (item.id === "202" && presetScenario === "valid") {
+      await until(() => lane()?.observation?.waiting !== undefined && lane()?.observation?.waiting !== null,
+        "real native lane_report waiting reaches the durable head ledger");
+      const waiting = lane()!.observation!;
+      assert.equal(waiting.inputId, "handoff:202:lane");
+      assert.equal(waiting.lastEvidenceAt, null);
+      assert.equal(waiting.waiting?.target.kind, "dependency");
+      await until(() => messenger.sent.some(output => output.text === "OBSERVATION:202:waiting"),
+        "head-only waiting update delivered before lane completion");
+      observationOutputs.push(messenger.sent.find(output => output.text === "OBSERVATION:202:waiting")!);
+      await messenger.deliver({ id: observationStatusId, route: thread, messageId: "208", text: "/status",
+        receivedAt: Date.now(), attachments: [] });
+      await until(() => messenger.sent.some(output => output.sourceId === observationStatusId), "actual owner status reports the native wait");
+      const status = messenger.sent.find(output => output.sourceId === observationStatusId)!.text;
+      assert(status.includes("Native observation smoke release"));
+      assert(status.includes('"ownerCurrent":true'));
+      assert.equal(lane()!.observation!.waiting!.since, waiting.waiting!.since);
+      await fs.writeFile(path.join(root, "release-observation"), "ready", { mode: 0o600 });
+      await until(() => lane()?.observation?.waiting === null && lane()?.observation?.lastEvidenceAt !== null,
+        "real native report resolves only its original wait and records evidence");
+      const resolved = lane()!.observation!;
+      const evidence = await fs.readFile(path.join(laneCwd, "native-observation-evidence.txt"));
+      assert.equal(resolved.lastEvidence?.fingerprint, createHash("sha256").update(evidence).digest("hex"));
+      assert.equal(resolved.lastEvidence?.ref, path.join(laneCwd, "native-observation-evidence.txt"));
+      await until(() => messenger.sent.some(output => output.text === "OBSERVATION:202:resolved"),
+        "head-only resolution update delivered while original work remains active");
+      observationOutputs.push(messenger.sent.find(output => output.text === "OBSERVATION:202:resolved")!);
+      for (const output of observationOutputs) {
+        assert.deepEqual(output.route, thread);
+        assert(output.sourceId.startsWith("progress:handoff:202:lane:"));
+        const source = db.query("SELECT value FROM metadata WHERE key=?").get(`progress-source:${output.sourceId}`) as { value: string } | null;
+        assert(source);
+        assert.equal(JSON.parse(source.value).inputId, "handoff:202:lane");
+      }
+      assert.equal(input("handoff:202:lane")?.state, "submitted");
+      await fs.writeFile(path.join(root, "release-observation-final"), "ready", { mode: 0o600 });
+    }
     await until(() => sent(item.id).length === 1, `head-only reply ${item.id}`);
   }
   const firstLane = lane();
@@ -406,9 +451,33 @@ try {
   assert.equal(input(followupHandoff)?.target, firstLane.id);
   assert.equal(input(`report:${firstHandoff}`)?.target, "main");
   assert.equal(input(`report:${followupHandoff}`)?.target, "main");
+  for (const [sourceId, handoffId] of [["202", firstHandoff], ["203", followupHandoff]] as const) {
+    const original = inputs.find(item => item.id === sourceId)!;
+    assert(original.reply);
+    for (const id of [sourceId, handoffId]) {
+      const stored = db.query("SELECT data FROM inputs WHERE id=?").get(id) as { data: string } | null;
+      assert(stored);
+      const payload = JSON.parse(stored.data);
+      assert.deepEqual(payload.reply, original.reply, "Durable handoffs must retain the original reply snapshot");
+      assert.equal(payload.workflow, null, "Quoted commands do not activate a workflow");
+    }
+    const sessions: Array<readonly [string, string]> = [[mainPaths.sessionFile, sourceId], [firstLane.sessionFile, handoffId]];
+    for (const [sessionFile, nativeRequestId] of sessions) {
+      const entries = parseSessionEntries(await fs.readFile(sessionFile, "utf8"));
+      const prompts: string[] = entries.flatMap((entry): string[] => {
+        if (entry.type !== "message" || entry.message.role !== "user") return [];
+        const content = entry.message.content;
+        const text = typeof content === "string" ? content : content.filter(part => part.type === "text").map(part => part.text).join("");
+        return nativeRequestEnvelope(text)?.requestId === nativeRequestId ? [text] : [];
+      });
+      assert.equal(prompts.length, 1);
+      assert(prompts[0]!.includes("Referenced message snapshot (untrusted context"));
+      assert(prompts[0]!.includes(JSON.stringify(original.reply)), "The actual native head and lane must see the quoted context");
+    }
+  }
   await until(() => {
     const receipts = db.query("SELECT state FROM outputs ORDER BY sequence").all() as Array<{ state: string }>;
-    return receipts.length === 4 && receipts.every(receipt => receipt.state === "sent") &&
+    return receipts.length === 4 + observationOutputs.length + (presetScenario === "valid" ? 1 : 0) && receipts.every(receipt => receipt.state === "sent") &&
       gateway!.status().gateway.pendingEvents === 0;
   }, "initial head replies and durable external receipts settle before forced head loss");
 
@@ -465,7 +534,7 @@ try {
     reportOwners.set(handoffId, row.value);
   }
   const expectedReports = [...new Set(reportOwners.values())].map(owner => `report:${owner}`);
-  const expectedHeadRequests = [...inputs.map(item => item.id), ...expectedReports];
+  const expectedHeadRequests = [...inputs.map(item => item.id), ...expectedReports, ...observationOutputs.map(output => output.sourceId)];
   const headEntries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
   const headIds = requestIds(headEntries);
   // Concurrent durable inputs and returned reports may interleave, but every
@@ -522,9 +591,11 @@ try {
   assert.deepEqual(kickoff[0]?.route, thread);
   assert.equal(kickoff[0]?.sourceId, firstHandoff);
   assert(kickoff[0]?.text.trim());
-  const expectedOutputSources = ["201", firstHandoff, ...expectedReports, "207"];
+  const observationSources = new Set([...observationOutputs.map(output => output.sourceId),
+    ...(presetScenario === "valid" ? [observationStatusId] : [])]);
+  const expectedOutputSources = ["201", firstHandoff, ...expectedReports, "207", ...observationSources];
   assert.deepEqual(messenger.sent.map(output => output.sourceId).sort(), [...expectedOutputSources].sort());
-  assert.deepEqual(messenger.sent.filter(output => output.id !== "202:kickoff").flatMap(output => output.text.split("\n")).sort(), inputs.map(item => `HEAD:${item.id}`).sort(),
+  assert.deepEqual(messenger.sent.filter(output => output.id !== "202:kickoff" && !observationSources.has(output.sourceId)).flatMap(output => output.text.split("\n")).sort(), inputs.map(item => `HEAD:${item.id}`).sort(),
     "Head-only delivery must account for every original input once, whether native work yields one or several outputs");
   for (const item of inputs) assert.equal(sent(item.id).length, 1);
   await until(() => inputs.every(item => messenger.activities.filter(value => value.message.messageId === item.messageId).at(-1)?.activity === "idle"),

@@ -47,7 +47,7 @@ targeted 회귀와 실제 native 경로로 검증했으며 전체 root 재실행
 | `src/gateway*.ts` | detached Gateway의 실제 어댑터·durable ingress·head receipt·지정 head 1개의 수명. lane dispatch/RPC 없음 |
 | `src/gateway-client.ts` | head 안의 Messenger-compatible 로컬 client. 기존 send/승인/첨부 효과만 Gateway에 위임하며 client 종료는 transport 종료가 아님 |
 | `src/extension.ts` | 부모 없는 `role=head`에서만 기존 runtime과 9개 lane 관리 도구 등록. 일반 OMP·lane에서는 manager 시작 안 함 |
-| `src/lane-extension.ts`, `skills/{head,lane}` | 별도 lane 역할 지침과 native 스킬. lane은 독립 OMP Host이며 manager·실제 메신저 API 없음 |
+| `src/lane-extension.ts`, `src/lane-report.ts`, `skills/{head,lane}` | lane 역할·근거/대기 보고와 native 스킬. 독립 OMP Host이며 manager·실제 메신저 API 없음 |
 | `src/board.ts`, `src/board-extension.ts` | head/lane 공통 SQLite 정보 게시판·세션별 구독/안전한 경계 알림. native 자식에는 권한 없음 |
 | `src/messengers.ts` | Gateway에서 모든 설정 플랫폼의 실제 자격 증명과 어댑터 소유. head가 결정한 발송·승인은 원래 플랫폼으로만 전달 |
 | `src/runtime.ts`, `src/contracts.ts` | 요청 라우팅, 주제↔레인 연결, 예산·대기열·안전한 회수, 승인·재연결·발송 조율 |
@@ -608,6 +608,36 @@ native topic을 지원하지 않는 private chat은 기존의 논리 주제 제�
 기존 Host에 역할 지침을 적용하려면 별도로 허가된 재시작이 필요하다. 소스 수정만으로
 운영 서비스가 갱신되었다고 간주하지 않는다.
 
+연결 주제에서 `/status`(Slack `!status`)를 쓰면 native 상태와 함께 저장된 근거·대기 관측을
+볼 수 있다. 헤드는 `lane_inspect`로 같은 기록을 본다. `lastReportAt`은 구조화 보고 시각이고
+`lastEvidenceAt`은 선택한 파일 내용·성공한 native 도구 결과가 마지막으로 바뀐 시각이다.
+일반 활동·반복 보고·동일 결과의 다른 호출 ID는 근거 시각을 갱신하지 않는다.
+`waiting.target`은 실제 tool/approval/job ID 또는 dependency 이름, `waiting.since`는 해당
+대기의 최초 시각이다. 같은 대기를 반복해도 시각이 유지되고, 일반 `progress`는 대기를 지우지 않는다.
+일치하는 native tool/approval 종료나 대상·근거를 함께 담은 `resolved`만 그 대기를 해소한다.
+job/dependency는 명시적인 근거 포함 `resolved`를 사용한다.
+
+`observationState.ownerCurrent`가 false면 저장된 이력이지 현재 연결된 실행의 대기 증거가
+아니다. 경과 시간은 조회 시 계산하며 시계 역행이면 null이다. root lane의 `lane_report`만
+실제 파일/도구 결과를 선택·해시하고 native journal에 기록한다. eval에서는 보고 cell을
+완료한 뒤 긴 대기에 들어가야 해당 경계에서 헤드가 회수할 수 있다. 재시작 시 같은 원본
+input/request/session/file/generation과 제출 전 cursor를 확인해 미회수 기록을 읽고 중복을
+제거한다. native children은 보고 도구를 쓸 수 없다. 관측은 검증된 acceptance나 현재
+대상의 생존 보장이 아니며, 감시 모델·타이머·자동 독촉/재개/종료를 만들지 않는다.
+
+PR #45/#46 검증: Bun 1.4.4에서 store/runtime/lane-report/skills 4파일의 최초 실행은
+351개 통과·4개 실패였다. 실패는 native child의 선행 `tool_call` 거부 메시지 기대값 2개,
+비동기 `SessionManager.newSession` 미대기 1개, 새 `get_entries`를 빠뜨린 명령 순서 기대값
+1개였고 이를 수정했다. 이후 최종 `tsc --noEmit`과 변경·실패 범위 6개·61 assertion이 통과했다.
+전체 4파일을 수정 뒤 다시 실행한 결과로 확대하지 않는다. 원본/세션/generation·pause/
+uncertain fencing, 동일 근거·대기 시각 보존, 재시작 전 미회수 eval journal·중복·버퍼 순서를 포함한다.
+실제 patched OMP + production Gateway/head/lane의 `startup (valid)`도 1개 통과·2.81초:
+대기 관측의 헤드 전달, 원래 주제의 `/status`, 실제 파일 SHA-256, eval 내부 `lane_report`의
+native journal 회수와 matching resolved 전달, 원본 입력의 비종료·정확한 route를 확인했다.
+wrapper assertion은 1개이며 fixture 내부 node assertion 수를 합산하지 않는다.
+결정적 로컬 provider·기록용 Messenger·격리 설정만 사용했고 운영 봇 활성화·재시작,
+실계정 로그인·외부 발송·실제 제공자 호출·커밋은 하지 않았다.
+
 2026-11-15 검증: Bun 1.4.4에서 runtime/store 회귀 314개·2,720 assertion과
 `tsc --noEmit` 통과. 실제 패치된 native Host + 로컬 결정적 provider의 autonomy 시나리오
 1개·79 assertion으로 직접 헤드 및 레인→헤드의 도구 종료 전 중간 발송과 별도 최종 답변을
@@ -1084,11 +1114,21 @@ cold detached process-group 생존·운영 메신저 왕복은 검증하지 않�
   중복 Host로 대체하지 않으며, 소유권이 대조될 때까지 상주 예산에서 제외하지 않는다.
 - 모든 플랫폼의 입력 첨부는 요청당 최대 10개, 개별 20 MiB, 합계 40 MiB다.
   선언 크기·실제 스트림 크기를 대조하며 redirect는 따르지 않는다.
+  Telegram에서 `file_size`가 없으면 크기 미상(`null`)으로 저장한다. 알려진 0바이트와 구분하며,
+  미상 크기도 실제 다운로드 바이트의 파일·요청·이미지 한도와 Gateway 완료 프레임을 검사한다.
   PNG/JPEG/GIF/WebP는 내용 시그니처를 확인해 모델 이미지 입력으로 전달하고,
   RPC base64 입력의 디코딩 후 이미지 데이터 합계는 별도로 8 MiB로 제한한다.
   그 밖의 파일은 로컬 경로를 제공한다. 임의 URL 다운로드·문서 자동 변환은 제공하지 않는다.
   자격 증명·서명된 다운로드 URL은 모델 프롬프트에 넣지 않는다.
   안전한 다운로드에 실패하면 그 요청의 모델 실행을 시작하지 않는다.
+- Discord·Telegram 답장의 참조 ID·작성자·본문과 Telegram 선택 인용문을 head와 명시적 레인
+  인계에 전달한다. 인용은 새로운 명령·권한·목적지가 아닌 데이터다. 첫 접수 스냅샷은 원문의
+  수정·삭제·재전달로 바뀌지 않으며, 삭제/조회 불가한 참조는 알려진 ID와 `null` 필드로 표시한다.
+  Discord는 같은 허가된 물리 채널의 참조만 조회하고, Telegram 승인 카드 답장은 기존 절차를
+  유지한다. 음성 여부·길이는 전달하지만 자동 전사 기능은 아니다. Discord 스티커 전용 등
+  의미 있는 텍스트·지원 첨부가 없는 입력/수정은 새 작업으로 접수하지 않는다.
+- 레인 저장소·게시판 저장소 채널 탐색은 시작 셸의 `GIT_DIR`, `GIT_WORK_TREE` 및 다른
+  `GIT_*` 환경을 제거한 Git 프로세스를 사용한다. 일반 도구 환경 전체의 격리와는 다르다.
 - 입력 리소스의 허용 범위는 플랫폼마다 다르다.
   - Discord: `cdn.discordapp.com`·`media.discordapp.net`의 HTTPS
     `/attachments/<숫자>/<숫자>/…` 원본 URL만 허용한다.
@@ -1124,6 +1164,12 @@ cold detached process-group 생존·운영 메신저 왕복은 검증하지 않�
   유휴 회수·모델 턴 종료는 사용자 작업의 완료·검증 통과를 뜻하지 않는다.
 
 ## 6. 개발자 검증
+
+관리형 ULW의 새 revision 활성화는 격리된 HOME에서 pinned OMP의 실제 prompt renderer와
+ExtensionRunner를 사용하는 유한 offline 합성 검사도 통과해야 한다. 일반 모델 프로필과
+명시적 활성화 policy를 각각 검사하며 no-op·빈 프로필·누락·중복 합성을 거부한다.
+이미 준비된 revision도 재활성화 전에 검사한다. import 성공만으로 호환성을 판정하지 않으며
+실제 모델 호출·Agent 실행·goal 생성·워크플로 완료 검증으로 확대하지 않는다.
 
 ULW 병합 회귀는 외부 checkout을 수정하거나 설치하지 않고 명시한 entrypoint를 읽어 실행한다.
 
@@ -1173,6 +1219,7 @@ managed extension 중복/disabled 처리, 비차단 updater startup과 native bi
 
 | 검증 항목 | 현재 결과 |
 | --- | --- |
+| 2026-11-15 Dori PR 비교 후 버그·높음 후보 반영 | Bun 1.4.4에서 대상 8파일을 서로 겹치지 않는 2묶음으로 실행: Discord/Telegram 122개·1,248 assertion, repository/Slack/runtime/store/Gateway/managed-ULW 431개·3,531 assertion 통과. 타입 검사 통과. 실제 native Gateway `valid` 시나리오 1개·2.73초에서 원래 head와 명시적 lane의 journal에 답장 스냅샷이 남고 인용된 `/restart`·ULW 이름이 권한을 얻지 않는 것을 확인했다. 공식 immutable ULW `22a8cfe89447a1cd55f2fd004d81e164372738a5`의 별도 offline 합성에서 일반·명시적 활성화 각 2턴, 메모리 세션·network 0 확인. 최초 native 실행은 기존 command의 Bun 경로 누락으로 실패했으며 기존 lockfile의 로컬 toolchain을 `npm ci --ignore-scripts`로 준비한 뒤 실제 패키지 binary로 검증했다. 최초 타입 오류는 probe narrowing과 SDK/native fixture 타입을 수정했다. 앞선 Bun 1.4.2 예비 실행은 이 지원 런타임 결과에 합산하지 않는다. 실제 메신저 계정·유료 제공자·운영 Gateway/HEAD 재시작·프로덕션 active pointer 변경은 수행하지 않음 |
 | 2026-11-14 자율 재개 회귀 3건 수정 | `0004`는 기존 native `RpcUserInputGate`에서 serial 대기 중인 goal resume을 뒤늦은 abort로 무효화한다. 별도 resume receipt가 일반 source handoff/첨부와 충돌하지 않으며, source가 있는 completed/unloaded 재개도 기존 세션·middle preset을 보존한다. runtime/store 257개·2,299 assertion, native input-order/input-frame/goal 61개·229 assertion 통과. 의도적 원인 복원에서 correction identity 충돌·completed 복원 거절 2개와 실제 native queued resume 재활성화 1개가 각각 실패했고, 소스를 바이트 단위로 복원한 뒤 해당 2개·11 assertion과 native autonomy 1개·30 assertion이 통과했다. 최종 typecheck 통과. native model-selection도 source `103`·같은 세션·preset을 유지한 실제 완료/unload/reopen 흐름으로 통과했다. 최초 native barrier는 작은 transcript 기본 compaction 정책 때문에 미진입했고, 다음 시도는 held compaction 정리를 기다리는 abort ACK를 먼저 기다려 timeout됐다. fixture만 수정했다. 기존 model fixture의 kickoff 누락 기대값도 실제 durable kickoff receipt를 정확히 포함하도록 고쳤다. 실패 진단은 보존했고 남은 격리 fixture Host 1개는 신원 확인 후 barrier 해제·native 정상 종료했다. 운영 서비스·메신저 계정·전역 설정 변경이나 재시작은 하지 않음 |
 | 2026-11-14 목표 기반 자율 실행 | Bun 1.4.4에서 `tsc --noEmit` 통과. Host/runtime/store/default-steering/skills 5파일 294개·2,575 assertion 통과·10.62초. native RPC goal/default tool 2파일 31개·122 assertion 통과·8.11초(관리 세션의 marker를 물려받지 않는 격리 환경). 실제 managed Host·production lane role·native goal·결정적 로컬 제공자·기록용 Messenger에서 1개·19 assertion 통과·5.14초: 목표 생성→첫 yield→native continuation→완료, 실제 `/stop` 후 paused 상태·추가 실행 없음, `/resume`의 동일 topic/source-bound durable report, `goal.enabled=false`와 명시적 `--tools read` 제외·전역 설정 무변경 확인. resume ACK만으로 성공 처리하지 않는 첫 run 실패/중단·zero-run 및 뒤늦은 pause·ACK 경합·unloaded 복원은 runtime 회귀로 확인했다. 첫 native 활성 도구 누락은 SDK 초기 선택에서 수정했으며 fixture ID·리소스·중복 관측 오류를 고친 뒤 위 결과를 얻었다. 실제 모델의 자율 판단 품질·실계정·운영 재시작 검증은 아니며 실행 중인 Gateway/head는 변경하지 않음 |
 | 2026-11-14 `/restart` 리뷰·회귀·실계정 | 요청 UUID 규약 불일치, 확정 거절 뒤 fence 유지, 과거 receipt 갱신의 최신 상태 덮어쓰기를 수정했다. runtime/Gateway/lifecycle/default-steering 전체 4파일 286개·2,415 assertion 통과·11.28초. 마지막 fixture receipt 타입 수정 뒤 `tsc --noEmit` 및 lifecycle 전체 10개·78 assertion 통과·5.83초. Discord에 restart 포함 12개 명령을 적용·GET 검증하고 실제 자동완성에서 `/restart` 실행: Gateway 72353→72522, HEAD 72371→72526, 세션 `01a1d829-0eca-7323-8e3d-400f15811a55` 유지. 실제 접수 응답 `1571084170149757019`·준비 완료 응답 `1571084188050919425`의 UI 표시와 durable `sent`를 확인했다. 최종 두 프로세스 ready, 초기화 complete, 대기/미해결 이벤트 0, restart fence 해제. Telegram/Slack은 같은 경로의 회귀·SDK 검증 범위이며 실계정은 미설정 |

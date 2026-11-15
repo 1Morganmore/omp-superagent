@@ -17,7 +17,7 @@ export interface QueuedEvent { sequence: number; event: GatewayEvent; reconcilia
 
 function identity(event: GatewayEvent): unknown {
   if (event.kind !== "message") return event;
-  const { receivedAt: _, ...input } = event.input;
+  const { receivedAt: _, reply: _reply, ...input } = event.input;
   return { ...event, input: { ...input, attachments: input.attachments.map(file => {
     let location = file.url;
     try {
@@ -29,7 +29,8 @@ function identity(event: GatewayEvent): unknown {
         location = url.href;
       }
     } catch { /* Adapter-owned non-URL references remain exact. */ }
-    return { ...file, url: location };
+    const { voice: _voice, durationSeconds: _duration, ...download } = file;
+    return { ...download, url: location };
   }).sort((a, b) => a.id.localeCompare(b.id)) } };
 }
 

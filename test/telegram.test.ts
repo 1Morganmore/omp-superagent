@@ -91,6 +91,7 @@ class TelegramHttp {
   topicsEnabled = false;
   forum = true;
   filePath = "documents/file_1.txt";
+  fileSize: unknown = 8;
   fileStatus = 200;
   fileResponse = "contents";
   lastMultipart = "";
@@ -165,7 +166,7 @@ class TelegramHttp {
       result = true;
     } else if (method === "answerCallbackQuery") result = true;
     else if (method === "createForumTopic") result = { message_thread_id: 88, name: payload.name, icon_color: 7322096 };
-    else if (method === "getFile") result = { file_id: payload.file_id, file_unique_id: "unique", file_size: 8, file_path: this.filePath };
+    else if (method === "getFile") result = { file_id: payload.file_id, file_unique_id: "unique", file_size: this.fileSize, file_path: this.filePath };
     else throw new Error(`Unexpected API method ${method}`);
     return Response.json({ ok: true, result });
   }) as typeof fetch;
@@ -194,6 +195,44 @@ async function fixture(options: { http?: TelegramHttp; ledger?: Store; message?:
 }
 
 describe("Telegram identity, polling, and durable admission", () => {
+  test("ordinary replies and selected quotes are untrusted same-conversation context, not commands or authority", async () => {
+    const { messenger, http, received, answers } = await fixture();
+    const original = message({ message_id: 9, from: { id: 43, is_bot: false, first_name: "Other" },
+      text: "/restart quoted instruction", document: { file_id: "quoted_file", file_unique_id: "quoted" } });
+    const quote = { text: "/restart", position: 0, is_manual: true };
+    http.update(1, message({ text: "explain this", reply_to_message: original, quote }));
+    http.update(2, message({ message_id: 11, from: { id: 43, is_bot: false }, reply_to_message: message({ message_id: 9 }) }));
+    http.update(3, message({ message_id: 12, text: "", reply_to_message: original, quote }));
+    await drain();
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ text: "explain this", route: group, attachments: [],
+      reply: { messageId: "9", authorId: "43", text: "/restart quoted instruction", quote: "/restart" } });
+    expect(answers).toEqual([]);
+    expect(http.calls.some(call => call.method === "getFile" || call.method === "download")).toBe(false);
+    for (const patch of [
+      { chat: { id: -101, type: "supergroup" } }, { message_thread_id: 7 },
+    ]) expect(messenger.normalize(message({ reply_to_message: message({ message_id: 9, ...patch }), quote }))?.reply).toBeUndefined();
+    expect(messenger.normalize(message({ reply_to_message: original, text: "/status" }))?.text).toBe("/status");
+  });
+
+  test("reply pointers survive unavailable originals and referenced edits cannot revise owner messages", async () => {
+    const { messenger } = await fixture();
+    const original = message({ message_id: 9, text: "old snapshot" });
+    const first = messenger.normalize(message({ edit_date: 102, reply_to_message: original,
+      quote: { text: "selected", position: 0 } }))!;
+    expect(messenger.normalize(message({ edit_date: 102 }))?.id).toBe(first.id);
+    expect(messenger.normalize(message({ edit_date: 102,
+      reply_to_message: { ...original, text: "changed snapshot", from: { id: 43, is_bot: false } },
+      quote: { text: "selected", position: 0 } }))?.id).toBe(first.id);
+    const unavailable = messenger.normalize(message({ edit_date: 102,
+      reply_to_message: { ...original, date: 0, from: undefined, text: undefined },
+      quote: { text: "selected", position: 0 } }))!;
+    expect(unavailable.id).toBe(first.id);
+    expect(unavailable.reply).toEqual({ messageId: "9", authorId: null, text: null, quote: "selected" });
+    expect(messenger.normalize(message({ edit_date: 102, reply_to_message: message({ message_id: 8 }),
+      quote: { text: "selected", position: 0 } }))?.id).toBe(first.id);
+  });
+
   test("stop aborts waiting for startup reconciliation without opening a poll", async () => {
     const gate = Promise.withResolvers<void>();
     const { messenger, http } = await fixture({ ready: gate.promise });
@@ -428,6 +467,38 @@ describe("Telegram identity, polling, and durable admission", () => {
 });
 
 describe("Telegram output, topics, and attachment credentials", () => {
+  test("voice notes preserve SDK duration and unknown size without conflating empty files", async () => {
+    const { messenger, http, received } = await fixture();
+    const voice = { file_id: "voice_1", file_unique_id: "voice_unique", duration: 2, mime_type: "audio/ogg" };
+    http.update(1, message({ text: undefined, voice }));
+    await drain();
+    const attachment = received[0]!.attachments[0]!;
+    expect(attachment).toEqual({ id: "voice_1", name: "voice-voice_unique.ogg", url: "telegram-file:voice_1",
+      size: null, contentType: "audio/ogg", voice: true, durationSeconds: 2 });
+    expect(messenger.normalize(message({ text: undefined, voice: { ...voice, file_size: 0 } }))?.attachments[0]?.size).toBe(0);
+    for (const size of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, null, "8"]) {
+      expect(() => messenger.normalize(message({ voice: { ...voice, file_size: size } }))).toThrow("invalid attachment size");
+    }
+    const edit = messenger.normalize(message({ text: undefined, voice, edit_date: 102 }))!;
+    expect(messenger.normalize(message({ text: undefined, voice: { ...voice, duration: 3 }, edit_date: 102 }))?.id).toBe(edit.id);
+    expect(messenger.normalize(message({ text: undefined, audio: { ...voice, duration: 3 } }))?.attachments[0]).toMatchObject({ durationSeconds: 3 });
+    expect(messenger.normalize(message({ text: undefined, audio: voice }))?.attachments[0]?.voice).toBeUndefined();
+    expect(messenger.normalize(message({ text: undefined, video_note: voice }))?.attachments[0]).toMatchObject({ durationSeconds: 2 });
+    const signal = new AbortController().signal;
+    http.fileSize = undefined;
+    expect(await (await messenger.openAttachment(group, attachment, signal)).text()).toBe("contents");
+    // Contextual voice metadata is not part of the stored download identity.
+    expect(await (await messenger.openAttachment(group, { ...attachment, durationSeconds: 3 }, signal)).text()).toBe("contents");
+    await expect(messenger.openAttachment(topic, attachment, signal)).rejects.toThrow("admitted");
+    await expect(messenger.openAttachment(group, { ...attachment, size: 0 }, signal)).rejects.toThrow("admitted");
+    const downloads = http.calls.filter(call => call.method === "download").length;
+    for (const size of [-1, 0.5, null, "8", 20 * 1024 * 1024 + 1]) {
+      http.fileSize = size;
+      await expect(messenger.openAttachment(group, attachment, signal)).rejects.toThrow("unsafe");
+    }
+    expect(http.calls.filter(call => call.method === "download")).toHaveLength(downloads);
+  });
+
   test("plain output disables previews/paid broadcasts and uses a single document for oversized text", async () => {
     const { messenger, http } = await fixture();
     await messenger.send(output("**not markdown** https://example.invalid", topic));
@@ -762,6 +833,7 @@ describe("Telegram approvals and exact-card interaction", () => {
     // A physical group receipt with the same message number is not this DM card.
     http.update(5, message({ message_id: 14, text: "ordinary group reply", reply_to_message: { ...closed, chat: { id: -100, type: "supergroup", title: "Allowed", is_forum: true } } })); await drain();
     expect(restarted.received.map(input => input.text)).toEqual(["ordinary group reply"]);
+    expect(restarted.received[0]?.reply).toEqual({ messageId: String(id), authorId: bot, text: closed.text ?? null });
   });
   test("closing a dialog discards persisted partial free-text answers and retains only receipt safety state", async () => {
     const { messenger, http, ledger } = await fixture();
@@ -809,7 +881,8 @@ describe("Telegram approvals and exact-card interaction", () => {
       const id = Number(await messenger.showApproval(a));
       http.update(++updateId, message({ message_thread_id: 7, text: "ordinary input" })); await drain();
       expect(answers).toHaveLength(method === "input" ? 0 : 1);
-      http.update(++updateId, message({ message_thread_id: 7, text: "  exact\nvalue  ", reply_to_message: structuredClone(http.remote.get(id)!) })); await drain();
+      http.update(++updateId, message({ message_thread_id: 7, text: "  exact\nvalue  ",
+        reply_to_message: structuredClone(http.remote.get(id)!), quote: { text: "Enter response", position: 0 } })); await drain();
       expect(answers.at(-1)?.response).toEqual({ value: "  exact\nvalue  " });
     }
     expect(received).toHaveLength(2);

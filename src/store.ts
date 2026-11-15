@@ -29,6 +29,7 @@ import {
 } from "./contracts.ts";
 import { isLaneModel, sameLaneModel } from "./lane-models";
 import { workflowChoice } from "./workflow";
+import { laneWaitKey, type LaneReport } from "./lane-report";
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS lanes (
@@ -103,11 +104,15 @@ const inboundData = (input: Inbound): Inbound => ({
   id: input.id, route: input.route, messageId: input.messageId, text: input.text,
   ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
   ...(input.invocationId === undefined ? {} : { invocationId: input.invocationId }),
+  ...(input.reply === undefined ? {} : { reply: input.reply }),
   receivedAt: input.receivedAt, attachments: input.attachments,
 });
 function inboundIdentity(input: Inbound) {
+  // Referenced messages can be edited/deleted independently. A redelivery never
+  // replaces the contextual snapshot admitted with the owner's original event.
+  const { reply: _reply, ...data } = inboundData(input);
   return {
-    ...inboundData(input),
+    ...data,
     // Slack supplies no command timestamp. A transport redelivery has a fresh
     // local receipt time, but still names the exact same opaque invocation.
     ...(input.route.platform === "slack" && input.invocationId ? { receivedAt: 0 } : {}),
@@ -330,6 +335,87 @@ export class Store implements StorePort {
         [`progress-source:${receiptId}`]: JSON.stringify(context),
         [pendingKey]: receiptId,
       });
+      return true;
+    }).immediate();
+  }
+
+  recordLaneReport(id: string, generation: number, sessionId: string, eventId: string, report: LaneReport, observedAt = Date.now()): boolean {
+    return this.db.transaction(() => {
+      if (!this.progressOpen({ inputId: id, generation, sessionId })) return false;
+      const input = this.requireInput(id);
+      if (!input.target || input.target === "main" || !input.requestId) return false;
+      const lane = this.requireLane(input.target);
+      const seen = `lane-report:${id}:${sessionId}:${eventId}`;
+      const serialized = JSON.stringify(report);
+      const prior = this.getMeta(seen);
+      if (prior !== null) {
+        if (prior !== serialized) throw new Error("Lane report identity conflict");
+        return false;
+      }
+      const previous = lane.observation;
+      const sameInput = previous?.inputId === id && previous.requestId === input.requestId
+        && previous.sessionId === sessionId && previous.generation === generation;
+      if (report.status === "resolved" && (!sameInput || !previous.waiting || !report.waiting
+        || laneWaitKey(previous.waiting.target) !== laneWaitKey(report.waiting))) return false;
+      if (!Number.isSafeInteger(observedAt) || observedAt < 0) throw new Error("Invalid native report timestamp");
+      const now = observedAt;
+      const observation = sameInput ? { ...previous } : {
+        inputId: id, requestId: input.requestId, sessionId, generation,
+        lastReportAt: now, summary: report.summary, lastEvidenceAt: null, lastEvidence: null, waiting: null,
+      };
+      observation.lastReportAt = now;
+      observation.summary = report.summary;
+      let changed = false;
+      for (const evidence of report.evidence) {
+        const fingerprintKey = `lane-evidence:${id}:${sessionId}:${JSON.stringify([
+          evidence.kind, evidence.kind === "tool" ? evidence.fingerprint : evidence.ref,
+        ])}`;
+        if (this.getMeta(fingerprintKey) === evidence.fingerprint) continue;
+        this.setMeta(fingerprintKey, evidence.fingerprint);
+        observation.lastEvidenceAt = now;
+        observation.lastEvidence = { ...evidence, at: now };
+        changed = true;
+      }
+      if (report.status === "waiting" && report.waiting) {
+        const sameTarget = observation.waiting && laneWaitKey(observation.waiting.target) === laneWaitKey(report.waiting);
+        observation.waiting = { target: report.waiting, since: sameTarget ? observation.waiting!.since : now };
+        if (!sameTarget) changed = true;
+      } else if (report.status === "resolved") {
+        observation.waiting = null;
+        changed = true;
+      }
+      this.db.query("UPDATE lanes SET data = ? WHERE id = ? AND generation = ?")
+        .run(JSON.stringify({ ...lane, observation }), lane.id, generation);
+      this.setMeta(seen, serialized);
+      // Only a new evidence snapshot or waiting transition needs a head turn.
+      // Repeated reports remain inspectable without manufacturing progress.
+      if (changed) this.progress(id, generation, sessionId, `structured:${eventId}`, [
+        `Structured lane observation: ${JSON.stringify(observation)}`,
+        "Evidence is observed/worker-selected, not verified acceptance. Waiting and its resolution grant no dispatch, approval or resume authority.",
+      ].join("\n\n"));
+      return changed;
+    }).immediate();
+  }
+
+  resolveLaneWaiting(id: string, generation: number, sessionId: string, kind: "tool" | "approval", nativeId: string): boolean {
+    return this.db.transaction(() => {
+      if (!this.progressOpen({ inputId: id, generation, sessionId })) return false;
+      const input = this.requireInput(id);
+      const lane = input.target && input.target !== "main" ? this.requireLane(input.target) : null;
+      const observation = lane?.observation;
+      const waiting = observation?.waiting;
+      if (!lane || !observation || observation.inputId !== id || observation.requestId !== input.requestId
+        || observation.sessionId !== sessionId || observation.generation !== generation
+        || !waiting || waiting.target.kind !== kind || waiting.target.id !== nativeId) return false;
+      const resolved = { ...observation, waiting: null };
+      this.db.query("UPDATE lanes SET data = ? WHERE id = ? AND generation = ?")
+        .run(JSON.stringify({ ...lane, observation: resolved }), lane.id, generation);
+      // Completion/cancellation of a wait is not evidence of successful work.
+      this.progress(id, generation, sessionId, `resolved:${JSON.stringify([kind, nativeId, waiting.since])}`, [
+        `Native waiting target finished or was cancelled: ${JSON.stringify(waiting.target)}.`,
+        `Structured lane observation: ${JSON.stringify(resolved)}`,
+        "This clears only the matching wait observation. It does not verify success, answer an approval, or resume work.",
+      ].join("\n\n"));
       return true;
     }).immediate();
   }

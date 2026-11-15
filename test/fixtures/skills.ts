@@ -125,7 +125,8 @@ try {
   assert.equal(runner.createContext().agent.parentId, undefined);
 
   if (selection === "narrow") {
-    await session.setActiveToolsByName(session.getEnabledToolNames().filter(name => name !== "bash" && name !== "lane_message"));
+    await session.setActiveToolsByName(session.getEnabledToolNames().filter(name =>
+      name !== "bash" && name !== "lane_message" && name !== "lane_report"));
   }
   const before = session.getEnabledToolNames();
   const errors: Array<{ event: string; error: string }> = [];
@@ -139,8 +140,8 @@ try {
   } else {
     assert.deepEqual(errors, [], "Task/lane sessions must never attempt head startup");
   }
-  const expectedActive = role === "head" && kind === "sub"
-    ? before.filter(name => !managerNames.includes(name)) : before;
+  const expectedActive = kind === "sub"
+    ? before.filter(name => role === "head" ? !managerNames.includes(name) : name !== "lane_report") : before;
   assert.deepEqual(session.getEnabledToolNames(), expectedActive);
   if (selection === "narrow") assert(!session.getEnabledToolNames().includes("bash"));
 
@@ -260,7 +261,7 @@ try {
     reads.push(uri);
   }
 
-  const schemas = Object.fromEntries(managerNames.flatMap(name => {
+  const schemas = Object.fromEntries([...managerNames, "lane_report"].flatMap(name => {
     const info = session.getAllToolInfos().find(tool => tool.name === name);
     return info ? [[name, toolWireSchema(info)]] : [];
   }));
@@ -326,7 +327,27 @@ try {
     } else if (selection === "narrow") {
       assert(!session.getEnabledToolNames().includes("lane_message"));
     }
-  } else assert.deepEqual(schemas, {});
+  } else {
+    assert.deepEqual(Object.keys(schemas), ["lane_report"]);
+    const definition = runner.getRegisteredTool("lane_report")!.definition;
+    assert.equal(definition.loadMode, "essential");
+    assert.equal(definition.approval, "read");
+    const childContext = { ...runner.createContext(), agent: { kind: "sub" as const, id: "advisor", name: "advisor", depth: 0 } };
+    await assert.rejects(() => definition.execute("denied-child",
+      { status: "waiting", summary: "Dependency observation", waiting: { kind: "dependency", target: "parent review" } },
+      undefined, undefined, childContext), /restricted to the root lane session/);
+    if (kind === "sub") {
+      assert(!session.getEnabledToolNames().includes("lane_report"));
+      await session.setActiveToolsByName([...expectedActive, "lane_report"]);
+      await assert.rejects(() => session.getToolByName("lane_report")!.execute("reactivated-child",
+        { status: "waiting", summary: "Dependency observation", waiting: { kind: "dependency", target: "parent review" } }),
+      /restricted to the root lane session/);
+      await runner.emit({ type: "session_start" });
+      assert.deepEqual(session.getEnabledToolNames(), expectedActive);
+    } else if (selection === "narrow") {
+      assert(!session.getEnabledToolNames().includes("lane_report"));
+    } else assert(session.getEnabledToolNames().includes("lane_report"));
+  }
 
   assert.equal(networkAttempts, 0);
   console.log(`NATIVE_SKILLS_PROOF ${JSON.stringify({ role, kind, selection, extensionOrder, composition: Boolean(ulwPath), turns: 2,

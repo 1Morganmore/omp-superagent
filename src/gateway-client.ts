@@ -143,7 +143,7 @@ class GatewayMessenger implements GatewayHeadMessenger {
 
   async openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response> {
     if (this.stopped) throw new DeliveryError("Gateway client is stopped", "rejected");
-    if (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_GATEWAY_ATTACHMENT)
+    if (attachment.size !== null && (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_GATEWAY_ATTACHMENT))
       throw new DeliveryError("Invalid attachment size", "rejected");
     const incoming = await gatewayRequest(this.socketPath, "/attachment", { route, attachment }, { ...this.options(), signal });
     if (incoming.headers["x-gateway-attachment-protocol"] !== "1") {
@@ -169,7 +169,7 @@ class GatewayMessenger implements GatewayHeadMessenger {
             remaining = header.readUInt32BE();
             headerBytes = 0;
             if (!remaining) { complete = true; continue; }
-            if (bytes + remaining > attachment.size || bytes + remaining > MAX_GATEWAY_ATTACHMENT) {
+            if (bytes + remaining > (attachment.size ?? MAX_GATEWAY_ATTACHMENT) || bytes + remaining > MAX_GATEWAY_ATTACHMENT) {
               callback(new Error("Attachment stream exceeds declared size"));
               return;
             }
@@ -183,7 +183,7 @@ class GatewayMessenger implements GatewayHeadMessenger {
         callback();
       },
       flush(callback) {
-        callback(!complete || remaining || headerBytes || bytes !== attachment.size
+        callback(!complete || remaining || headerBytes || attachment.size !== null && bytes !== attachment.size
           ? new Error("Attachment stream ended without a complete delivery receipt") : undefined);
       },
     });

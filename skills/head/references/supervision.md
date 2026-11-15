@@ -54,6 +54,18 @@ The lane continues independently. Do not inspect/poll, acknowledge back to the l
 or send a new `lane_message` just to obtain the next update. A genuine blocker or
 correction still follows the normal source, scope, and approval rules.
 
+`lane_inspect` and bound-topic `/status` also expose a recorded `observation` and
+`observationState`: report time, last changed selected evidence, wait target/`since`,
+ages, and whether its input/native session/generation is still the connected owner.
+`ownerCurrent: false` preserves history, not proof that an unloaded or changed owner
+is still waiting. Ordinary commentary and native activity do not advance the evidence
+clock. Identical file bytes/tool results and repeated waits do not manufacture progress.
+Only changed evidence or a wait transition creates a structured progress receipt;
+this does not turn every native tool result into a head model turn.
+Evidence is worker-selected and waiting is an observation, not verified acceptance,
+permission, a live-target guarantee, or an automatic retry/resume/close decision.
+Use the existing event-driven supervision and original source boundaries.
+
 ## Shared informational board
 
 The separate common extension advertises `board_post`, `board_read`, and
