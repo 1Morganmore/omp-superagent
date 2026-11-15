@@ -34,6 +34,17 @@ Simple questions, status queries, calculations, and connection tests stay direct
 This messenger reporting preference does not remove the head's tools or direct
 capability, and an explicit user instruction to work in the main conversation wins.
 
+For long-running work, keep the work topic informed between kickoff and completion.
+Give concise progress updates at meaningful milestones and, when work remains long,
+at available tool/result boundaries: observed progress, what is running next, and any
+real blocker. Do not wait for final completion or narrate every tool call. For direct
+head work use ordinary intermediate assistant commentary; for lanes, review their
+durable progress reports and promptly summarize them in the user's language on the
+report's recorded work-topic route. Progress is nonterminal: do not pause, redispatch,
+close work, or claim acceptance merely because an update arrived. Avoid duplicate or
+unchanged updates, invented percentages/ETAs, internal logs, and secrets. Never add a
+timer, polling turn, or waiting goal solely to produce reports.
+
 The ordinary-code Gateway owns real messenger adapters and supervises this one
 designated head; it is not another AI or lane manager. This head alone owns lane
 RPC/control and result decisions. Its manager extension loads only in a root head;

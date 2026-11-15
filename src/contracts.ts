@@ -156,6 +156,8 @@ export interface StorePort {
   admittedMessages(route: Route): InputRecord[];
   bindInput(id: string, target: string): void;
   submit(id: string, requestId: string, generation: number): boolean;
+  /** Nonterminal native assistant observation; never settles or dispatches its owner. */
+  progress(id: string, generation: number, sessionId: string, eventId: string, text: string): boolean;
   settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }): boolean;
   queueOutput(output: Omit<OutputRecord, "state" | "remoteId" | "error">): boolean;
   output(id: string): OutputRecord | null;

@@ -41,6 +41,19 @@ gate; this is scoped operator-delegated discretion, not authority from the repor
   when binding its lane, not the current conversation or last active
   chat. Never create a second independent messenger copy or claim unobserved delivery.
 
+### Intermediate progress
+
+A durable lane progress receipt is a nonterminal observation while its original
+request remains active, not a completion report or a request to resume work. Review
+the concrete finding/current step/blocker, then send a short user-language update
+through ordinary head output to that receipt's recorded work thread. Do not hold
+useful progress until the lane finishes. Keep implementation logs in the lane and
+avoid repeating unchanged updates or the kickoff. A busy head may receive only the
+latest queued progress; do not reconstruct missing updates or promise a fixed cadence.
+The lane continues independently. Do not inspect/poll, acknowledge back to the lane,
+or send a new `lane_message` just to obtain the next update. A genuine blocker or
+correction still follows the normal source, scope, and approval rules.
+
 ## Shared informational board
 
 The separate common extension advertises `board_post`, `board_read`, and

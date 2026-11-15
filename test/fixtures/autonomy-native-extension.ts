@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
+import * as path from "node:path";
 import { createMockModel } from "../../.upstream/omp/packages/ai/src/providers/mock";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
@@ -13,10 +14,41 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
   let completed = false;
   let held = false;
   let headTodoStep = 0;
+  const progressStarted = new Set<string>();
   pi.on("agent_start", () => { run++; });
   pi.on("session_before_compact", async (_event, ctx) => {
     await ctx.ui.confirm("Autonomy serial barrier", "Release the isolated native compaction command.");
     return { cancel: true };
+  });
+  pi.registerTool({
+    name: "fixture_progress_barrier", label: "Wait for native progress observation",
+    description: "Wait for the isolated fixture to observe delivery, then finish the real native tool.",
+    approval: "read", loadMode: "essential",
+    parameters: Type.Object({ key: Type.Union([Type.Literal("head"), Type.Literal("lane")]) }),
+    async execute(_id, params, signal) {
+      const directory = process.env.OMP_AUTONOMY_PROGRESS_BARRIER_DIR;
+      if (!directory || !signal) throw new Error("Native progress barrier requires fixture isolation and an AbortSignal");
+      const filename = `${params.key}-progress.release`;
+      const release = path.join(directory, filename);
+      const barrier = Promise.withResolvers<void>();
+      const watcher = watch(directory, (_event, changed) => {
+        if (changed?.toString() === filename && existsSync(release)) barrier.resolve();
+      });
+      const abort = () => barrier.reject(new Error("Native progress barrier interrupted"));
+      const timer = setTimeout(() => barrier.reject(new Error("Native progress barrier was not released")), 40_000);
+      watcher.on("error", barrier.reject);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      if (existsSync(release)) barrier.resolve();
+      try {
+        await barrier.promise;
+        return { content: [{ type: "text", text: `NATIVE_PROGRESS_BARRIER_RELEASED ${params.key}` }], details: {} };
+      } finally {
+        clearTimeout(timer);
+        watcher.close();
+        signal.removeEventListener("abort", abort);
+      }
+    },
   });
   pi.registerTool({
     name: "fixture_autonomy_hold", label: "Hold owned native work",
@@ -47,6 +79,26 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
       }).at(-1);
       if (!envelope) throw new Error("Native autonomy model requires the production source envelope");
       if (process.env.OMP_SUPERAGENT_ROLE !== "lane") {
+        if (envelope.requestId.startsWith("progress:") && envelope.text.includes("LANE_PROGRESS 500"))
+          return { content: ["HEAD_RELAYED_LANE_PROGRESS 500"] };
+        if (envelope.requestId === "report:handoff:500:lane") {
+          if (!envelope.text.includes("LANE_FINAL 500")) throw new Error("Final lane report reused intermediate prose");
+          return { content: ["HEAD_RELAYED_LANE_FINAL 500"] };
+        }
+        if (envelope.text.includes("[head-progress]")) {
+          if (!progressStarted.has("head")) {
+            progressStarted.add("head");
+            return { content: [
+              { type: "thinking", thinking: "PRIVATE_HEAD_PROGRESS_REASONING" },
+              "HEAD_PROGRESS 052: the native tool is still running.",
+              { type: "toolCall", name: "fixture_progress_barrier", arguments: { key: "head" } },
+            ] };
+          }
+          const result = context.messages.at(-1);
+          if (result?.role !== "toolResult" || result.toolName !== "fixture_progress_barrier" || result.isError)
+            throw new Error("Direct head final requires the real native barrier result");
+          return { content: ["HEAD_FINAL 052"] };
+        }
         if (envelope.text.includes("[head-todo-empty-tail]")) {
           const task = `Verify retained head reply ${envelope.sourceId}`;
           if (headTodoStep === 0) {
@@ -86,6 +138,20 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
           headTodoStep = 5;
         }
         return { content: [`HEAD ${envelope.requestId}`] };
+      }
+      if (envelope.text.includes("[lane-progress]")) {
+        if (!progressStarted.has("lane")) {
+          progressStarted.add("lane");
+          return { content: [
+            { type: "thinking", thinking: "PRIVATE_LANE_PROGRESS_REASONING" },
+            "LANE_PROGRESS 500: the native tool is still running.",
+            { type: "toolCall", name: "fixture_progress_barrier", arguments: { key: "lane" } },
+          ] };
+        }
+        const result = context.messages.at(-1);
+        if (result?.role !== "toolResult" || result.toolName !== "fixture_progress_barrier" || result.isError)
+          throw new Error("Lane final requires the real native barrier result");
+        return { content: ["LANE_FINAL 500"] };
       }
       if (envelope.text.includes("[resume-correction]")) {
         const attachment = /local file ([^;\n]+);/.exec(envelope.text)?.[1];

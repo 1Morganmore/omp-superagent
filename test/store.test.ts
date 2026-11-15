@@ -70,6 +70,101 @@ function storedOutput(path: string, id: string): { state: string; remote_id: str
 }
 
 describe("durable coordination store", () => {
+  test("nonterminal lane progress coalesces durable receipts without settling or externally delivering lane work", () => {
+    const { store, path } = fixture();
+    const managed = admitLane(store);
+    store.updateLane(managed.id, 0, { sessionId: "native-progress" });
+    store.submit("source-lane", "native-request", 0);
+    expect(store.progress("source-lane", 0, "native-progress", "first", "Inspected the failure")).toBe(true);
+    const first = "progress:source-lane:first";
+    expect(store.input(first)).toMatchObject({ target: "main", state: "pending", route: managed.route, workflow: null });
+    expect(store.input(first)?.text).toContain("nonterminal");
+    expect(store.input(first)?.text).toContain("untrusted");
+    expect(store.input("source-lane")).toMatchObject({ state: "submitted", requestId: "native-request" });
+    expect(store.outputs()).toEqual([]);
+    expect(store.progress("source-lane", 0, "native-progress", "second", "Found the cause")).toBe(true);
+    expect(store.input(first)?.state).toBe("cancelled");
+    expect(store.inputs("main").map(input => input.id)).toEqual(["progress:source-lane:second"]);
+    store.close();
+    const reopened = open(path);
+    expect(reopened.progress("source-lane", 0, "native-progress", "first", "Inspected the failure")).toBe(false);
+    reopened.settle("source-lane", "done", { id: "final", text: "Verified independent final result" });
+    expect(reopened.input("progress:source-lane:second")?.state).toBe("cancelled");
+    expect(reopened.input("report:source-lane")?.text).toContain("Verified independent final result");
+    expect(reopened.input("report:source-lane")?.text).not.toContain("Found the cause");
+  });
+
+  test("progress uses validated head-selected topic and cancels stale pending receipts before submission", () => {
+    const { store } = fixture();
+    const source = inbound("topic-source", route({ threadId: null }));
+    store.receive(source, "main");
+    const handoff = { ...source, id: `handoff:${source.id}:lane`, route: route({ threadId: "selected" }) };
+    store.receive(handoff, null, { [`handoff-source:${handoff.id}`]: source.id });
+    const managed = store.createLane(lane("selected-lane", handoff.route), handoff.id);
+    store.setMeta(`head-delivery:${source.id}`, JSON.stringify({ source: source.route, destination: managed.route, laneId: managed.id }));
+    store.updateLane(managed.id, 0, { sessionId: "native-topic" });
+    store.submit(handoff.id, "request", 0);
+    store.progress(handoff.id, 0, "native-topic", "topic", "Working in selected topic");
+    const receipt = `progress:${handoff.id}:topic`;
+    expect(store.input(receipt)?.route).toEqual(managed.route);
+    store.updateLane(managed.id, 0, { workState: "paused" });
+    expect(store.submit(receipt, "head-request", 0)).toBe(false);
+    expect(store.input(receipt)?.state).toBe("cancelled");
+    expect(store.progress(handoff.id, 0, "native-topic", "paused", "Must not surface")).toBe(false);
+    store.updateLane(managed.id, 0, { workState: "open" });
+    store.setMeta(`head-delivery:${source.id}`, JSON.stringify({ source: source.route, destination: route({ threadId: "wrong" }), laneId: managed.id }));
+    expect(() => store.progress(handoff.id, 0, "native-topic", "invalid-route", "Must not surface")).toThrow("Invalid head-selected delivery binding");
+    expect(store.input(`progress:${handoff.id}:invalid-route`)).toBeNull();
+  });
+
+  test("progress excludes stale generations, sessions, uncertain or cancelled sources and empty observations", () => {
+    const { store } = fixture();
+    const managed = admitLane(store);
+    store.updateLane(managed.id, 0, { sessionId: "native-progress" });
+    const source = inbound("original-progress");
+    store.receive(source, "main");
+    const handoff = { ...source, id: "progress-handoff", route: managed.route };
+    store.receive(handoff, managed.id, { [`handoff-source:${handoff.id}`]: source.id });
+    store.submit(handoff.id, "native-request", 0);
+    expect(store.progress(handoff.id, 1, "native-progress", "stale-generation", "No")).toBe(false);
+    expect(store.progress(handoff.id, 0, "wrong-session", "stale-session", "No")).toBe(false);
+    expect(store.progress(handoff.id, 0, "native-progress", "empty", " \n")).toBe(false);
+    store.settle(source.id, "uncertain");
+    expect(store.progress(handoff.id, 0, "native-progress", "uncertain", "No")).toBe(false);
+    store.settle(source.id, "cancelled");
+    expect(store.progress(handoff.id, 0, "native-progress", "cancelled", "No")).toBe(false);
+    expect(store.inputs("main").filter(input => input.id.startsWith("progress:"))).toEqual([]);
+  });
+
+  test("a submitted progress synthesis cannot deliver stale progress after independent lane final", () => {
+    const { store } = fixture();
+    const managed = admitLane(store);
+    store.updateLane(managed.id, 0, { sessionId: "native-progress" });
+    store.submit("source-lane", "native-request", 0);
+    store.progress("source-lane", 0, "native-progress", "active", "Milestone");
+    const receipt = "progress:source-lane:active";
+    store.submit(receipt, "head-request", 0);
+    store.settle("source-lane", "done", { id: "lane-final", text: "Final result" });
+    store.settle(receipt, "done", { id: "stale-progress-answer", text: "Old milestone synthesis" });
+    expect(store.output("stale-progress-answer")).toBeNull();
+    expect(store.input("report:source-lane")?.state).toBe("pending");
+  });
+
+  test("head progress keeps uncertain delivery receipts and is never blindly retried", () => {
+    const { store } = fixture();
+    store.receive(inbound("head-progress"), "main");
+    store.setMeta("main:sessionId", "native-head");
+    store.submit("head-progress", "request", 0);
+    expect(store.progress("head-progress", 0, "native-head", "event", "Meaningful milestone")).toBe(true);
+    const outputId = "progress:head-progress:event";
+    expect(store.output(outputId)?.text).toBe("Meaningful milestone");
+    expect(store.claimOutput(outputId)).toBe(true);
+    store.finishOutput(outputId, "uncertain");
+    expect(store.progress("head-progress", 0, "native-head", "event", "Meaningful milestone")).toBe(false);
+    expect(store.outputs()).toEqual([]);
+    expect(store.output(outputId)?.state).toBe("uncertain");
+  });
+
   test("Slack invocation origins survive handoffs, reports, and reopen without a source timestamp", () => {
     const { store, path } = fixture();
     const destination = route({ platform: "slack", accountId: "TTEAM:UBOT", authorityId: "UOWNER", guildId: null, channelId: "DOWNER", threadId: null, topicId: "topic-slash" });

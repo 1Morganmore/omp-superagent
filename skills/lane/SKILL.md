@@ -27,6 +27,17 @@ during active work. Incorporate the new instruction at the safe execution bounda
 preserving its source identity, scope, and prior effects; no separate `/steer`
 invocation is required. A correction is not rollback or new external authorization.
 
+During long work, report progress periodically through ordinary intermediate
+assistant commentary, in English, while continuing the assignment. Use meaningful
+milestones and available tool/result boundaries rather than narrating every call.
+State concrete observations, the current/next step, and real blockers; before a long
+tool or async wait, say what is running and what evidence is still pending. Do not
+stay silent until the final result, fabricate percentages/ETAs, or repeat unchanged
+status. Runtime passes these updates to the head as nonterminal durable reports;
+the head owns the user-language work-thread reply. Progress is not a final answer
+or a reason to stop work, await a head acknowledgement, create another goal, poll,
+or install a reporting timer. Keep secrets, raw logs, and private reasoning out.
+
 ## Role specialization over general model profiles
 
 If `omp-ulw` or another general model profile is also loaded, keep its useful

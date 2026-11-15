@@ -277,6 +277,14 @@ prompt/publication to force progress.
 
 ## 5. Return a useful result and handoff
 
+Do not reserve all reporting for completion. During long execution, emit concise
+ordinary intermediate commentary at meaningful milestones and available tool/result
+boundaries: what changed or was verified, what is running next, and what is blocked.
+Report an upcoming long wait before entering it and update on its actual result.
+Continue authorized work without waiting for acknowledgement. These are nonterminal
+head reports, not board posts or direct messenger sends; omit repetitive tool logs,
+secrets, invented progress percentages, and timer-driven keepalive chatter.
+
 Use ordinary assistant output in English for this internal head report, preserving
 exact original source text or quotations when relevant. The integration records it
 as a durable report to the head; it does **not** send lane output directly to the

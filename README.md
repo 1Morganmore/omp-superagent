@@ -146,6 +146,9 @@ Windows service installation are not supported.
   Slack requires `reactions:write`; Discord requires Add Reactions.
 - Questions and connection tests get direct replies. For work instructions, the head
   first opens a work topic and posts a brief concrete approach before starting execution.
+- Long-running work gets concise intermediate progress in that topic: findings,
+  current steps, and blockers. Updates follow meaningful execution events, not a
+  fixed heartbeat; the lane keeps working while the head relays progress.
 - Ask for work normally. The head creates a supported native
   thread/topic and binds its work session; private chats without native topics use
   logical topics. `/new` (Slack `!new`) remains an explicit DM topic control.

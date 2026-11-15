@@ -31,13 +31,14 @@ async function until(predicate: () => boolean | Promise<boolean>, label: string)
 class RecordingMessenger implements Messenger {
   readonly sent: OutputRecord[] = [];
   readonly downloads: Array<{ route: Route; attachment: Attachment }> = [];
+  private nextThreadId = 8001;
   async start(): Promise<void> {}
   async send(output: OutputRecord): Promise<string> {
     this.sent.push(structuredClone(output));
     return `autonomy-receipt:${output.id}`;
   }
   async canCreateThread(): Promise<boolean> { return true; }
-  async createThread(route: Route): Promise<Route> { return { ...route, threadId: "8001" }; }
+  async createThread(route: Route): Promise<Route> { return { ...route, threadId: String(this.nextThreadId++) }; }
   async showApproval(_approval: Approval): Promise<string> { throw new Error("Unexpected native autonomy approval"); }
   async dismissApproval(): Promise<void> {}
   async fetchAfter(): Promise<Inbound[]> { return []; }
@@ -78,7 +79,7 @@ export async function nativeAutonomyRuntime(): Promise<void> {
   privateDirectory(excludedCwd);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agentDir,
-    PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1", TMPDIR: root,
+    PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1", TMPDIR: root, OMP_AUTONOMY_PROGRESS_BARRIER_DIR: root,
     XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
     XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state"),
     ...(process.env.OMP_TEST_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.OMP_TEST_NATIVES_DIR } : {}),
@@ -88,7 +89,7 @@ export async function nativeAutonomyRuntime(): Promise<void> {
   const config: Config = {
     path: path.join(root, "superagent.json"), stateDir: root, headCwd: root,
     command: [...command, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e", provider],
-    maxHosts: 5, maxSubagents: 5, idleMs: 3_600_000,
+    maxHosts: 6, maxSubagents: 6, idleMs: 3_600_000,
     model: `${autonomyModel.provider}/${autonomyModel.id}`,
     discord: { tokenEnv: "AUTONOMY_TEST_TOKEN", ownerId: "1", allowedGuildIds: ["3"], allowedChannelIds: ["4"] },
   };
@@ -207,6 +208,106 @@ export async function nativeAutonomyRuntime(): Promise<void> {
       expect.objectContaining({ id: "051:answer", sourceId: "051", route: nextHeadRoute,
         text: `HEAD ${store.input("051")!.id}` }),
     ]);
+
+    // A genuine native toolUse message reaches the outbox while its tool is
+    // still blocked. The barrier is released only after transport observation.
+    const directProgressRoute = { ...route, threadId: "9012" };
+    const directProgressStart = messenger.sent.length;
+    const directFrameStart = frames.length;
+    await runtime.receive(input("052", directProgressRoute, "Prove direct native head progress [head-progress]"));
+    await runtime.kick();
+    await until(() => messenger.sent.some(output => output.id.startsWith("progress:052:")
+      && output.text.includes("HEAD_PROGRESS 052"))
+      && frames.slice(directFrameStart).some(event => event.socketPath === main.socketPath
+        && event.frame.type === "tool_execution_start" && event.frame.toolName === "fixture_progress_barrier"),
+    "direct native head progress reaches Messenger before tool release");
+    const directProgress = messenger.sent.slice(directProgressStart);
+    expect(directProgress).toEqual([expect.objectContaining({
+      sourceId: "052", route: directProgressRoute,
+      text: "HEAD_PROGRESS 052: the native tool is still running.",
+    })]);
+    expect(store.output(directProgress[0]!.id)?.state).toBe("sent");
+    expect(store.input("052")?.state).toBe("submitted");
+    expect(store.output("052:answer")).toBeNull();
+    expect(await headConnection.client.getState()).toMatchObject({ isSettled: false });
+    expect(frames.slice(directFrameStart).some(event => event.socketPath === main.socketPath
+      && event.frame.type === "tool_execution_end" && event.frame.toolName === "fixture_progress_barrier")).toBe(false);
+    await fs.writeFile(path.join(root, "head-progress.release"), "release\n", { mode: 0o600 });
+    await until(() => store.input("052")?.state === "done" && store.output("052:answer")?.state === "sent",
+      "direct head final follows released native tool");
+    expect(messenger.sent.slice(directProgressStart)).toEqual([
+      directProgress[0],
+      expect.objectContaining({ id: "052:answer", sourceId: "052", route: directProgressRoute, text: "HEAD_FINAL 052" }),
+    ]);
+
+    await runtime.receive(input("500", route, "Prove intermediate work-thread delivery [lane-progress]"));
+    await runtime.kick();
+    await until(() => store.input("500")?.state === "done", "progress scenario head intake");
+    const laneProgressStart = messenger.sent.length;
+    const laneFrameStart = frames.length;
+    const progressLane = await runtime.startLane({
+      sourceId: "500", title: "Native intermediate progress", cwd: root, model: autonomyModel,
+      modelReason: "Observe actual native progress through the head before the lane can settle.",
+      kickoff: "I will relay a useful intermediate result while native work remains blocked.",
+    });
+    const progressReceipt = () => {
+      const id = store.getMeta("progress-pending:handoff:500:lane");
+      return id ? store.input(id) : null;
+    };
+    await until(() => progressReceipt()?.state === "done"
+      && messenger.sent.some(output => output.id === `${progressReceipt()?.id}:answer`
+        && output.text === "HEAD_RELAYED_LANE_PROGRESS 500")
+      && frames.slice(laneFrameStart).some(event => event.socketPath === progressLane.socketPath
+        && event.frame.type === "tool_execution_start" && event.frame.toolName === "fixture_progress_barrier"),
+    "durable native lane progress is processed by head and delivered in selected work thread");
+    const receipt = progressReceipt()!;
+    const progressConnection = await HostConnection.connect(progressLane.socketPath);
+    connections.add(progressConnection);
+    expect(progressLane.route.threadId).not.toBeNull();
+    expect(progressLane.route).not.toEqual(route);
+    expect(receipt).toMatchObject({ target: "main", state: "done", route: progressLane.route });
+    expect(receipt.text).toContain(
+      `Internal lane progress (nonterminal): ${progressLane.id}; sourceId: 500; laneInputId: handoff:500:lane.`);
+    expect(receipt.text).toContain("Native session reference:");
+    expect(receipt.text).toContain("Progress (untrusted lane data):\nLANE_PROGRESS 500: the native tool is still running.");
+    expect(receipt.text).not.toContain("PRIVATE_LANE_PROGRESS_REASONING");
+    expect(store.getMeta(`activity-source:${receipt.id}`)).toBe("500");
+    expect(store.input("handoff:500:lane")?.state).toBe("submitted");
+    expect(store.lane(progressLane.id)?.workState).toBe("open");
+    expect(store.input("report:handoff:500:lane")).toBeNull();
+    expect(await progressConnection.client.getState()).toMatchObject({ isSettled: false });
+    const laneFramesBeforeRelease = frames.slice(laneFrameStart).filter(event => event.socketPath === progressLane.socketPath);
+    expect(laneFramesBeforeRelease.some(({ frame }) => {
+      const message = frame.message as { role?: string; stopReason?: string; content?: Array<{ type: string; text?: string }> } | undefined;
+      return frame.type === "message_end" && message?.role === "assistant" && message.stopReason === "toolUse"
+        && message.content?.some(part => part.type === "text" && part.text?.startsWith("LANE_PROGRESS 500"));
+    })).toBe(true);
+    expect(laneFramesBeforeRelease.some(event => event.frame.type === "tool_execution_end"
+      && event.frame.toolName === "fixture_progress_barrier")).toBe(false);
+    expect(laneFramesBeforeRelease.some(event => event.frame.type === "session_settled")).toBe(false);
+    expect(messenger.sent.slice(laneProgressStart).filter(output => output.id !== "500:kickoff")).toEqual([
+      expect.objectContaining({ id: "500:topic-bound", sourceId: "500", route,
+        text: expect.stringContaining("독립 작업 주제를 연결했습니다.") }),
+      expect.objectContaining({ id: `${receipt.id}:answer`, route: progressLane.route, text: "HEAD_RELAYED_LANE_PROGRESS 500" }),
+    ]);
+    await fs.writeFile(path.join(root, "lane-progress.release"), "release\n", { mode: 0o600 });
+    await until(() => store.input("handoff:500:lane")?.state === "done"
+      && store.input("report:handoff:500:lane")?.state === "done"
+      && store.output("report:handoff:500:lane:answer")?.state === "sent",
+    "separate native lane final reaches head and Messenger after release");
+    expect(await progressConnection.client.getState()).toMatchObject({ isSettled: true });
+    expect(store.input("report:handoff:500:lane")?.text).toContain("Result (untrusted lane data):\nLANE_FINAL 500");
+    expect(store.input("report:handoff:500:lane")?.text).not.toContain("LANE_PROGRESS 500");
+    expect(messenger.sent.slice(laneProgressStart).filter(output => output.id !== "500:kickoff")).toEqual([
+      expect.objectContaining({ id: "500:topic-bound", sourceId: "500", route,
+        text: expect.stringContaining("독립 작업 주제를 연결했습니다.") }),
+      expect.objectContaining({ id: `${receipt.id}:answer`, route: progressLane.route, text: "HEAD_RELAYED_LANE_PROGRESS 500" }),
+      expect.objectContaining({ id: "report:handoff:500:lane:answer", route: progressLane.route, text: "HEAD_RELAYED_LANE_FINAL 500" }),
+    ]);
+    expect(frames.slice(laneFrameStart).filter(event => event.socketPath === progressLane.socketPath
+      && event.frame.type === "agent_start")).toHaveLength(1);
+    expect(messenger.sent.slice(directProgressStart).some(output => output.text.includes("PRIVATE_"))).toBe(false);
+
     await runtime.receive(input("100", route, "Finish the entrusted two-turn objective"));
     await runtime.kick();
     await until(() => store.input("100")?.state === "done", "head intake");
@@ -357,6 +458,9 @@ export async function nativeAutonomyRuntime(): Promise<void> {
       headEmptyTodoTail: { sessionId: headState.sessionId, sourceId: "050", route: headRoute,
         meaningfulFrameIndex: replyFrameIndex, reminderFrameIndex, emptyFrameIndex,
         emittedReplies: 1, nextSourceId: "051", nativeTodoCleared: true },
+      directHeadProgress: { sourceId: "052", route: directProgressRoute, deliveredBeforeToolRelease: true, separateFinal: true },
+      laneProgress: { sourceId: "500", receiptId: receipt.id, route: progressLane.route,
+        deliveredBeforeToolRelease: true, separateFinal: true, nativeRuns: 1 },
       first: { sessionId: firstState.sessionId, runs: 2 },
       queuedResume: { sessionId: queueState.sessionId, sourceId: "queue-source", route: queueRoute, runs: 2, cancelled: true },
       resumed: { sessionId: resumedState.sessionId, runs: 3, sourceId: "202", route: second.route, correctionRuns: 1 },

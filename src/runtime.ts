@@ -165,12 +165,36 @@ function successful(value: unknown, operation: string): Record<string, unknown> 
   if (envelope.success !== true) throw new Error(`${operation} was not acknowledged by the native host`);
   return record(envelope.data);
 }
+function textSignature(part: unknown): { id?: string; phase?: "commentary" | "final_answer" } {
+  const signature = record(part).textSignature;
+  if (typeof signature !== "string") return {};
+  try {
+    const parsed = record(JSON.parse(signature));
+    return parsed.v === 1 && typeof parsed.id === "string"
+      ? { id: parsed.id, ...(parsed.phase === "commentary" || parsed.phase === "final_answer" ? { phase: parsed.phase } : {}) }
+      : {};
+  } catch { return {}; }
+}
 function assistantText(value: unknown): string | null {
   const message = record(value);
   if (message.role !== "assistant" || !Array.isArray(message.content)) return null;
-  const text = message.content.filter(part => record(part).type === "text")
+  const text = message.content.filter(part => record(part).type === "text"
+    && textSignature(part).phase !== "commentary"
+    && (message.stopReason !== "toolUse" || textSignature(part).phase === "final_answer"))
     .map(part => String(record(part).text ?? "")).join("");
   return text.trim() ? text : null;
+}
+function assistantProgress(value: unknown): { text: string; identity: string } | null {
+  const message = record(value);
+  if (message.role !== "assistant" || !Array.isArray(message.content)
+    || !["stop", "length", "toolUse"].includes(String(message.stopReason))) return null;
+  const parts = message.content.filter(part => record(part).type === "text"
+    && (textSignature(part).phase === "commentary"
+      || message.stopReason === "toolUse" && textSignature(part).phase !== "final_answer"));
+  const text = parts.map(part => String(record(part).text ?? "")).join("");
+  if (!text.trim()) return null;
+  const ids = parts.map(part => textSignature(part).id).filter((id): id is string => id !== undefined);
+  return { text, identity: typeof message.id === "string" ? message.id : ids.length ? JSON.stringify(ids) : text };
 }
 
 /** One controller for durable coordination; OMP remains the execution/transcript owner. */
@@ -3008,6 +3032,16 @@ export class Superagent {
     if (frame.type === "agent_end") live.running = false;
     if (frame.type === "message_end" && live.input) {
       this.observeAssistant(live, frame.message);
+      const progress = assistantProgress(frame.message);
+      if (progress && !this.stopped && !this.restartFence()
+        && (live.id !== "main" || this.headStopping === 0)) {
+        const eventId = key(JSON.stringify([live.sessionId, live.generation, progress.identity]));
+        try {
+          if (this.store.progress(live.input.id, live.generation, live.sessionId, eventId, progress.text)) {
+            this.background(this.kick());
+          }
+        } catch (error) { this.report(error); }
+      }
     }
     if (frame.type === "agent_end" && live.input && frame.isTerminal !== false && Array.isArray(frame.messages)) {
       // Native terminal payloads contain this run's cumulative messages. Only

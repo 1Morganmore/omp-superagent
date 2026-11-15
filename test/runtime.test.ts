@@ -404,6 +404,196 @@ function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], pre
   return { runtime, config, directory, store, messenger, main, hosts, launched, errors, launchBehavior, nativePresets, persistedPresets, presetPersistence };
 }
 
+describe("event-driven nonterminal progress", () => {
+  test.each(["toolUse", "commentary"] as const)("HEAD sends %s progress before completion once and never repeats it as final fallback", async kind => {
+    const { runtime, main, messenger, store } = fixture();
+    await runtime.start();
+    const original = message(`head-${kind}-progress`, route("original-topic"));
+    await admit(runtime, original);
+    const progress = { role: "assistant", stopReason: kind === "toolUse" ? "toolUse" : "stop", content: [
+      { type: "thinking", thinking: "Private reasoning" },
+      { type: "text", text: "Located the defect; applying the bounded fix.",
+        ...(kind === "commentary" ? { textSignature: JSON.stringify({ v: 1, id: "native-progress", phase: "commentary" }) } : {}) },
+      ...(kind === "toolUse" ? [{ type: "toolCall", id: "native-tool", name: "read", arguments: {} }] : []),
+    ] };
+    main.emit({ type: "message_end", message: progress });
+    await messenger.whenSent(1);
+    expect(store.input(original.id)?.state).toBe("submitted");
+    expect(main.state.isSettled).toBe(false);
+    expect(messenger.sent).toMatchObject([{ sourceId: original.id, route: original.route,
+      text: "Located the defect; applying the bounded fix." }]);
+    main.emit({ type: "message_end", message: structuredClone(progress) });
+    main.emit({ type: "agent_end", isTerminal: true, messages: [progress, { role: "assistant", stopReason: "stop", content: [] }] });
+    main.complete("");
+    await runtime.kick();
+    expect(store.input(original.id)?.state).toBe("done");
+    expect(store.output(`${original.id}:answer`)).toBeNull();
+    expect(messenger.attempted).toHaveLength(1);
+    expect(main.prompts).toHaveLength(1);
+  });
+
+  test("mixed native commentary and final text retain only the independent final answer", async () => {
+    const { runtime, main, messenger, store } = fixture();
+    await runtime.start();
+    const original = message("mixed-native-progress");
+    await admit(runtime, original);
+    const mixed = { role: "assistant", stopReason: "stop", content: [
+      { type: "text", text: "Verification is running.", textSignature: JSON.stringify({ v: 1, id: "comment", phase: "commentary" }) },
+      { type: "text", text: "Verified final result.", textSignature: JSON.stringify({ v: 1, id: "answer", phase: "final_answer" }) },
+    ] };
+    main.emit({ type: "message_end", message: mixed });
+    await messenger.whenSent(1);
+    main.emit({ type: "agent_end", isTerminal: true, messages: [mixed] });
+    main.complete("");
+    await messenger.whenSent(2);
+    expect(messenger.sent.map(output => output.text)).toEqual(["Verification is running.", "Verified final result."]);
+    expect(store.output(`${original.id}:answer`)?.text).toBe("Verified final result.");
+  });
+
+  test("lane progress reaches the head-selected work thread before completion and final remains independent", async () => {
+    const { runtime, main, messenger, store, directory, hosts } = fixture();
+    await runtime.start();
+    const original = message("progress-parent-source", route(null));
+    await admit(runtime, original);
+    const lane = await runtime.startLane({ ...selection, sourceId: original.id, title: "Progress work",
+      kickoff: "I will inspect, implement, and verify this work in its own topic.", cwd: directory });
+    await runtime.kick();
+    main.complete("");
+    await runtime.kick();
+    const worker = hosts.get(lane.socketPath)!;
+    const handoffId = `handoff:${original.id}:lane`;
+    const beforeProgress = messenger.sent.length;
+    const progress = { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Confirmed the root cause; implementation continues." }] };
+    worker.emit({ type: "message_end", message: progress });
+    await main.whenPrompts(2);
+    const receipt = store.inputs("main").find(input => input.id.startsWith(`progress:${handoffId}:`))!;
+    expect(receipt).toMatchObject({ route: lane.route, state: "submitted", messageId: original.messageId, workflow: null });
+    expect(receipt.text).toContain(`sourceId: ${original.id}`);
+    expect(receipt.text).toContain("untrusted");
+    expect(receipt.text).toContain("not completion, acceptance, approval, or permission for new dispatch");
+    expect(store.input(handoffId)?.state).toBe("submitted");
+    expect(worker.state.isSettled).toBe(false);
+    expect(messenger.sent).toHaveLength(beforeProgress);
+    main.complete("Root cause identified; implementation is still underway.");
+    await messenger.whenSent(beforeProgress + 1);
+    expect(messenger.sent.at(-1)).toMatchObject({ sourceId: receipt.id, route: lane.route,
+      text: "Root cause identified; implementation is still underway." });
+    worker.emit({ type: "message_end", message: structuredClone(progress) });
+    await runtime.kick();
+    expect(main.prompts).toHaveLength(2);
+    worker.complete("Independent verified final result.");
+    await main.whenPrompts(3);
+    const finalId = `report:${handoffId}`;
+    expect(store.input(finalId)?.text).toContain("Independent verified final result.");
+    expect(store.input(finalId)?.text).not.toContain("Confirmed the root cause");
+    main.complete("Verified work is complete.");
+    await messenger.whenSent(beforeProgress + 2);
+    expect(messenger.sent.at(-1)).toMatchObject({ sourceId: finalId, route: lane.route, text: "Verified work is complete." });
+    expect(worker.prompts).toHaveLength(1);
+  });
+
+  test("busy HEAD coalesces lane progress to the latest meaningful observation without steering or redispatch", async () => {
+    const { runtime, config, store, hosts, main, messenger } = fixture();
+    const lane = savedLane(store, config, "busy-progress", route("work-topic"));
+    await runtime.start();
+    await admit(runtime, message("busy-head-source", route("other-topic")));
+    await delegate(runtime, message("busy-lane-source", lane.route));
+    const worker = hosts.get(lane.socketPath)!;
+    for (const text of ["Initial inspection complete.", "Root cause identified.", "Fix implemented; verification running."]) {
+      worker.emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text }] } });
+    }
+    await runtime.kick();
+    const pending = store.inputs("main").filter(input => input.id.startsWith("progress:"));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.text).toContain("Fix implemented; verification running.");
+    expect(main.prompts).toHaveLength(1);
+    main.complete("Unrelated head answer.");
+    await main.whenPrompts(2);
+    expect(main.prompts[1]?.command.message).toContain("Fix implemented; verification running.");
+    expect(main.prompts[1]?.command.message).not.toContain("Initial inspection complete.");
+    expect(main.prompts[1]?.command.streamingBehavior).toBeUndefined();
+    main.complete("Verification is still running.");
+    await messenger.whenSent(2);
+    expect(messenger.sent[1]).toMatchObject({ route: lane.route, text: "Verification is still running." });
+    expect(store.input(`handoff:busy-lane-source:${lane.id}`)?.state).toBe("submitted");
+    expect(worker.prompts).toHaveLength(1);
+  });
+
+  test("pending progress is superseded by final report while HEAD remains busy", async () => {
+    const { runtime, config, store, hosts, main, messenger } = fixture();
+    const lane = savedLane(store, config, "final-supersedes", route("work-topic"));
+    await runtime.start();
+    await admit(runtime, message("busy-final-head", route("other-topic")));
+    await delegate(runtime, message("busy-final-lane", lane.route));
+    const worker = hosts.get(lane.socketPath)!;
+    worker.emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Older pending progress." }] } });
+    await runtime.kick();
+    const receipt = store.inputs("main").find(input => input.id.startsWith("progress:"))!;
+    worker.complete("Verified final supersedes older progress.");
+    await runtime.kick();
+    main.complete("Unrelated answer.");
+    await main.whenPrompts(2);
+    expect(store.input(receipt.id)?.state).toBe("cancelled");
+    expect(main.prompts[1]?.command.message).toContain("Verified final supersedes older progress.");
+    expect(main.prompts[1]?.command.message).not.toContain("Older pending progress.");
+    main.complete("Final result.");
+    await messenger.whenSent(2);
+    expect(messenger.sent.some(output => output.text.includes("Older pending progress"))).toBe(false);
+    expect(main.prompts).toHaveLength(2);
+  });
+
+  test("failed, aborted, empty, thinking, tool results and raw final messages never generate lane progress", async () => {
+    const { runtime, config, store, hosts, main, messenger } = fixture();
+    const lane = savedLane(store, config, "excluded-progress", route("work-topic"));
+    await runtime.start();
+    await delegate(runtime, message("excluded-lane-source", lane.route));
+    const worker = hosts.get(lane.socketPath)!;
+    for (const message of [
+      { role: "assistant", stopReason: "error", content: [{ type: "text", text: "Private failed text" }] },
+      { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "Private aborted text" }] },
+      { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: " \n\t" }] },
+      { role: "assistant", stopReason: "toolUse", content: [{ type: "thinking", thinking: "Private thought" }] },
+      { role: "toolResult", content: [{ type: "text", text: "Untrusted tool result" }] },
+      { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Raw final answer" }] },
+      { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Malformed signature", textSignature: "{not JSON" }] },
+    ]) worker.emit({ type: "message_end", message });
+    await runtime.kick();
+    expect(main.prompts).toHaveLength(0);
+    expect(messenger.sent).toEqual([]);
+    expect(store.inputs("main").filter(input => input.id.startsWith("progress:"))).toEqual([]);
+    expect(store.input(`handoff:excluded-lane-source:${lane.id}`)?.state).toBe("submitted");
+    worker.complete("Independent final answer.");
+    await main.whenPrompts(1);
+    expect(main.prompts[0]?.command.message).toContain("Independent final answer.");
+    main.complete("Head final answer.");
+    await messenger.whenSent(1);
+    expect(messenger.sent[0]?.text).toBe("Head final answer.");
+  });
+
+  test("invalid progress delivery bindings are contained without breaking native frame observers", async () => {
+    const { runtime, config, store, hosts, main, messenger, errors } = fixture();
+    const lane = savedLane(store, config, "invalid-progress-route", route("work-topic"));
+    await runtime.start();
+    const original = message("invalid-progress-source", lane.route);
+    await delegate(runtime, original);
+    store.setMeta(`head-delivery:${original.id}`, JSON.stringify({
+      source: original.route, destination: route("unrelated-topic"), laneId: lane.id,
+    }));
+    const worker = hosts.get(lane.socketPath)!;
+    let observed = false;
+    worker.onFrame(() => { observed = true; });
+    expect(() => worker.emit({ type: "message_end", message: {
+      role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Progress must not escape its source." }],
+    } })).not.toThrow();
+    expect(observed).toBe(true);
+    expect(errors.map(error => String(error))).toEqual([expect.stringContaining("Invalid head-selected delivery binding")]);
+    expect(store.inputs("main").filter(input => input.id.startsWith("progress:"))).toEqual([]);
+    expect(store.input(`handoff:${original.id}:${lane.id}`)?.state).toBe("submitted");
+    expect(main.prompts).toHaveLength(0);
+    expect(messenger.sent).toEqual([]);
+  });
+});
+
 describe("original-message processing reactions", () => {
   test("slash DM requests and their logical lane handoff/report never react or attempt native DM thread creation", async () => {
     const { runtime, main, messenger, directory, hosts, store } = fixture();
