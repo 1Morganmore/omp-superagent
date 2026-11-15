@@ -41,6 +41,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .upstream/omp -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
       - name: Build native addon
         run: bun --cwd=.upstream/omp run build:native
       - name: Install project and managed ULW

@@ -619,6 +619,11 @@ try {
     assert(activities.some(value => value.activity === "thinking"), "Real native processing must be visible on every original input");
     assert(activities.every(value => JSON.stringify(value.message.route) === JSON.stringify(item.route)), "Reactions must stay on the original message route, not a report or newly selected destination");
   }
+  // Messenger send entry and idle reactions precede the head's durable receipt.
+  await until(() => {
+    const receipts = db.query("SELECT state FROM outputs ORDER BY sequence").all() as Array<{ state: string }>;
+    return receipts.length === expectedOutputSources.length && receipts.every(receipt => receipt.state === "sent");
+  }, "final head replies and durable external receipts settle");
   const outputs = db.query("SELECT id,source_id,state,remote_id FROM outputs ORDER BY sequence").all() as Array<{ id: string; source_id: string; state: string; remote_id: string }>;
   assert.deepEqual(outputs.map(output => output.source_id).sort(), [...expectedOutputSources].sort());
   assert(outputs.every(output => output.state === "sent" && output.remote_id === `gateway-native-receipt:${output.id}`));
