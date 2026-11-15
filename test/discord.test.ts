@@ -753,6 +753,54 @@ describe("Discord output delivery", () => {
   });
 });
 
+describe("Discord markdown tables in outbound payloads", () => {
+  test("a pipe table is sent as an aligned fenced block", async () => {
+    const { messenger, channel } = await fixture();
+    await messenger.send(output(["| Name | Count |", "| --- | ---: |", "| a | 12 |"].join("\n")));
+    expect(channel.sent[0]!.content).toBe([
+      "```",
+      "| Name | Count |",
+      "| ---- | ----- |",
+      "| a    |    12 |",
+      "```",
+    ].join("\n"));
+    await messenger.stop();
+  });
+
+  test("the stored output record keeps its original markdown", async () => {
+    const { messenger, channel } = await fixture();
+    const record = output(["| a | b |", "| --- | --- |", "| 1 | 2 |"].join("\n"));
+    await messenger.send(record);
+    expect(record.text).toBe("| a | b |\n| --- | --- |\n| 1 | 2 |");
+    expect(channel.sent[0]!.content).toContain("```");
+    await messenger.stop();
+  });
+
+  test("non-table output reaches Discord byte for byte", async () => {
+    const { messenger, channel } = await fixture();
+    const source = ["## Heading", "", "- item | with pipe", "", "```", "| not | a table |", "```", "", "`inline | code`"].join("\n");
+    await messenger.send(output(source));
+    expect(channel.sent[0]!.content).toBe(source);
+    await messenger.stop();
+  });
+
+  test("a table crossing the message limit still becomes one attachment without a dangling fence", async () => {
+    const { messenger, channel } = await fixture();
+    const rows = Array.from({ length: 120 }, (_, index) => `| row ${index} | value ${index} |`);
+    const text = ["| key | value |", "| --- | --- |", ...rows, "trailing prose"].join("\n");
+    expect(text.length).toBeGreaterThan(2000);
+    await messenger.send(output(text));
+    expect(channel.sent).toHaveLength(1);
+    expect(channel.sent[0]!.files).toHaveLength(1);
+    const attached = String((channel.sent[0]!.files![0] as unknown as { attachment: Buffer }).attachment);
+    // The fence is emitted complete inside the attachment, never cut mid-table.
+    expect(attached.startsWith("```\n| key     | value     |\n")).toBe(true);
+    expect(attached.endsWith("```\ntrailing prose")).toBe(true);
+    expect(attached.split("```")).toHaveLength(3);
+    await messenger.stop();
+  });
+});
+
 describe("Discord message activity", () => {
   test.each([
     ["channel", route],

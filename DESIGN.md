@@ -1239,7 +1239,9 @@ route와 원래 source를 보존하고 동일 결과를 lane/head 양쪽에서 �
   음성 여부·길이는 첨부 메타데이터와 head/lane 프롬프트에 보존하지만 자동 전사 기능은 추가하지 않는다.
   Discord의 의미 있는 텍스트·지원 첨부가 모두 없는 입력/수정은 새 작업으로 접수하지 않는다.
 - 일반 출력 한계는 Discord 2,000자·Telegram 4,096 UTF-16 단위·Slack 3,000자이며 긴 출력은
-  각각 최대 8 MiB·50 MiB·8 MiB의 단일 텍스트 첨부다. Slack은 upload URL 발급 → 바이트 업로드 →
+  각각 최대 8 MiB·50 MiB·8 MiB의 단일 텍스트 첨부다. Discord는 pipe 표를 렌더하지 않으므로
+  전송 직전 헤더·구분 행·본문을 열 폭(표시 폭 기준)으로 채운 하나의 fenced 블록으로 바꾸고,
+  저장된 출력 원문과 나머지 markdown·기존 fence 내용은 그대로 둔다. Slack은 upload URL 발급 → 바이트 업로드 →
   `files.completeUploadExternal`로 원래 목적지에 게시한다. Telegram·Slack SDK의 mutation 자동 재시도는 끄며
   전송 결과가 불확실하면 성공이나 안전한 재실행으로 가정하지 않는다.
 

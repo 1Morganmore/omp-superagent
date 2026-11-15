@@ -9,6 +9,7 @@ import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachme
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
+import { renderDiscordMarkdown } from "./discord-markdown.ts";
 
 // Reference (not copied): gimso2x/ompbot @ 4d2eb28d0bf66644892dc0fc333580d0eb7e7780,
 // src/discord/{adapter,attachments,channel,transport}.ts (MIT, ompbot contributors).
@@ -302,7 +303,10 @@ export class DiscordMessenger implements Messenger {
     }
   }
 
-  private payload(content: string, nonce: string, components?: Controls): MessageCreateOptions {
+  private payload(text: string, nonce: string, components?: Controls): MessageCreateOptions {
+    // Discord renders no markdown tables, so outbound tables become aligned fences.
+    // The stored OutputRecord text is never modified; only this payload changes.
+    const content = renderDiscordMarkdown(text);
     if (Buffer.byteLength(content, "utf8") > FILE_LIMIT) throw new DeliveryError("Discord text attachment exceeds the safe 8 MiB upload limit", "rejected");
     return {
       ...(content.length <= MESSAGE_LIMIT ? { content: content || "(empty output)" } : {
