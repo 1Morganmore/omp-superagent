@@ -124,7 +124,14 @@ const input = (id: string, text: string, destination: Route): Inbound => ({ id, 
 const original = input("901", "Finish the entrusted native goal, keeping the completed file effect exactly once across my restart.", route);
 const restart = input("902", "/restart", restartRoute);
 const queued = input("903", "Deliver this never-submitted queued request exactly once after the native goal finishes.", queuedRoute);
-const deliver = (message: Inbound) => fs.appendFile(path.join(root, "ingress.jsonl"), `${JSON.stringify({ kind: "message", input: message })}\n`);
+const deliver = async (message: Inbound): Promise<void> => {
+  const ingress = path.join(root, "ingress.jsonl");
+  // Count actual log positions, including raw answers and duplicate source IDs.
+  const index = (await fs.readFile(ingress, "utf8")).split("\n").filter(Boolean).length + 1;
+  await fs.appendFile(ingress, `${JSON.stringify({ kind: "message", input: message })}\n`);
+  await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "ingress-admitted" && event.index === index),
+    `Messenger admission of ${message.id} at ingress position ${index}`);
+};
 const stateOf = (id: string): InputRow | null => {
   assert(ledger);
   return ledger.query<InputRow, [string]>("SELECT state,request_id FROM inputs WHERE id=?").get(id);
