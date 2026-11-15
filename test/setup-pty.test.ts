@@ -178,9 +178,13 @@ class Terminal {
 }
 
 interface Audit {
-  phase: "launch" | "doctor";
+  phase: "launch" | "doctor" | "profile";
   argv: string[];
   hashes: Record<string, string | null>;
+  platform?: string;
+  method?: string;
+  credentialHash?: string;
+  imageHash?: string;
 }
 
 interface Fixture {
@@ -225,10 +229,13 @@ async function fixture(native: Record<string, unknown> | null = { memory: { back
   await fs.mkdir(path.join(root, "home"));
   await fs.mkdir(path.join(root, "tmp"));
   // This preload observes the real CLI, not an alternate setup/doctor implementation.
-  // All network entrypoints fail before opening a socket, including native --help.
+  // Profile SDK methods are intercepted locally; all actual network entrypoints
+  // still fail before opening a socket, including native --help.
   await fs.writeFile(guard, `
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { REST, Routes } from ${JSON.stringify(import.meta.resolve("discord.js"))};
+import { Api } from ${JSON.stringify(import.meta.resolve("grammy"))};
 import net from "node:net";
 import tls from "node:tls";
 import dgram from "node:dgram";
@@ -252,6 +259,47 @@ for (const name of ["connect", "listen", "serve"]) Bun[name] = deny("Bun." + nam
 globalThis.fetch = deny("fetch");
 globalThis.WebSocket = class { constructor() { deny("WebSocket")(); } };
 record("launch");
+const hash = value => createHash("sha256").update(value).digest("hex");
+const tokens = new WeakMap();
+const setToken = REST.prototype.setToken;
+REST.prototype.setToken = function (token) { tokens.set(this, token); return setToken.call(this, token); };
+function profile(platform, method, token, image) {
+  const at = process.argv.indexOf("--config");
+  const configPath = process.argv[at + 1];
+  if (!process.argv.includes("setup") || !existsSync(configPath) || !existsSync(configPath + ".env"))
+    return deny("profile-before-save")();
+  appendFileSync(process.env.SETUP_PTY_AUDIT, JSON.stringify({
+    phase: "profile", argv: process.argv, hashes: {}, platform, method,
+    credentialHash: hash(token), imageHash: image ? hash(image) : undefined,
+  }) + "\\n");
+  if (process.env.SETUP_PTY_PROFILE_FAILURE === platform && method !== "getMe")
+    throw new Error(token + " private profile failure");
+}
+REST.prototype.get = async function (route) {
+  if (route !== Routes.user("@me")) return deny("unexpected-discord-profile-route")();
+  profile("discord", "getMe", tokens.get(this));
+  return { id: "900", bot: true, avatar: "mascot-avatar" };
+};
+REST.prototype.patch = async function (route, options) {
+  if (route !== Routes.user("@me")) return deny("unexpected-discord-profile-route")();
+  const image = Buffer.from(options.body.avatar.split(",")[1], "base64");
+  profile("discord", "setProfile", tokens.get(this), image);
+  return { id: "900", bot: true, avatar: "mascot-avatar" };
+};
+Api.prototype.getMe = async function () {
+  profile("telegram", "getMe", this.token);
+  return { id: 900, is_bot: true, first_name: "Local bot" };
+};
+Api.prototype.setMyProfilePhoto = async function (photo) {
+  if (photo.type !== "static") return deny("unexpected-telegram-photo-type")();
+  profile("telegram", "setProfile", this.token, Buffer.from(await photo.photo.toRaw()));
+  return true;
+};
+Api.prototype.getUserProfilePhotos = async function (id, options) {
+  if (id !== 900 || options.limit !== 1) return deny("unexpected-telegram-profile-target")();
+  profile("telegram", "getProfile", this.token);
+  return { total_count: 1, photos: [[{ file_id: "mascot-photo", file_unique_id: "mascot-unique", width: 1254, height: 1254 }]] };
+};
 // Native settings imports eagerly load OMP's own dotenv, unlike setup itself.
 // Observe that real side effect rather than mocking the inspector or its wiring.
 process.on("exit", () => {
@@ -474,6 +522,7 @@ ptyTest("actual traced setup wrapper prepares all messengers privately; explicit
     expect(await Bun.file(`${context.config}.env`).exists()).toBe(false);
     expect(await fs.readFile(context.nativeConfig, "utf8")).toBe(context.nativeOriginal);
     expect(await exists(context.nativeDb)).toBe(false);
+    expect((await context.audit()).filter(row => row.phase === "profile")).toEqual([]);
     await terminal.input("y\n");
     await terminal.finished(true);
     expect(terminal.transcript()).toContain("+ set +x");
@@ -482,6 +531,21 @@ ptyTest("actual traced setup wrapper prepares all messengers privately; explicit
     expect(terminal.transcript()).toContain("later OMP startup");
     expect(terminal.transcript()).toContain("may process conversations with models and download models");
     expect(terminal.transcript()).toContain("Saved native memory.backend=mnemopi");
+    expect(terminal.transcript()).toContain("bot profile pictures with the repository mascot");
+    expect(terminal.transcript()).toContain("discord: Mascot profile picture applied");
+    expect(terminal.transcript()).toContain("telegram: Mascot upload accepted");
+    expect(terminal.transcript()).toContain("slack: Bot/app tokens cannot upload the app icon automatically");
+    expect(terminal.transcript()).toContain("Basic Information -> Display Information -> App icon");
+    const profiles = (await context.audit()).filter(row => row.phase === "profile");
+    expect(profiles.map(row => [row.platform, row.method])).toEqual([
+      ["discord", "getMe"], ["discord", "setProfile"], ["discord", "getMe"],
+      ["telegram", "getMe"], ["telegram", "setProfile"], ["telegram", "getProfile"],
+    ]);
+    const imageHash = createHash("sha256").update(await fs.readFile(path.join(repo, "assets/superagent-avatar.jpg"))).digest("hex");
+    for (const profile of profiles) {
+      expect(profile.credentialHash).toBe(hash(profile.platform === "discord" ? secrets.DISCORD_BOT_TOKEN : secrets.TELEGRAM_BOT_TOKEN));
+      if (profile.method === "setProfile") expect(profile.imageHash).toBe(imageHash);
+    }
     expect(terminal.transcript()).not.toContain(judgeRecommendation);
     expect(terminal.transcript()).not.toContain(judgeUnknown);
     expect(YAML.parse(await fs.readFile(context.nativeConfig, "utf8"))).toEqual({
@@ -864,6 +928,7 @@ ptyTest("new setup cancellation, final refusal and pre-publication conflicts nev
       expect(terminal.transcript()).not.toContain(judgeRecommendation);
       expect(terminal.transcript()).not.toContain(judgeUnknown);
       expect(await context.nativeSetupImports()).toBe(0);
+      expect((await context.audit()).filter(row => row.phase === "profile")).toEqual([]);
       expect(terminal.transcript()).not.toContain("pty-unpublished-memory-secret");
       if (action === "config-race") expect(await fs.readFile(context.config, "utf8")).toBe("external-publication\n");
       else expect(await exists(context.config)).toBe(false);
@@ -995,6 +1060,7 @@ ptyTest("existing config and blank retention ignore ambient dotenv; only named c
     expect(shellTerminal.transcript()).not.toContain(shellOnly);
     expect(shellTerminal.transcript()).not.toContain(judgeRecommendation);
     expect(shellTerminal.transcript()).not.toContain(judgeUnknown);
+    expect((await context.audit()).filter(row => row.phase === "profile").at(-1)?.credentialHash).toBe(hash(shellOnly));
     expect(await context.nativeSetupImports()).toBe(0);
     const shellProof = await doctor(context);
     expect(shellProof.observed.hashes[customName]).toBe(hash(shellOnly));
@@ -1027,6 +1093,63 @@ ptyTest("start rejects missing named credentials before ambient dotenv can activ
     await context.inert(true);
   } finally { await context.cleanup(); }
 }, 60_000);
+
+ptyTest("profile setup uses start's shell precedence and preserves saved files on ambiguous upload failure", async () => {
+  const context = await fixture();
+  try {
+    const original = await existingConfig(context);
+    const explicit = "pty-profile-explicit-shell-token";
+    const saved = "pty-profile-new-private-token";
+    context.env[customName] = explicit;
+    context.env.SETUP_PTY_PROFILE_FAILURE = "telegram";
+    const terminal = context.terminal();
+    await terminal.secret(customName, saved, true);
+    await terminal.answer("Replace existing credential values? [y/N]: ", "y");
+    await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
+    await terminal.finished(false);
+    const profiles = (await context.audit()).filter(row => row.phase === "profile");
+    expect(profiles.map(row => row.method)).toEqual(["getMe", "setProfile"]);
+    expect(profiles.every(row => row.credentialHash === hash(explicit))).toBe(true);
+    expect(terminal.transcript()).toContain("Profile update is unresolved");
+    expect(terminal.transcript()).toContain("No automatic retry");
+    expect(terminal.transcript()).toContain("Local configuration/credentials remain saved");
+    expect(terminal.transcript()).not.toContain("Mascot upload accepted");
+    expect(terminal.transcript()).not.toContain(explicit);
+    expect(terminal.transcript()).not.toContain(saved);
+    expect(await fs.readFile(context.config, "utf8")).toBe(original.config);
+    expect(parseEnv(await fs.readFile(`${context.config}.env`, "utf8"))[customName]).toBe(saved);
+    await context.inert();
+  } finally { await context.cleanup(); }
+}, 90_000);
+
+ptyTest("Slack-only setup gives the mascot app-icon step without any profile API calls", async () => {
+  const context = await fixture();
+  try {
+    const original = JSON.parse((await existingConfig(context)).config);
+    delete original.telegram;
+    original.slack = {
+      botTokenEnv: "SLACK_BOT_TOKEN", appTokenEnv: "SLACK_APP_TOKEN",
+      ownerId: "UOWNER123", teamId: "TTEAM123", allowedChannelIds: [],
+    };
+    const bytes = `${JSON.stringify(original)}\n`;
+    const tokens = "SLACK_BOT_TOKEN=pty-slack-only-bot\nSLACK_APP_TOKEN=pty-slack-only-app\n";
+    await fs.writeFile(context.config, bytes);
+    await fs.writeFile(`${context.config}.env`, tokens, { mode: 0o600 });
+    const terminal = context.terminal();
+    await terminal.secret("SLACK_BOT_TOKEN", "", true);
+    await terminal.secret("SLACK_APP_TOKEN", "", true);
+    await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
+    await terminal.finished(true);
+    expect(terminal.transcript()).toContain("Set it manually at https://api.slack.com/apps");
+    expect(terminal.transcript()).toContain(path.join(repo, "assets/superagent-avatar.jpg"));
+    expect(terminal.transcript()).not.toContain("pty-slack-only");
+    expect(terminal.transcript()).not.toContain("profile picture applied");
+    expect((await context.audit()).filter(row => row.phase === "profile")).toEqual([]);
+    expect(await fs.readFile(context.config, "utf8")).toBe(bytes);
+    expect(await fs.readFile(`${context.config}.env`, "utf8")).toBe(tokens);
+    await context.inert();
+  } finally { await context.cleanup(); }
+}, 90_000);
 
 ptyTest("terminal and parent-only signals, EOF and declined confirmations preserve files and reap readers", async () => {
   const context = await fixture();

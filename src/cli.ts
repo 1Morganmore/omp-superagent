@@ -24,7 +24,7 @@ Usage:
   omp-superagent telegram-commands --config FILE [--language CODE] [--apply]
   omp-superagent slack-commands --config FILE --manifest-token-env NAME [--apply]
 
-setup interactively prepares configuration and a private FILE.env; it never activates accounts or starts services.
+setup interactively saves configuration and a private FILE.env, then sets Discord/Telegram bot profile pictures to the repository mascot through REST APIs; it never starts messenger connections or services.
 start explicitly launches a detached Gateway and its native head, activating configured messenger connections. No install/autostart is performed.
 install enables macOS per-user startup at future login only; requires configured messenger credentials in private FILE.env and native settings/authentication under the OS account home. No immediate start or shell environment capture.
 uninstall removes only the owned login launcher; it does not stop an existing Gateway/head or remove credentials/state.

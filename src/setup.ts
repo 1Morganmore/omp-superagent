@@ -17,7 +17,10 @@ import { inspectNativeJudge } from "./setup-judge";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 class SetupCancelled extends Error {
-  constructor() { super("Setup cancelled; no files were written"); }
+  constructor(saved = false) {
+    super(saved ? "Setup cancelled after saving; local files and any completed profile changes were preserved"
+      : "Setup cancelled; no files were written");
+  }
 }
 
 // Bash owns the standard terminal password read and restoration, not a custom raw
@@ -34,9 +37,12 @@ const READ_SECRET = READ.replace("read -r value", "read -r -s value").replace("s
 class Terminal {
   private fd: number;
   private cancelled = false;
+  saved = false;
+  readonly abort = new AbortController();
   private reader?: { kill(signal: NodeJS.Signals): void; exited: Promise<number> };
   private interrupt = () => {
     this.cancelled = true;
+    this.abort.abort();
     // A signal addressed to the setup PID does not automatically reach its child.
     // Always use the trapped signal so Bash restores its own silent-read state.
     try { this.reader?.kill("SIGINT"); } catch { /* The reader may already have exited. */ }
@@ -81,7 +87,7 @@ class Terminal {
     if (!/^y(es)?$/i.test((await this.ask(`${label} [y/N]: `)).trim())) throw new SetupCancelled();
   }
 
-  check(): void { if (this.cancelled) throw new SetupCancelled(); }
+  check(): void { if (this.cancelled) throw new SetupCancelled(this.saved); }
   async close(): Promise<void> {
     if (this.reader) { this.interrupt(); await this.reader.exited; }
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, this.interrupt);
@@ -160,7 +166,7 @@ async function newConfig(terminal: Terminal, path: string): Promise<{ config: Co
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 
-/** Interactive preparation only: no account verification, activation, or service control. */
+/** Interactive configuration and profile REST setup; no messenger or service activation. */
 export async function setup(configPath: string): Promise<void> {
   const path = resolve(configPath);
   const terminal = new Terminal();
@@ -214,7 +220,15 @@ export async function setup(configPath: string): Promise<void> {
       if (!recommendMemory) console.log("Native memory settings will not be changed.");
     }
     console.log(`Configuration: ${path}\nPrivate credentials: ${path}.env`);
+    const profilePlatforms = (["discord", "telegram"] as const).filter(platform => config[platform]);
+    if (profilePlatforms.length) {
+      console.log(`After saving, replace the configured ${profilePlatforms.join("/")} bot profile pictures with the repository mascot: ${join(root, "assets", "superagent-avatar.jpg")}`);
+      console.log("This uses profile REST APIs only; no Gateway, polling, messages, or native model session is started.");
+    }
     await terminal.confirm("Write configuration/credentials?");
+    // Snapshot the same environment-over-file precedence used by start before
+    // native settings imports can populate unrelated dotenv values.
+    const profileCredentials = Object.fromEntries(credentialEnvNames(config).map(name => [name, process.env[name] || values[name]!]));
     // Deliver pending cancellation before entering the synchronous commit section.
     await yieldToSignals();
     terminal.check();
@@ -236,6 +250,7 @@ export async function setup(configPath: string): Promise<void> {
       }
       throw error;
     }
+    terminal.saved = true;
     console.log(`Saved configuration: ${path}\nPrivate credentials: ${path}.env (0600)`);
     if (recommendMemory) {
       const memory = await saveMnemopiPreference(config.headCwd);
@@ -263,6 +278,22 @@ export async function setup(configPath: string): Promise<void> {
         console.log("In an ordinary native OMP terminal opened in the head workspace, open /models, choose Roles -> Judge, and assign a native judgment model. Use the intended global/project storage scope and review any overriding native config overlay; do not use a messenger-managed session or read-only attach to persist this setting.");
         console.log("This is configuration-only advice: selector presence does not prove model or authentication availability. Setup did not select a model, open account storage, or call a model/provider.");
       }
+    }
+    if (profilePlatforms.length) {
+      terminal.check();
+      const { setupBotProfiles } = await import("./setup-profiles");
+      const profiles = await setupBotProfiles(config, profileCredentials, { signal: terminal.abort.signal });
+      for (const profile of profiles) {
+        console.log(`${profile.platform}: ${profile.message}`);
+        if (profile.status === "failed") process.exitCode = 1;
+      }
+      if (profiles.some(profile => profile.status === "failed"))
+        console.log("Local configuration/credentials remain saved; profile setup is incomplete. Inspect the bot profile before running setup again.");
+      terminal.check();
+    }
+    if (config.slack) {
+      console.log("slack: Bot/app tokens cannot upload the app icon automatically. Set it manually at https://api.slack.com/apps -> your app -> Basic Information -> Display Information -> App icon.");
+      console.log(`Slack app icon file: ${join(root, "assets", "superagent-avatar.jpg")}`);
     }
     const cli = `${shellQuote(process.execPath)} --no-env-file ${shellQuote(join(root, "src", "cli.ts"))}`;
     console.log(`Next: ${cli} doctor --config ${shellQuote(path)}\nStart explicitly: ${cli} start --config ${shellQuote(path)}`);

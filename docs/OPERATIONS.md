@@ -725,9 +725,32 @@ OMP 라이브러리 자체의 프로젝트 dotenv 해석은 Bun의 자동 로딩
 명시적으로 정리한다. 초기 파일 공개 도중 남은 owner-only staging hard link는 기존 비밀
 파일을 읽지 못하게 만들지 않으며, 읽기 과정에서 임의로 삭제하지 않는다.
 
-셋업은 봇 로그인·연결·메시지 전송·Gateway 시작/재시작·서비스 등록·셸 설정 변경을 하지 않는다.
+셋업은 상주 봇 연결·메시지 전송·Gateway 시작/재시작·서비스 등록·셸 설정 변경을 하지 않는다.
 저장 뒤 별도로 `doctor`, 이후 원하는 시점에 `start`를 실행한다. 실제 토큰 유효성·플랫폼
-권한은 로컬 준비만으로 검증된 것이 아니다. 기존 환경변수 전용 실행도 계속 지원한다.
+권한 전체는 로컬 준비만으로 검증된 것이 아니다. 기존 환경변수 전용 실행도 계속 지원한다.
+
+최종 저장 질문 바로 앞에서 Discord/Telegram 프로필 사진을 저장소 시그니처 마스코트로
+교체함을 알린다. 저장 확인 뒤 로컬 파일 저장이 성공하면, 새 구성·기존 자격 증명 갱신 모두
+`assets/superagent-avatar.jpg`를 자동 업로드한다. 원본 WebP에서 흰 배경 JPG로 변환한
+배포 자산이므로 별도 이미지 변환 도구를 설치할 필요는 없다.
+[Discord Modify Current User](https://docs.discord.com/developers/resources/user#modify-current-user)와
+[Telegram setMyProfilePhoto](https://core.telegram.org/bots/api#setmyprofilephoto)만 사용하며
+Gateway·polling·Socket Mode·OMP 세션을 시작하거나 메시지를 보내지 않는다. `doctor`는
+이 API를 호출하지 않는다. 저장 전 거절·취소·저장 충돌이면 프로필 호출도 없다.
+
+대상은 입력된 credential 이름에 대해 start와 동일한 셸 우선순위로 결정된다. 셸에 기존
+토큰이 남아 있으면 새 파일 값 대신 그 토큰의 봇 사진이 바뀐다는 뜻이다. 실제 bot 신원을
+확인한 뒤 업로드하고 Discord는 반환 avatar ID를 GET과 대조하며 Telegram은 성공 응답과
+`getUserProfilePhotos`의 현재 사진을 확인한다. Telegram 사진의 바이트 동일성은 확인하지
+않는다. 실패하면 CLI가 비정상 종료하고 로컬 저장은 보존하며, 토큰·원시 API 오류는 출력하지
+않는다. 일부 플랫폼에는 이미 적용되었을 수 있으므로 실제 사진을 확인한 뒤 셋업 재실행을
+결정한다. 자동 재시도는 없으며 취소 시 진행 중인 요청을 중단하고 다음 플랫폼을 호출하지 않는다.
+
+Slack은 [users.setPhoto](https://docs.slack.dev/reference/methods/users.setPhoto/)가 사용자 토큰의
+사진을 변경하는 API이고 현재 bot/app 토큰으로 앱 아이콘을 업로드하는 공식 API는 없다.
+Slack을 설정했다면 셋업 마지막에 `https://api.slack.com/apps` → 해당 앱 → **Basic Information →
+Display Information → App icon**에서 같은 JPG를 수동 업로드하도록 경로를 출력한다.
+메시지별 아이콘을 프로필 사진 자동 설정이라고 가장하거나 사용자의 개인 사진을 변경하지 않는다.
 
 처음 새 구성을 만들 때는 **Mnemopi 장기 기억 사용을 권장**하고 동의를 묻는다. 명시적인
 `y`/`yes`를 선택하고 최종 저장까지 승인하면 native OMP의 **전역 `memory.backend: mnemopi`**
@@ -1259,6 +1282,7 @@ managed extension 중복/disabled 처리, 비차단 updater startup과 native bi
 
 | 검증 항목 | 현재 결과 |
 | --- | --- |
+| 2026-11-15 셋업의 마스코트 프로필 자동 적용 | Bun 1.4.4에서 `tsc --noEmit` 통과. setup-profiles/실제 setup PTY 2파일 30개·56,311 assertion 통과·31.69초: 저장 후 Discord/Telegram 업로드·재조회, 실제 grammY JPG multipart, 비밀 비노출·재시도 없음, 저장 전 취소/충돌의 무호출, 셸 우선순위, 업로드 실패 시 로컬 저장 보존, doctor의 비활성화를 확인했다. Slack 수동 안내 추가 후 최종 타입 검사와 전체 플랫폼/Slack-only PTY 2개·1,276 assertion 통과·1.02초(앞 묶음과 중복하므로 합산하지 않음). 최초 multipart 파일명 quoting 기대 오류는 SDK 출력에 맞게 수정했고, 설치 미완료 Bun npm placeholder는 기존 postinstall 실행으로 정상화했다. 실제 controlling terminal·격리 native 설정·합성 토큰·SDK 경계 범위이며 운영 봇 프로필/API·Gateway는 호출/변경하지 않았다. |
 | 2026-11-15 근거 기반 same-HEAD 자동 복구 | 최종 Bun 1.4.4 타입 검사와 runtime/store/skills/Gateway/Discord commands/Slack/Telegram 7파일 546개·4,591 assertion 통과. 격리된 실제 Gateway·native HEAD `recovery` 시나리오 1개·3.12초 통과: 동일 PID·세션·모델, 원본 native write 1회, 복구 판단 중 후속 보류, 실제 `head_recovery` 호출 뒤 native receipt 확인·후속 실행, receipt 없는 제출의 무재실행 보류, 금지 write의 실제 native 거절, 운영자 `/resolve`, 중복 무재전송과 network 0을 확인했다. 초기 스킬 fixture 도구목록·시작 시 통지 전달 순서·native 해제 거부를 수정했고, 결정 제안과 native 종료 후 최종 확정을 분리했다. 제안 이후 종료·재연결·외부 효과 불확실성·늦은 다른 실행·운영자 중단·원래 승인/goal 신원은 회귀로 검증했다. 독립 최종 리뷰의 기존 두 발견 사항을 해소했다. 전체 root suite·운영 메신저 계정·유료 제공자·실서비스 배포/재시작은 실행하지 않았다. |
 | 2026-11-15 PR #1 수동 보류 해제 보완 | 보완 커밋 `731dab9892`를 포함해 PR #1을 `85da9e7`로 병합했다. 최신 main과 통합한 상태에서 Bun 1.4.4 타입 검사, runtime/Slack/Discord commands/store/Telegram 5파일 448개·3,967 assertion 통과. 취소 후 live 접수 정리, busy/미확인 native 보존, steering 소유자 취소, 중간 재시작의 대상 고정, Slack 명령 정규화를 검증했다. 운영 메신저·배포·재시작은 하지 않았으며 뒤의 자동 복구 기능 검증과 별개다. |
 | 2026-11-15 Dori PR 비교 후 버그·높음 후보 반영 | Bun 1.4.4에서 대상 8파일을 서로 겹치지 않는 2묶음으로 실행: Discord/Telegram 122개·1,248 assertion, repository/Slack/runtime/store/Gateway/managed-ULW 431개·3,531 assertion 통과. 타입 검사 통과. 실제 native Gateway `valid` 시나리오 1개·2.73초에서 원래 head와 명시적 lane의 journal에 답장 스냅샷이 남고 인용된 `/restart`·ULW 이름이 권한을 얻지 않는 것을 확인했다. 공식 immutable ULW `22a8cfe89447a1cd55f2fd004d81e164372738a5`의 별도 offline 합성에서 일반·명시적 활성화 각 2턴, 메모리 세션·network 0 확인. 최초 native 실행은 기존 command의 Bun 경로 누락으로 실패했으며 기존 lockfile의 로컬 toolchain을 `npm ci --ignore-scripts`로 준비한 뒤 실제 패키지 binary로 검증했다. 최초 타입 오류는 probe narrowing과 SDK/native fixture 타입을 수정했다. 앞선 Bun 1.4.2 예비 실행은 이 지원 런타임 결과에 합산하지 않는다. 실제 메신저 계정·유료 제공자·운영 Gateway/HEAD 재시작·프로덕션 active pointer 변경은 수행하지 않음 |

@@ -75,6 +75,13 @@ tokens without echoing them. Tokens go into owner-only `config.local.json.env` (
 not JSON or command arguments. Existing valid JSON is preserved; credential changes
 require confirmation. No bot is started.
 
+Saving setup also replaces configured Discord/Telegram bot profile pictures with
+the repository mascot (`assets/superagent-avatar.jpg`). The final save prompt
+covers this REST-only change; cancellation before saving makes no profile calls.
+Setup reports upload/readback failures without retrying and keeps saved local files.
+Slack's bot/app tokens cannot set the app icon; setup prints the same mascot file
+and the app-settings step for manual upload instead.
+
 First-time setup recommends Mnemopi persistent memory. Only explicit `yes` plus
 final save confirmation sets native OMP's global `memory.backend` to `mnemopi`;
 declining or refreshing credentials leaves it untouched. Existing memory options
@@ -114,7 +121,8 @@ bun --no-env-file src/cli.ts start --config config.local.json
 On first startup, missing native `high`/`middle`/`low` presets are initialized in a
 dedicated turn of the same head, before ordinary work. Existing presets are preserved.
 `status` distinguishes preset initialization from transport readiness; incomplete or
-failed initialization is not reported as ready. `setup` and `doctor` remain offline.
+failed initialization is not reported as ready. Neither `setup` nor `doctor` starts
+a bot/model session; only setup makes the profile REST calls described above.
 
 Attach a read-only native TUI to the same head:
 

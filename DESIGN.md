@@ -350,7 +350,24 @@ OMP 라이브러리의 programmatic dotenv 로딩은 별도이므로 setup/docto
 모듈을 import하지 않는다. start는 선택한 자격 증명의 필수 검사를 마친 뒤에만 Gateway를
 로드해 누락된 토큰을 ambient 프로젝트 dotenv가 대신 채워 실행시키지 못하게 한다.
 평문 파일·같은 OS 사용자라는 한계는 유지하며 새 인증 엔진·보안 샌드박스를 주장하지 않는다.
-셋업·doctor는 실제 계정 연결이나 토큰 유효성 검증이 아니고 명시적 start 경계를 유지한다.
+doctor는 실제 계정 연결이나 토큰 유효성을 검사하지 않는다. 셋업은 아래 프로필 설정용
+REST 호출만 하며 Gateway·polling·Socket Mode·모델 세션을 활성화하지 않는다.
+
+최종 저장 확인 전에 구성된 Discord/Telegram 봇 사진을 저장소의 시그니처 마스코트로
+교체함을 알린다. 로컬 저장 성공 뒤 기존 SDK의 Discord `PATCH /users/@me`와 grammY의
+Telegram `setMyProfilePhoto`를 한 번씩 호출한다. JPG만 받는 Telegram을 위해 원본
+`assets/superagent-mascot.webp`에서 만든 `assets/superagent-avatar.jpg`를 함께 배포하며
+런타임 이미지 변환 의존성이나 새 avatar 설정 키를 추가하지 않는다. 최종 확인 전 취소나
+로컬 저장 실패에는 프로필 조회·변경이 없다. 기존 구성 갱신에도 같은 동작을 적용한다.
+자격 증명은 native 설정 import 전에 start와 같은 셸 우선순위로 snapshot하여 native
+dotenv가 대상 봇을 바꾸지 못하게 한다. 실제 bot 신원 확인 뒤 변경하며 Discord는 PATCH의
+avatar ID와 재조회 결과를 대조하고 Telegram은 성공 receipt와 현재 photo 존재를 확인한다.
+Telegram의 재인코딩된 이미지와 업로드 원본의 바이트 동일성까지 검증한다고 주장하지 않는다.
+플랫폼별 실패·불확실한 효과는 비밀 없이 알리고 자동 재시도하지 않는다. 다른 플랫폼은
+독립적으로 설정하되 취소하면 후속 API를 중단하며 저장한 로컬 파일은 자동 롤백하지 않는다.
+Slack은 구성된 bot/app 토큰으로 앱 아이콘을 업로드하는 공식 API가 없으므로 자동 적용하지
+않고 앱 설정의 Basic Information → Display Information → App icon과 같은 JPG 경로를
+안내한다. 사용자 사진용 `users.setPhoto`나 메시지별 `icon_url`로 봇 프로필 변경을 가장하지 않는다.
 
 새 구성의 최초 셋업은 native Mnemopi 장기 기억을 권장하되 명시적인 `yes` 동의와 최종 저장
 확인 뒤에만 OMP 전역 `memory.backend`를 `mnemopi`로 저장한다. Enter·거절·취소는 변경하지

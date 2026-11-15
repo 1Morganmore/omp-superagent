@@ -7,7 +7,8 @@
 ## README 로고 — oh-my-pi 시각 자산의 변형
 
 - 참조 원본: [oh-my-pi README hero](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/hero.png).
-- 적용 파일: `assets/superagent-mascot.webp`. 원본 hero를 이미지 생성 모델
+- 적용 파일: `assets/superagent-mascot.webp`와 이 파일을 흰 배경 JPG로 변환한 봇 프로필용
+  `assets/superagent-avatar.jpg`(`sips -s format jpeg`로 원본 크기 유지). 원본 hero를 이미지 생성 모델
   `gpt-image-2`의 참조 이미지로 사용해 π 실루엣·핑크/보라 색상을 살린 마스코트를 생성했다.
   바이저·눈·짧은 망토를 추가하고,
   [원본 icon.svg](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/icon.svg)의
@@ -87,6 +88,9 @@ SOFTWARE.
   [ompbot `4d2eb28d0bf66644892dc0fc333580d0eb7e7780`](https://github.com/gimso2x/ompbot/tree/4d2eb28d0bf66644892dc0fc333580d0eb7e7780)의
   `src/discord/{adapter,attachments,channel,transport}.ts` 동작 의미를 참고했다.
   이 revision의 ompbot은 MIT이며 해당 파일들을 복사한 것은 아니다.
+- `src/setup-profiles.ts`는 같은 설치 버전 `14.28.1`의 공개 `REST.get/patch`와 `Routes.user`
+  API를 사용한다. [Modify Current User](https://docs.discord.com/developers/resources/user#modify-current-user)의
+  image-data 업로드와 User 응답 계약을 2026-11-15에 확인했다. 외부 avatar 구현을 복사하지 않았다.
 - 라이선스 없는 poke 코드는 복사하지 않았다. Dori의 SUL 적용 코드도 가져오지 않았다.
   운영 개념을 참고한 사실은 코드의 재라이선스나 복사 허가를 뜻하지 않는다.
 
@@ -124,7 +128,11 @@ SOFTWARE.
 - 재사용 API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553)
 - 패키지 출처 git revision: `055a5a440f04d0b9fd5fd75a6d14dac4c2b83553`.
   실제 설치 버전은 `node_modules/grammy/package.json`, 고정 의존성은 `bun.lock`을 따른다.
-- `src/telegram.ts`에서 `Api`·`InputFile`을 사용한다. 별도 Telegram 봇/SUL 구현을 복사하지 않았다.
+- `src/telegram.ts`와 `src/setup-profiles.ts`에서 `Api`·`InputFile`을 사용한다. 별도 Telegram
+  봇/SUL 구현을 복사하지 않았다. `1.46.0`의 `Api.setMyProfilePhoto` 구현과
+  [공식 메서드](https://core.telegram.org/bots/api#setmyprofilephoto)·
+  [JPG multipart 계약](https://core.telegram.org/bots/api#inputprofilephotostatic)을
+  2026-11-15에 확인했다. 별도 raw Bot API client나 이미지 변환 의존성을 추가하지 않았다.
 - 공식 문서: [grammY API](https://grammy.dev/guide/api),
   [Telegram Bot API](https://core.telegram.org/bots/api).
 - 설치 패키지의 `node_modules/grammy/LICENSE`는 다음 MIT 전문이다. 패키지를 포함해 배포할 때
