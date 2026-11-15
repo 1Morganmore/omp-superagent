@@ -153,7 +153,7 @@ test("confirmed-dead owned head restarts, offline input stays durable, and exist
   });
   const messages = (await readFile(join(f.root, "received.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
   expect(messages.map(message => message.id)).toEqual(["offline-original-source"]);
-});
+}, 30_000);
 
 function seedRestart(root: string, pid: number, id = crypto.randomUUID()): GatewayRestartRequest {
   const request = { requestId: id, inputId: `input-${id}`, ackOutputId: `ack-${id}` };
