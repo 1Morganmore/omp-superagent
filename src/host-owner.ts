@@ -42,6 +42,8 @@ if (!await fs.stat(options.sessionFile).then(() => true, error => {
     session.flushSync();
   } finally { await session.close(); }
 }
+const { publishNativeSession } = await import("./native-sessions");
+await publishNativeSession(options.sessionFile, options.cwd);
 const child = spawn(options.command[0]!, [...options.command.slice(1), ...args], {
   cwd: options.cwd, env: { ...environment, OMP_SUPERAGENT_HOST_SOCKET: options.socketPath,
     OMP_SUPERAGENT_NATIVE_SOCKET: nativeSocket, OMP_SUPERAGENT_HOST_CONFIG: configPath },

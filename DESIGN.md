@@ -1,41 +1,12 @@
 # omp-superagent 설계
 
-상태: **별도로 설치한 수정 없는 OMP**와 공개 확장 API를 사용한다. 최소 OMP 18.20.2,
-동일 major 18 범위를 지원하며 테스트 기준선은 18.20.2의 소스 revision
-`7c49c11aa5bbaf3f418406583096168ad5b8c6dc`다. OMP 소스 준비·코어 패치·native 빌드는
-하지 않는다. **Gateway → 단일 헤드 기동, 모든 입력의 헤드 경유, 역할별 확장 분리,
-공유 정보 게시판**과 아래 안전·권한 계약을 유지한다. 2026-11-16 macOS arm64에서
-Bun 1.4.4와 공식 OMP 18.20.2 실행 파일로 `bun run test:ci`를 실행해 타입 검사와
-40개 파일의 963개 테스트·66,581 assertion이 모두 통과했다. 검증 범위와 미검증 항목은
-[운영 가이드](docs/OPERATIONS.md#6-개발자-검증)에 기록한다.
-
-**이전 소스 기준선의 검증 이력:** 아래 도입부의 수치는 OMP 18.20.0
-`c308970263ae13744ea15ab67302e3dac840e266`에 프로젝트 코어 패치를 적용한 경로의
-기록이다. 삭제된 패치·CLI flag·TUI attach의 현재 지원이나 stock 18.20.2 호환성 증거가
-아니다. 기존 runtime 통합은 최종 검증 담당자가 root 타입 검사, Gateway/
-board/Host/스킬·runtime/store의 아래 범위 회귀와 실제 native runtime·모델 선택·board·Gateway
-E2E 경로를 확인했다. 이는 기존 통합 기록이다. 당시 변경은 최종 담당자가 root 타입 검사,
-전체 root 회귀 345개 통과·7개 skip·0개 실패·2,542 assertion(Bun 1.4.4), native core managed-
-extension/discovery 80개·235 assertion과 공식 ULW 설치 CLI를 확인했다. 실제 managed ULW 활성화
-1개 통과·3.50초, 수정된 native Gateway/runtime/model 기준선 3개·217 assertion과 앞선 native
-프롬프트 조합·Host/TUI/board 17개 통과도 확인했다. 마지막 bind→chmod readiness 수정 뒤에는
-Host 15개·58 assertion과 최종 tsc를 확인했으며 그 뒤 전체 root 재실행으로 확대하지 않는다.
-정확한 실행 묶음·중복 가능성·수치·남은 제한은
-[운영·설치 가이드의 검증 이력](docs/OPERATIONS.md#6-개발자-검증)을 따른다. 기존 native RPC/TUI·플랫폼 기록도 당시 범위로만 보존하며 새 경로의
-통과 증거로 재사용하지 않는다.
-운영 메신저 로그인·herdr 제어는 미수행이며 이번 작업에서 봇을 활성화하지 않는다.
-실제 제공자 호출·비용의 기존 미확인 사고도 [운영·설치 가이드](docs/OPERATIONS.md)의 제한을 그대로 유지한다.
-조사 기준일: 2026-11-13.
-
-후속 Dori PR 비교에서 Git 저장소 탐색·Telegram 크기 미상 첨부·Discord 무내용 입력을 수정하고,
-답장/음성 문맥과 ULW 활성화 전 실제 프롬프트 합성 검사를 독립 구현했다. Bun 1.4.4에서 대상
-8파일 553개·4,779 assertion과 타입 검사, 실제 native Gateway→head→lane 답장 문맥 1개,
-공식 managed ULW의 offline 합성(일반/활성화 각 2턴·network 0)을 확인했다. 전체 suite나
-실계정·운영 재시작 검증으로 확대하지 않으며 아래 계약과 운영 가이드의 해당 검증 행을 따른다.
-
-이후 PR #45/#46의 근거 기반 관측·구조화 대기·시각 보존을 기존 native journal/SQLite/report
-경로에 독립 구현했다. 타입 검사·대상 회귀의 실패 수정 재검증과 격리 native Gateway의
-대기→`/status`→eval 내부 근거 보고→헤드 전달을 확인했으며, 정확한 묶음과 제한은 운영 가이드를 따른다.
+이 문서는 **현재 구조와 안전·권한 계약**을 정의한다. 별도로 설치한 수정 없는
+OMP >= 18.20.2, < 19와 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
+하지 않는다. 테스트 기준선은 stock OMP 18.20.2 소스 revision
+`7c49c11aa5bbaf3f418406583096168ad5b8c6dc`다.
+설치·일상 제어는 [운영 가이드](docs/OPERATIONS.md), 날짜·환경별 실행 결과와 이전 패치된
+18.20.0의 제한된 증거는 [릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records)에 둔다.
+설계 계약이나 과거 통과 기록을 현재 운영 계정·제공자·attach 지원의 검증으로 해석하지 않는다.
 
 ## 1. 목표와 기본 결정
 
@@ -55,7 +26,7 @@ Host 15개·58 assertion과 최종 tsc를 확인했으며 그 뒤 전체 root �
 - 모든 요청을 위임하지 않는다. 메인 헤드와 레인 모두 일반 OMP 작업 능력을 유지한다.
 - 저장된 세션 수와 상주 실행 수를 분리한다.
 - 실행은 herdr 없이 동작한다. 관리 RPC 세션에 같은 프로세스의 native TUI/herdr를
-  붙이는 기능은 지원하지 않는다. 로그 tail이나 두 번째 `--resume` writer로 대체하지 않는다.
+  붙이는 기능은 지원하지 않는다. 로그 tail·별도 resume 세션을 동일 Host attach로 표시하지 않는다.
 - RPC용 실행과 관측용 실행을 별도 AI 백엔드로 만들지 않는다.
 - 자체 대시보드, 새로운 모델·인증·컴팩션·서브에이전트 엔진은 만들지 않는다.
 - 명시적 `start`가 하나의 detached **Gateway**를 기동하고 Gateway가 정확히 하나의 지정 헤드를
@@ -156,6 +127,9 @@ owner는 stdio transport와 비공개 재연결 socket만 유지하며 두 번�
 확장, 레인은 `src/lane-extension.ts`와 공통 게시판 확장을 로드한다. 일반 OMP에 전역 설치하지
 않는다. 각 관리 Host는 관리형 ULW package도 시작 시 해석한 정확한 revision 경로로 로드한다.
 native 자식에는 manager/board 권한이 없고 기존 active-tool 제외와 실행 시 거부를 유지한다.
+프로젝트 루트도 `-e` 리소스 경로로 전달한다. 코드 진입점 없는 리소스 패키지이므로 역할
+스킬을 native package discovery로 제공하되 봇 확장을 중복 실행하지 않는다. 사용자·프로젝트
+스킬 경로를 덮어쓰거나 별도 스킬 레지스트리를 만들지 않는다.
 
 관리형 ULW는 충돌이 없으면 일반 native discovery로 조합한다. 같은 identity의 다른 ULW root가
 있으면 공개 stock discovery로 무관한 리소스를 열거하고 명시적으로 선택해 managed factory의
@@ -358,79 +332,26 @@ rejected로 조정하며 이미 소비된 승인/외부 효과를 취소했다�
 
 ### 플랫폼 인증·운영 설정
 
-설치·권한·토큰 입력 절차와 공식 API 문서 링크는 [운영·설치 가이드의 플랫폼별 설정](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위)을 따른다.
-토큰은 JSON/argv 대신 이름이 지정된 환경변수로만 전달한다.
+플랫폼 앱·권한은 [운영 가이드의 플랫폼별 설정](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위),
+셋업·프로필 사진·Mnemopi·judge 권장 절차와 저장 효과는
+[설정 절](docs/OPERATIONS.md#3-설정)을 따른다. JSON/argv에 토큰 값을 넣지 않는다.
 
-`bash scripts/setup.sh`는 새 구성의 플랫폼·소유자·허용 대화·경로를 묻고 토큰을 숨김
-입력으로 받는다. JSON에는 기존 `tokenEnv` 계열 이름만 저장하고 비밀 값은 명시적 저장
-확인 뒤 `<config 경로>.env`(`0600`)에 분리한다. 기존 유효한 JSON은 보존한다.
-CLI `start`/`doctor`만 표준 dotenv parser로 구성된 자격 증명 이름을 읽으며 비어 있지 않은
-셸 환경값이 우선한다. shell source/eval이나 Bun의 기본 `.env` 자동 로딩을 사용하지 않는다.
-래퍼·권장 CLI 호출·새 native command에는 `--no-env-file`을 사용한다. 기존 설정은 자동으로
-재작성하지 않으므로 수동 Bun 호출에서 이 옵션을 생략한 경우의 사전 dotenv 로딩까지
-애플리케이션 loader가 취소한다고 주장하지 않는다.
-OMP 라이브러리의 programmatic dotenv 로딩은 별도이므로 setup/doctor에서는 runtime
-모듈을 import하지 않는다. start는 선택한 자격 증명의 필수 검사를 마친 뒤에만 Gateway를
-로드해 누락된 토큰을 ambient 프로젝트 dotenv가 대신 채워 실행시키지 못하게 한다.
-평문 파일·같은 OS 사용자라는 한계는 유지하며 새 인증 엔진·보안 샌드박스를 주장하지 않는다.
-doctor는 실제 계정 연결이나 토큰 유효성을 검사하지 않는다. 셋업은 아래 프로필 설정용
-REST 호출만 하며 Gateway·polling·Socket Mode·모델 세션을 활성화하지 않는다.
+셋업은 owner-only sibling 환경 파일에 구성된 credential만 저장한다. `start`·`doctor`의
+제한된 loader는 비어 있지 않은 셸 값을 우선하며 shell source/eval을 하지 않는다.
+Bun의 자동 dotenv와 OMP 라이브러리의 dotenv는 별개다. 전자는 `--no-env-file`로 끄고,
+셋업·진단은 후자를 import하지 않는다. start는 선택한 credential 검사 뒤 Gateway를 로드한다.
+이미 옵션 없이 읽힌 환경을 나중에 취소할 수 있다는 보장이나 OS 보안 격리는 없다.
 
-최종 저장 확인 전에 구성된 Discord/Telegram 봇 사진을 저장소의 시그니처 마스코트로
-교체함을 알린다. 로컬 저장 성공 뒤 기존 SDK의 Discord `PATCH /users/@me`와 grammY의
-Telegram `setMyProfilePhoto`를 한 번씩 호출한다. JPG만 받는 Telegram을 위해 원본
-`assets/superagent-mascot.webp`에서 만든 `assets/superagent-avatar.jpg`를 함께 배포하며
-런타임 이미지 변환 의존성이나 새 avatar 설정 키를 추가하지 않는다. 최종 확인 전 취소나
-로컬 저장 실패에는 프로필 조회·변경이 없다. 기존 구성 갱신에도 같은 동작을 적용한다.
-자격 증명은 native 설정 import 전에 start와 같은 셸 우선순위로 snapshot하여 native
-dotenv가 대상 봇을 바꾸지 못하게 한다. 실제 bot 신원 확인 뒤 변경하며 Discord는 PATCH의
-avatar ID와 재조회 결과를 대조하고 Telegram은 성공 receipt와 현재 photo 존재를 확인한다.
-Telegram의 재인코딩된 이미지와 업로드 원본의 바이트 동일성까지 검증한다고 주장하지 않는다.
-플랫폼별 실패·불확실한 효과는 비밀 없이 알리고 자동 재시도하지 않는다. 다른 플랫폼은
-독립적으로 설정하되 취소하면 후속 API를 중단하며 저장한 로컬 파일은 자동 롤백하지 않는다.
-Slack은 구성된 bot/app 토큰으로 앱 아이콘을 업로드하는 공식 API가 없으므로 자동 적용하지
-않고 앱 설정의 Basic Information → Display Information → App icon과 같은 JPG 경로를
-안내한다. 사용자 사진용 `users.setPhoto`나 메시지별 `icon_url`로 봇 프로필 변경을 가장하지 않는다.
+셋업 최종 저장은 고지한 Discord/Telegram 봇 프로필 변경 REST 호출을 포함한다. Mnemopi
+전역 backend 변경은 별도 명시적 동의도 요구한다. 로컬 저장·프로필 적용·실효 기억 설정을
+구분하고 실패한 외부 효과를 자동 재시도하지 않는다. setup·doctor는 상주 메신저 연결이나
+모델 세션을 시작하지 않으며 doctor는 토큰 유효성·실제 계정 권한을 검증하지 않는다.
 
-새 구성의 최초 셋업은 native Mnemopi 장기 기억을 권장하되 명시적인 `yes` 동의와 최종 저장
-확인 뒤에만 OMP 전역 `memory.backend`를 `mnemopi`로 저장한다. Enter·거절·취소는 변경하지
-않고 기존 구성의 자격 증명 갱신에서는 다시 묻지 않는다. native 설정 API로 이 키만 변경하고
-재조회하며 다른 backend 옵션·모델·스코프·기존 기억을 보존한다. 프로젝트 override 등으로
-실효 설정이 다르면 전역 저장과 실제 활성 설정을 구분해 알린다. 로컬 구성 저장 뒤 메모리 설정이
-실패해도 로컬 저장을 취소한 것처럼 말하지 않는다. native 설정 import는 자격 증명 접수·저장
-뒤로 지연하며 셋업 자체는 메모리 backend·모델·서비스를 시작하지 않는다. 기억은 대화 이후에도
-남고 기존 native 옵션에 따라 모델 처리·다운로드가 발생할 수 있으며, 전역 선택은 다른 OMP
-세션에도 영향을 줄 수 있다.
-
-새 구성이 성공적으로 저장된 뒤에는 head 작업 디렉터리의 native 설정을 읽기 전용으로
-확인한다. 실효 `judge` 역할이 미설정이면 일반 OMP의 `/models` → Roles → Judge에서 지정하도록
-권장한다. 기존 전역·프로젝트·overlay의 선택과 별칭/선택자 체인은 보존하고, Mnemopi 동의
-여부와 무관하게 확인한다. 판독 실패는 미설정으로 단정하지 않고 확인 불가로 알린다.
-쉼표와 공백뿐인 선택자 체인은 미설정이다. 현행 전역 설정 파일 없이 legacy 설정만 남아
-실효 역할을 판정할 수 없으면 확인 불가로 알린다. 파일 존재 여부만 확인하며 legacy 설정이나
-계정 DB를 열거나 이관하지 않는다. 명시적인 상위 layer의 역할 선택·해제는 그대로 따른다.
-이 권장은 judge 모델·fallback·timeout을 자동 변경하거나 인증 DB·모델을 호출하지 않는다.
-설정 존재 확인은 실제 모델 가용성·인증·judge 호출 성공 검증이 아니다. 기존 구성의 토큰 갱신과
-취소·저장 실패에는 이 검사를 실행하지 않는다.
-
-| 플랫폼 | 설정 및 실제 권한 경계 |
+| 플랫폼 | 실제 인증·수신 경계 |
 | --- | --- |
-| Discord | `tokenEnv`, 숫자 `ownerId`, `allowedGuildIds`, `allowedChannelIds`. bot/Gateway 계정과 소유자를 확인하며 서버·부모 채널 allowlist를 모두 요구. 소유자 1:1 DM은 별도 허용 |
-| Telegram | `tokenEnv`, 양수 사용자 `ownerId`, 음수 그룹 `allowedChatIds`. `getMe`로 실제 bot ID 확인. 소유자 private chat 또는 허용 group/supergroup의 직접 소유자 메시지만 수락. 익명·봇·forward/via_bot/business 신원 불허 |
-| Slack | `botTokenEnv`(`xoxb`), `appTokenEnv`(`xapp`, `connections:write`), `ownerId`, `teamId`, `allowedChannelIds`. `auth.test` bot/workspace와 `users.info` 활성 인간 소유자 대조. `conversations.info`로 실제 1:1 DM 소유자/채널 membership을 확인하며 그룹 DM 불허 |
-
-Telegram은 public webhook endpoint 없이 polling한다. 이미 활성 webhook이 있으면 **거부**하고
-자동 삭제·교체하지 않는다. 그룹 가시성은 BotFather Privacy Mode/관리자 설정에 달려 있고,
-supergroup forum 생성에는 `can_manage_topics`가 필요하다. private topic은 getMe가 해당 기능을
-알려준 봇에서만 native thread로 인정한다. private `/new`의 접수 경계는 논리 주제로
-기록하지만 헤드가 레인을 연결할 때 native topic 지원 여부를 확인해 실제 topic을 우선 생성한다.
-
-Slack은 Socket Mode·Interactivity·`message.channels/groups/im` 구독으로 공개 endpoint 없이
-동작한다. bot scopes는 `chat:write`, `users:read`, `files:read/write`와 사용하는 대화 유형별
-`channels:read/groups:read/im:read`, `channels:history/groups:history/im:history`다.
-`conversations.replies`는 현재 공식 문서의 bot history scope를 따른다. 폐기된 bot-thread
-조회 제한이나 `files.upload`에 의존하지 않는다. 등록된 `/superagent-*` 명령도 같은
-Socket Mode 연결로 수신하며 별도 공개 HTTP endpoint를 만들지 않는다.
+| Discord | 실제 bot/Gateway 계정·숫자 owner ID를 확인. 서버·부모 채널 allowlist를 모두 요구하며 소유자 1:1 DM은 별도 허용 |
+| Telegram | `getMe`의 bot ID와 실제 소유자를 확인. 허용 그룹의 직접 소유자 메시지만 수락하며 익명·봇·forward/via_bot/business 신원을 권한으로 쓰지 않음. long polling을 사용하고 기존 webhook은 자동 제거하지 않음 |
+| Slack | `auth.test`의 bot/workspace·`users.info`의 활성 인간 소유자·실제 membership을 대조. 그룹 DM 불허. 공식 Socket Mode/Web SDK로 동작하며 별도 공개 HTTP endpoint나 폐기된 `files.upload`를 사용하지 않음 |
 
 ## 3. 요청 라우팅과 맥락 경계
 
@@ -681,11 +602,9 @@ generation·pause 상태를 대조한다. 이미 시작한 외부 발송은 회�
 역할 지침은 의미 있는 중간 결과와 긴 실행 중 가능한 도구/결과 경계에서 보고하도록 한다.
 고정 시간 간격을 보장하거나 보고용 타이머·LLM polling·대기 goal을 추가하지 않는다.
 진척 보고는 완료·새 배정·재개 허가가 아니며 상세 로그와 비밀은 포함하지 않는다.
-OMP 고정 revision `c308970263ae13744ea15ab67302e3dac840e266`의 기존
-`AssistantMessage.stopReason`·`TextContent.textSignature`(`TextSignatureV1`)를 재사용한다.
-2026-11-15 upstream `main`의 같은 타입도 확인했으나 별도 SHA를 수집하거나 핀을 갱신하지
-않았다. phase가 없는 provider는 `toolUse`의 일반 텍스트를 중간 보고로 해석하며,
-native 코어 패치·새 메신저 API·의존성을 추가하지 않는다.
+native `AssistantMessage.stopReason`·`TextContent.textSignature`(`TextSignatureV1`)를
+재사용한다. phase가 없는 provider는 `toolUse`의 일반 텍스트를 중간 보고로 해석한다.
+과거 타입 조사 범위는 [검증 기록](docs/releases/0.1.0.md#legacy-patched-baseline)에 남긴다.
 
 PR #45/#46의 관측 개념은 별도 감독자가 아니라 기존 레인 기록에 적용한다.
 root lane 전용 `lane_report`가 선택한 실제 파일 바이트·성공한 native 도구 결과를 해시하고,
@@ -937,16 +856,9 @@ brief·report envelope는 동적으로 fence하여 native mode 선택에 끼어�
 일반 작업이나 local 스킬 적용으로 fallback하지 않는다. 광고는 가용성이지 활성화 증거가 아니다.
 native disable 설정·도구 gate·승인은 그대로 유지한다. 필수 스킬/native mode/goal API/승인
 surface가 없으면 정확한 gap을 보고하며 local 스킬 적용만으로 실제 활성화를 주장하지 않는다.
-공용 ULW 코드나 `session_stop` 훅, 전역 설정은 변경하지 않는다. 새 activation·
-설치/업데이트 변경의 새 root/설치/discovery 결과는 [운영·설치 가이드의 검증 이력](docs/OPERATIONS.md#6-개발자-검증)에 별도로 기록하며 추가 실제 native
-조합 결과도 별도 범위로 기록한다. 기존 runtime 통과 기록을 이 변경의 증거로 재사용하지 않는다.
-공식 설치 CLI는 프로젝트 소유 immutable package에 revision
-`1f5ef903a2f4234ffdfe4a5295f4d8c994036c64`를 활성화했으며 공용 ULW 원본은 변경하지 않았다.
-그 별도의 실제 native 검증은 plain ULW arm·자동 goal 미생성, head 선택 lane plan→`ultrathink`·
-execute→`orchestrate`의 model-context notice와 영속 custom_message/directive, passive
-인용/report/board 비활성화와 source/route/dedup을 확인했다. 설치 성공만으로 활성화를 추정한
-것이 아니며 결정적 로컬 제공자·기록용 Messenger 범위다. 모든 workflow·상태 조합의 무결함,
-운영 봇 활성화·실제 제공자 호출·사용자 작업 완료를 이 검증으로 주장하지 않는다.
+공용 ULW 코드·`session_stop` 훅·전역 설정은 변경하지 않는다. 설치/업데이트·native activation의
+관측 결과는 [검증 기록](docs/releases/0.1.0.md#verification-records)에 실행 범위별로 보존한다.
+설치 성공만으로 활성화·모든 workflow 조합·사용자 작업 완료를 추정하지 않는다.
 
 ### Native judge 자문과 모델 동일성의 구분
 
@@ -1189,8 +1101,31 @@ UI/승인에는 원래 요청 ID를 유지하고 최초 유효 응답만 적용�
 관리 레인으로 바꾸지 않는다.
 
 stock OMP의 관리 RPC 세션에는 동일 프로세스 native TUI/herdr attach가 지원되지 않는다.
-따라서 attach CLI, 로그 tail 화면, 두 번째 `--resume` writer를 제공하지 않는다.
-과거 패치된 소스 기준선의 native RPC/TUI PTY 증거는 운영 가이드의 역사 기록으로만 보존한다.
+따라서 attach CLI·로그 tail 대체 화면은 제공하지 않는다. 아래 일반 native resume과
+관리 Host의 실행 소유권·연결·제어 권한을 구분한다.
+과거 패치된 소스 기준선의 native RPC/TUI PTY 증거는
+[릴리즈 검증 기록](docs/releases/0.1.0.md#legacy-patched-baseline)으로만 보존한다.
+
+### Native 세션 저장·검색 재사용
+
+별도 catalog나 history CLI 대신 stock OMP가 지원하는 **native 프로젝트 bucket의 파일
+symlink**를 사용한다. `SessionManager.getDefaultSessionDir(cwd)`와 활성 native profile로
+목적지를 정하고 native `timestamp_ID.jsonl` 이름의 세션 링크와 대응 artifact-directory
+링크를 게시한다. 원본 journal·artifact는 기존 위치의 단일 원본으로 유지하며 옮기거나 복제하지 않는다.
+native session listing은 leaf symlink를 따라가고, 저장의 `sessionPublishTarget`은 rewrite 때도
+referent를 유지한다. 코어 패치·새 discovery 서비스·두 번째 transcript 저장소는 없다.
+
+Host owner는 journal materialization 뒤 링크를 게시한다. 헤드 확장도 시작 시 기존 등록
+레인을 순회해 이미 있는 journal의 링크를 보충하되 Host를 깨우거나 작업을 재개하지 않는다.
+기존 기록과 새 기록 모두 대상이지만 소스 수정만으로 실행 중인 서비스에 적용되지는 않는다.
+
+외부 OMP는 같은 profile의 일반 `/resume`·all-projects 범위, native archive·ID/path 해석을
+그대로 사용한다. 읽기뿐 아니라 의도적인 일반 재개도 허용한다. 동시 writer는 native 정책에
+따라 fork하며 writer 해제 뒤 재개·후속 세션 선택도 native 정책을 따른다. 별도 재개를 기존 관리 Host의
+attach·실행 소유권 인계로 취급하지 않는다. manager/board 확장은 관리 역할에서만 명시적으로
+로드하며 일반 재개에 자동 부여하지 않는다. Mnemopi의 저장·회수 수명과 프로젝트/공유 범위도
+변경하지 않는다. 사용법과 버전별 상담 도구 차이는
+[운영 가이드](docs/OPERATIONS.md#일반-omp에서-세션-기록-찾기)를 따른다.
 
 ## 8. 영속 상태·권한·복구
 
@@ -1316,7 +1251,7 @@ tool-call 차단, preset bootstrap의 내부 턴 경로다. 이전 소스 기준
 `c308970263ae13744ea15ab67302e3dac840e266`와 현재 테스트 기준선
 `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`의 completion/tool-blocking 계약을 조사했다.
 이 조사는 새 stock 통합 경로의 실행 증거가 아니다. 코어 패치·외부 엔진·전역 도구 설정은
-추가하지 않는다. 검증 결과는 운영 가이드에 별도 기록한다.
+추가하지 않는다. 실행 결과는 [릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records)을 따른다.
 
 ## 9. 기존 구현 검색과 재사용
 
@@ -1370,70 +1305,21 @@ commit SHA를 만들어 pin된 검증 근거로 제시하지 않는다.
 
 ## 10. 구현 확인 범위와 운영 완료 기준
 
-구현된 확장과 설치 stock OMP에 대해 아래 실제 흐름을 검증한다. 코드 회귀, 로컬 결정적 모델을
-사용한 CLI/소켓, 실제 메신저·모델 검증은 서로 다른 근거다. 현재 관측 결과는
-[운영·설치 가이드의 검증 표](docs/OPERATIONS.md#6-개발자-검증)를 따르며, 미수행 운영 항목을 완료로 간주하지 않는다.
+아래는 **수용 기준**이지 실행 결과가 아니다. 실제 날짜·기준선·명령·수치·미검증 항목은
+[릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records) 한 곳에서 관리한다.
+코드 회귀·결정적 로컬 provider의 실제 OMP 흐름·운영 메신저/모델 검증을 구분한다.
 
-1. **메신저와 같은 OMP 세션 연결**
-   - Discord에 사용자가 추가 선택한 Telegram·Slack을 같은 헤드에 연결한다.
-   - 플랫폼 블록 최소 하나·기존 Discord 설정·동시 어댑터 설정과 환경변수 매핑을 확인한다.
-   - 소유자 요청 수신·회신·승인, 잘못된 대화로의 발송 방지를 확인한다.
-   - 플랫폼별 실제 신원·권한·UI·파일·복구 제약을 확인하고 메인 맥락 공유와 주제 격리를 구분한다.
-2. **헤드·레인과 맥락 격리**
-   - 작은 메인 대화 요청은 추가 레인 없이 처리.
-   - 새 스레드는 헤드의 명시적 결정으로 독립 세션에 연결되고 후속 입력도 먼저 헤드로 전달.
-   - bound-topic 수신이나 `lane_start`가 pending 후속 입력을 자동 dispatch하지 않음.
-   - lane 결과는 durable head report이며 head의 검토·결정 없이 직접 외부 발송하지 않음.
-   - DM `/new`·`/main`과 직접 인계에서 실제 채널은 유지하고 논리 주제·후속 입력을 분리.
-   - 주제 전환·재시작·늦은 catchup이 기존 카드의 승인 목적지나 제출된 원본 소유권을 바꾸지 않음.
-   - 저장소 A/B의 작업 디렉터리·프로젝트 지침·도구 상태·결과가 섞이지 않음을 확인.
-   - 새 모델 선택 변경은 별도 검증 대기: 허용 chat 후보/안전 메타데이터, 필수 모델·이유,
-     재사용 충돌·unavailable·drift 보류, unload/재시작/기존 기록 채택의 모델 유지와 자식 권한.
-   - 최초 native high/middle/low 초기화의 기존 프리셋·기본/활성 역할·judge 보존, 충돌 덮어쓰기
-     거부, 전체 역할/thinking snapshot과 편집 후 기존 레인 불변, 명시적 유휴 레인 변경,
-     최초 생성 및 운영자의 명시적 preset `--global` 외 전역 모델/config 쓰기 금지·헤드/다른 레인 격리를 확인한다.
-     정상 native 인증 갱신은 유지하며 모든 OMP 파일 불변으로 과장하지 않는다.
-   - 스킬의 자문 정책과 runtime 강제를 구분하고 실제 judge 자문/사용량은 native purpose
-     `judge` 증거로 따로 확인. 기존 로컬 fixture나 과거 통과 수치로 대신하지 않음.
-3. **실행 예산·회수·복구**
-   - 슬롯 포화에서 새 요청은 대기하고 제어 응답은 동작.
-   - 백그라운드 작업을 유휴로 잘못 회수하지 않음.
-   - 안전한 unload 후 같은 기록을 재개하고, 헤드 재시작으로 살아 있는 레인을 복제하지 않음.
-4. **stock Host와 제어 연결**
-   - 설치된 수정 없는 OMP의 실제 RPC와 관리 확장에서 identity·저널·수명 readback을 확인한다.
-   - 제어 연결 해제·재접속 및 헤드 재시작 뒤 독립 레인의 실행·기록을 보존한다.
-   - UI/승인은 원래 ID로 한 번만 적용하고 안전 검사 후 실제 종료를 확인한다.
-   - 동일 프로세스 TUI/herdr attach는 지원하지 않으며 대체 writer를 띄우지 않는다.
-5. **완료 검증·발송**
-   - 턴 종료를 완료로 오인하지 않고 근거 확인 후 원래 스레드에 한 번 회신.
-   - 재시작·전송 불확실성에서 외부 행동을 맹목적으로 반복하지 않음.
-6. **Gateway 수명·durable ingress·확장 분리**
-   - 명시적 start → Gateway → 지정 head의 실제 boot와 단일 writer·busy-host 보호.
-   - head 부재 중 수신 보존·ACK 순서, crash 이후 ordered redelivery/receipt·dedupe와 원래 route.
-   - 초기 승인 ready gate, client detach와 transport stop의 차이, stop main 이후 부활 금지.
-   - Gateway는 lane socket/RPC에 연결하지 않고 manager는 head만, lane 지침은 lane만 로드.
-   - Gateway만 메신저 credential 환경변수를 보유하며 native 도구·인증·설정 격리는 유지.
-7. **공유 정보 게시판**
-   - 실제 role/session actor·tool-call 중복 제거, general/repo 채널·thread·mention·세션별 구독.
-   - 반환된 ID만 읽음 처리하고 truncation/header·구독 변경·재시작에서 unread 유실 없음.
-   - 안전한 context 경계 알림, self-post/read-ACK 루프 없음, unloaded lane wake 없음.
-   - 같은 canonical stateDir의 등록 head/lane session ID+file을 검증하고 일반 OMP·다른 instance·
-     복사/상속 role의 standalone session·native 자식의 read/post/알림을 모두 거부.
-   - 게시물이 lane 제어·새 업무·승인으로 승격되지 않음.
+| 영역 | 관측해야 하는 완료 조건 |
+| --- | --- |
+| 메신저 | 구성한 하나 이상의 플랫폼에서 실제 신원·권한·수신·회신·승인·UI·첨부·복구를 확인. 공유 운영자 맥락과 분리된 주제/route를 구분 |
+| 헤드·레인 | 직접 작업·명시적 인계·모든 후속의 헤드 경유, pending의 자동 재배정 없음, cwd·지침·도구·원본 승인 격리, durable head report와 원래 목적지 회신 |
+| 모델·스킬 | native 가용 후보·정확한 선택/이유·전체 preset snapshot·최초 누락 생성과 충돌 보존, 명시적 유휴 변경·재개/재시작·drift 보류, 세션/전역 범위·자식 권한. judge 자문/사용량은 별도 native 근거 |
+| 자원·복구 | 슬롯 포화에서도 제어 가능, 비동기·승인·goal·소유 서비스·저장 완료 확인 전 회수 없음, 안전한 unload/동일 기록 재개, 살아 있는 Host 중복 생성 없음 |
+| stock Host | 실제 RPC/AgentSession의 identity·저널·수명 readback, 재연결·독립 레인 보존, 원래 UI ID의 단일 적용·실제 종료. 동일 프로세스 TUI/herdr attach는 지원 대상 아님 |
+| Gateway | 명시적 start·단일 지정 헤드, 초기 승인 gate·head 부재 중 ACK 전 수신 보존·순서/receipt/dedupe, stop 후 부활 금지. lane RPC·배정은 head만, credential은 Gateway만 소유 |
+| 게시판 | canonical stateDir와 실제 session ID/file/PID·generation membership, 정확한 반환 ID의 unread·구독·알림, self-wake/ACK 루프·unloaded wake 없음, 일반 OMP/타 instance/자식 거부 |
+| 완료·발송 | 턴 종료·정착과 acceptance 검증 구분, 원래 대화에 중복 없이 회신, 불확실한 실행/외부 효과 무재실행. 검증은 merge·배포·결제·worktree 삭제 허가가 아님 |
 
-위 목록은 수용 기준이며 그 자체가 실행 결과는 아니다. stock 18.20.2 통합의 최종 실행 결과는
-최종 담당자가 [운영·설치 가이드](docs/OPERATIONS.md#6-개발자-검증)에 별도로 기록한다.
-이전 패치된 18.20.0 기준선의 실제 native Gateway E2E는 wrapper 1개가 통과했으며 production
-Gateway와 native head/lane/board, head 부재 중 수신·복구·중복 제거·원래 route의 head-only 회신을
-확인했다. 결정적 로컬 제공자·기록용 Messenger 범위로, 운영 메신저·실제 제공자/비용·herdr
-검증으로 확대하지 않는다. 당시 모델 프리셋 최초 생성·
-세션 설정 격리·정확한 모델 snapshot·head/다른 lane 격리를 포함한 native
-runtime/model-selection 2개·215 assertion은 로컬 결정적 제공자에서 head 경유·모델/judge
-readback을 확인한 근거다.
-
-코드 기반 회귀 검증과 실제 OMP·메신저 사용자 흐름 검증을 구분한다.
-실제 모델 제공자 결과·사용량과 운영 Discord/Telegram/Slack 토큰 활성화 증거가 없는 항목은
-미검증으로 명시한다. 잘못된 generator 호출로 실행된 보조 OMP의 응답은 [운영·설치 가이드](docs/OPERATIONS.md)의 제한된
-사고 기록으로 구분하며, 실행/제공자 사용량 미확보를 결정적 로컬 테스트 성공으로 대신하지 않는다.
-이전 조사에서는 herdr가 설치되어 있었으나 `HERDR_ENV`가 없어 제어를 시도하지 않았다.
-당시 일반 PTY의 native attach 확인을 herdr QA나 현재 stock attach 지원 근거로 쓰지 않는다.
+실제 계정·제공자·herdr·로그인/재부팅은 그에 맞는 관측 증거가 있어야 한다. 과거 패치된
+18.20.0의 PTY attach나 실행 신원을 확보하지 못한 보조 OMP 응답은 stock 호환성·현재 attach
+지원·실제 제공자 사용량의 근거가 아니다. 사고와 한계도 같은 검증 기록에 보존한다.

@@ -105,14 +105,17 @@ bun --no-env-file src/cli.ts doctor --config config.local.json
 bun --no-env-file src/cli.ts start --config config.local.json
 ```
 
-최초 시작 때 누락된 native `high`/`middle`/`low` 프리셋은 같은 헤드의 전용 초기 설정 턴에서
-생성·재조회하고, 그 뒤 일반 작업을 실행합니다. 기존 프리셋은 보존합니다. `status`는 프리셋
-초기화와 transport 준비를 구분하며 실패·미완료를 준비 완료로 표시하지 않습니다.
-`setup`과 `doctor`는 계속 봇·모델을 실행하지 않습니다.
+같은 헤드가 누락된 native `high`/`middle`/`low` 프리셋만 초기화한 뒤 일반 작업을 시작합니다.
+기존 프리셋은 보존하며 `status`는 초기화와 transport 준비를 구분합니다.
+setup과 doctor는 봇·모델 세션을 시작하지 않습니다.
 
 `start`는 설정에 남긴 **모든 플랫폼**을 활성화하고, detached Gateway와 헤드를 시작합니다.
 이 패치 없는 배포판은 관리형 RPC Host에 native TUI/herdr로 접속하는 기능을 제공하지 않습니다.
 관리 세션은 메신저 명령과 `omp-sa status`로 확인하고 제어합니다.
+레인 기록은 일반 OMP의 기본 세션 검색에서도 찾습니다. `/resume`(Tab으로 모든 프로젝트)
+또는 native 기록 도구를 사용하세요. 의도적인 재개는 일반 OMP 작업이며 관리 Host 접속이나
+관리·게시판 권한 부여가 아닙니다.
+[native 세션 접근](docs/OPERATIONS.md#일반-omp에서-세션-기록-찾기)에서 범위와 사용법을 확인하세요.
 
 상태 조회·종료·macOS 로그인 후 자동 시작·복구는 [운영 가이드](docs/OPERATIONS.md)를
 참고하세요. 로그인 자동 시작은 한 번 실행하는 방식이며 crash 자동 재시작은 아닙니다.
@@ -146,7 +149,7 @@ Linux 서비스 설치는 제공하지 않습니다.
 
 ## 개발
 
-설치를 마친 뒤 실행합니다.
+설치 후 로컬 검사를 실행합니다.
 
 ```sh
 bun run check
@@ -154,18 +157,14 @@ bun test test
 bun run test:ci
 ```
 
-`check`는 타입 검사입니다. 기본 `bun test test`는 opt-in native/PTY 시나리오를 제외합니다.
-`scripts/ci.ts`로 구성한 `test:ci`는 모든 로컬 native/PTY 시나리오와 타입 검사를 실행하며,
-실제 계정·모델 제공자 호출 대신 오프라인 fixture를 사용합니다. Python 3도 필요하며
-launchd 시나리오는 macOS에서만 실행합니다.
-이 검사가 운영 환경이나 실제 계정에서의 준비 완료를 증명하지는 않습니다.
-
-`bun run release`는 커밋된 소스 압축 파일과 SHA256 체크섬을 로컬 `dist`에 만듭니다.
-게시하지는 않으며, 태그로 실행되는 GitHub Actions가 CI 이후 GitHub Release를 게시합니다.
+오프라인 native/PTY 범위·필요 도구·로컬 패키징과 게시 경계는
+[개발자 검증·소스 릴리즈 절차](docs/OPERATIONS.md#6-개발자-검증)를 참고하세요.
+[실행 결과와 한계](docs/releases/0.1.0.md#verification-records)는 실계정·운영 준비 완료의 주장이 아닙니다.
 
 ## 문서와 출처
 
-- [운영 가이드](docs/OPERATIONS.md): 설치·설정·복구 절차와 검증 근거.
+- [운영 가이드](docs/OPERATIONS.md): 설치·설정·명령·복구 절차.
+- [릴리즈 기록](docs/releases/0.1.0.md#verification-records): 날짜·기준선별 검증 근거와 한계.
 - [설계](DESIGN.md): Gateway·헤드·레인과 공유 게시판의 계약.
 
 [oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)를 사용합니다.

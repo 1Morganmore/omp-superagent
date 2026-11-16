@@ -123,14 +123,16 @@ Start the detached Gateway and head, connecting **all configured messengers**:
 bun --no-env-file src/cli.ts start --config config.local.json
 ```
 
-On first startup, missing native `high`/`middle`/`low` presets are initialized in a
-dedicated turn of the same head, before ordinary work. Existing presets are preserved.
-`status` distinguishes preset initialization from transport readiness; incomplete or
-failed initialization is not reported as ready. Neither `setup` nor `doctor` starts
-a bot/model session; only setup makes the profile REST calls described above.
+The same head initializes only missing native `high`/`middle`/`low` presets before ordinary
+work. Existing presets remain intact; `status` distinguishes initialization from transport
+readiness. Setup and doctor do not start bot/model sessions.
 
 Native TUI/herdr attachment to managed RPC Hosts is not available in this patch-free
 release. Use messenger commands and `omp-sa status` for managed sessions.
+Lane journals also appear in ordinary OMP's native session discovery. Use `/resume`
+(Tab for all projects) or native history tools; an intentional resume is normal OMP work,
+not managed-Host attachment or a manager/board permission grant. See
+[native session access](docs/OPERATIONS.md#일반-omp에서-세션-기록-찾기).
 
 For status, shutdown, macOS login startup, and recovery, use the
 [operations guide](docs/OPERATIONS.md). Login startup is a one-shot launch, not a
@@ -166,7 +168,7 @@ for update and activation behavior.
 
 ## Development
 
-After installation:
+Local checks after installation:
 
 ```sh
 bun run check
@@ -174,19 +176,16 @@ bun test test
 bun run test:ci
 ```
 
-`check` runs the typecheck. The default `bun test test` suite excludes opt-in native/PTY
-scenarios. `test:ci`, configured by `scripts/ci.ts`, runs all local native/PTY scenarios
-and the typecheck using offline fixtures, not real account or provider calls. It also
-requires Python 3; the launchd scenario runs only on macOS.
-These checks do not establish production or live-account readiness.
-
-`bun run release` packages committed source and a SHA256 checksum in `dist` locally.
-It does not publish; tag-triggered GitHub Actions publishes the GitHub Release after CI.
+See [developer verification and source release steps](docs/OPERATIONS.md#6-개발자-검증)
+for offline native/PTY coverage, prerequisites, and local packaging/publication boundaries.
+[Recorded results and limitations](docs/releases/0.1.0.md#verification-records) are not a
+claim of live-account or production readiness.
 
 ## Documentation & credits
 
 - [Design](DESIGN.md): routing, roles, sessions, and lifecycle.
-- [Operations guide](docs/OPERATIONS.md): platform setup, recovery, and verification records.
+- [Operations guide](docs/OPERATIONS.md): platform setup, commands, and recovery.
+- [Release records](docs/releases/0.1.0.md#verification-records): dated verification evidence and limits.
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-ulw](https://github.com/dbc-hbin/omp-ulw) workflow integration.

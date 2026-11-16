@@ -10,6 +10,7 @@ import { Superagent } from "./runtime";
 import { Store } from "./store";
 import { sameLaneModel } from "./lane-models";
 import { NativePresetManager } from "./native-presets";
+import { publishNativeSession } from "./native-sessions";
 import { MODEL_PRESET_NAMES, WORKFLOW_NAMES } from "./contracts";
 
 function readHeadReferences(directory: string): string[] {
@@ -246,6 +247,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
         const store = new Store(join(config.stateDir, "coordination.sqlite"));
         let messenger: ReturnType<typeof createGatewayMessenger>;
         try {
+          for (const lane of store.lanes()) await publishNativeSession(lane.sessionFile, lane.cwd);
           messenger = createGatewayMessenger(config);
         } catch (error) {
           store.close();
