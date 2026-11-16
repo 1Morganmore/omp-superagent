@@ -18,11 +18,12 @@ the results back to your conversation.
 
 ## Distribution
 
-**0.1.0 is a Bun source distribution:** download the source tarball from the
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.0)
-and follow the preparation steps below. There is no npm package or standalone
-binary. OMP must already be installed; this project neither patches nor builds it.
-Managed dependencies are installed separately.
+**0.1.1 is available on [npm](https://www.npmjs.com/package/omp-superagent)** and as
+source and npm tarballs in the
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.1).
+Install with Bun or npm below. Bun is still required at runtime; this is not a
+standalone binary. OMP must already be installed; this project neither patches nor
+builds it. Installation prepares the managed dependencies.
 
 ## Why superagent?
 
@@ -59,33 +60,41 @@ sockets. The tested OMP version is **18.20.2**. Windows is unsupported.
 Configure `command` with the installed OMP executable followed by native CLI flags;
 runtime/script wrappers are unsupported.
 
-### 1. Prepare
+### 1. Install
 
-From the repository root:
+Install OMP using the
+[upstream instructions](https://github.com/can1357/oh-my-pi#installation) first,
+then install the CLI with Bun:
 
 ```sh
 omp --version
-bun install --frozen-lockfile
+bun add --global --trust omp-superagent@0.1.1
+omp-sa --help
+```
+
+`--trust` allows this package's OMP check and managed `omp-ulw` preparation scripts.
+Ensure `bun pm bin --global` is on `PATH`. Alternatively, with Bun on `PATH`:
+
+```sh
+npm install --global omp-superagent@0.1.1
 ```
 
 Installation checks for a separately installed OMP before preparing the managed
-`omp-ulw` integration. If OMP is missing, install it using the
-[upstream instructions](https://github.com/can1357/oh-my-pi#installation) first.
+`omp-ulw` integration. Do not skip lifecycle scripts.
 Published SDK packages and platform-native dependencies come from the package registry;
 no Rust toolchain, OMP source checkout, core patch, or native build is required.
 Dependency installation needs network access. It does not start a bot or replace OMP.
 
-The CLI command is **`omp-sa`**; the project/package name remains `omp-superagent`.
-Register it from the prepared repository with `bun link` and ensure Bun's global
-bin directory is on `PATH`:
+The CLI command is **`omp-sa`**; the package name is `omp-superagent`.
+For a source checkout or extracted source tarball, run from its root instead:
 
 ```sh
+bun install --frozen-lockfile
 bun link
-omp-sa --help
 ```
 
-The source invocation `bun --no-env-file src/cli.ts` used below runs the same CLI
-without registering it. The `omp-sa` executable also disables automatic `.env` loading.
+Both `omp-sa` and the source invocation `bun --no-env-file src/cli.ts` run the same
+CLI with automatic `.env` loading disabled.
 
 ### 2. Configure
 
@@ -93,7 +102,7 @@ Prepare your platform apps using the [operations guide](docs/OPERATIONS.md#2-플
 then run:
 
 ```sh
-bash scripts/setup.sh
+omp-sa setup --config ./config.local.json
 ```
 
 Setup creates `config.local.json` and stores hidden-input tokens in owner-only
@@ -114,13 +123,13 @@ memory behavior, alternative config paths, and manual configuration.
 Check local configuration without logging into the messengers:
 
 ```sh
-bun --no-env-file src/cli.ts doctor --config config.local.json
+omp-sa doctor --config ./config.local.json
 ```
 
 Start the detached Gateway and head, connecting **all configured messengers**:
 
 ```sh
-bun --no-env-file src/cli.ts start --config config.local.json
+omp-sa start --config ./config.local.json
 ```
 
 The same head initializes only missing native `high`/`middle`/`low` presets before ordinary

@@ -15,10 +15,11 @@ Discord·Telegram·Slack을 [oh-my-pi](https://github.com/can1357/oh-my-pi)의 �
 
 ## 배포 형태
 
-**0.1.0은 Bun 소스 배포판입니다.**
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.0)의 소스 tarball을 받아 아래 준비 절차를
-따르세요. npm 패키지나 독립 실행 바이너리는 제공하지 않습니다. OMP는 미리 설치되어 있어야
-하며 이 프로젝트가 패치하거나 빌드하지 않습니다. 관리형 의존성은 별도로 설치합니다.
+**0.1.1부터 [npm 패키지](https://www.npmjs.com/package/omp-superagent)를 제공합니다.**
+Bun 또는 npm으로 설치하거나
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.1)의 소스·npm tarball을 받으세요.
+실행에는 Bun이 필요하며 독립 실행 바이너리는 아닙니다. OMP는 미리 설치되어 있어야 하며
+이 프로젝트가 패치하거나 빌드하지 않습니다. 설치 시 관리형 의존성도 준비합니다.
 
 ## 차별점
 
@@ -45,17 +46,26 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 Git, **Bun >= 1.4.4**, 미리 설치된 **OMP >= 18.20.2, < 19**, 로컬 Unix socket 지원 환경이 필요합니다.
 검증 기준 OMP는 **18.20.2**이며 Windows는 지원하지 않습니다.
 
-### 1. 소스 준비
+### 1. 설치
 
-저장소 루트에서 순서대로 실행합니다.
+[공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)에 따라 OMP를 먼저 설치한 뒤,
+Bun으로 CLI를 설치합니다.
 
 ```sh
 omp --version
-bun install --frozen-lockfile
+bun add --global --trust omp-superagent@0.1.1
+omp-sa --help
+```
+
+`--trust`는 이 패키지의 OMP 검사와 관리형 `omp-ulw` 준비 스크립트 실행을 허용합니다.
+`bun pm bin --global`의 출력 경로를 `PATH`에 포함하세요. Bun이 `PATH`에 있다면 npm으로도 설치할 수 있습니다.
+
+```sh
+npm install --global omp-superagent@0.1.1
 ```
 
 설치 시 별도로 설치된 OMP를 먼저 확인하고, postinstall이 필수 관리형 `omp-ulw`를 준비합니다.
-OMP가 없다면 [공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)에 따라 먼저 설치하세요.
+설치 lifecycle 스크립트를 생략하지 마세요.
 공개 SDK 패키지와 플랫폼 네이티브 의존성은 패키지 레지스트리에서 받으며, Rust 도구·OMP 소스
 checkout·코어 패치·네이티브 빌드가 필요하지 않습니다. 의존성 설치에는 네트워크가 필요하지만,
 봇을 시작하거나 설치된 OMP를 교체하지는 않습니다.
@@ -63,22 +73,21 @@ checkout·코어 패치·네이티브 빌드가 필요하지 않습니다. 의�
 Bun 등 런타임으로 OMP 소스를 실행하는 래퍼는 지원하지 않습니다.
 
 CLI 명령어는 **`omp-sa`**이며 프로젝트·패키지 이름은 `omp-superagent`로 유지합니다.
-준비한 저장소에서 `bun link`로 등록하고 Bun의 전역 bin 디렉터리를 `PATH`에 포함합니다.
+소스 checkout이나 소스 tarball을 사용하는 경우에는 그 루트에서 대신 실행합니다.
 
 ```sh
+bun install --frozen-lockfile
 bun link
-omp-sa --help
 ```
 
-아래의 `bun --no-env-file src/cli.ts`는 등록 없이 같은 CLI를 실행하는 소스 호출 방식입니다.
-`omp-sa` 실행 파일도 `.env` 자동 로딩을 끕니다.
+`omp-sa`와 소스 호출 `bun --no-env-file src/cli.ts`는 같은 CLI이며 둘 다 `.env` 자동 로딩을 끕니다.
 
 ### 2. 설정과 자격 증명
 
 [플랫폼 앱·권한](docs/OPERATIONS.md#2-플랫폼별-앱과-접근-범위)을 준비한 뒤 터미널에서 실행합니다.
 
 ```sh
-bash scripts/setup.sh
+omp-sa setup --config ./config.local.json
 ```
 
 셋업은 `config.local.json`을 만들고 숨김 입력으로 받은 토큰을 소유자 전용
@@ -96,13 +105,13 @@ bash scripts/setup.sh
 ### 3. 진단 후 명시적으로 시작
 
 ```sh
-bun --no-env-file src/cli.ts doctor --config config.local.json
+omp-sa doctor --config ./config.local.json
 ```
 
 소스 준비와 `doctor`는 메신저에 로그인하지 않습니다. `doctor`로 로컬 설정과 CLI·자격 증명 환경을 진단한 뒤 시작합니다.
 
 ```sh
-bun --no-env-file src/cli.ts start --config config.local.json
+omp-sa start --config ./config.local.json
 ```
 
 같은 헤드가 누락된 native `high`/`middle`/`low` 프리셋만 초기화한 뒤 일반 작업을 시작합니다.

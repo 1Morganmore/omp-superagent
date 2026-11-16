@@ -154,6 +154,11 @@ Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서
 `bun run prepare:ulw`로 ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-utils`
 18.20.2 패키지다.
+0.1.1부터 npm 패키지로 같은 소스·역할 스킬·설치 자원을 배포한다.
+`bun add --global --trust omp-superagent@0.1.1` 또는 Bun이 PATH에 있는 환경의
+`npm install --global omp-superagent@0.1.1`로 `omp-sa`를 설치한다. Bun의 `--trust`는
+기존 OMP 검사·ULW 준비 lifecycle을 허용하며 별도의 실행 backend를 추가하지 않는다.
+설정·자격 증명·세션은 패키지에 포함하지 않고 사용자 지정 경로에 보존한다.
 설치 때 원격 기본 브랜치 HEAD를 확인한다. production Gateway 시작에는 이미 유효한
 active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startup 원격 확인은 백그라운드로
 진행하고 이후 `checkIntervalMs: 3600000`에 따라 매시간 확인한다. 느리거나 불가한 upstream이

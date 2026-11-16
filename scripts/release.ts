@@ -30,14 +30,21 @@ const notes = join(root, "docs/releases", `${version}.md`);
 if (!await Bun.file(notes).exists()) throw new Error(`Missing release notes: ${notes}`);
 const directory = join(root, "dist");
 await mkdir(directory, { recursive: true });
-const filename = `${name}-${version}.tar.gz`;
-const archive = join(directory, filename);
+const sourceFilename = `${name}-${version}.tar.gz`;
+const packageFilename = `${name}-${version}.tgz`;
+const archive = join(directory, sourceFilename);
 await run(["git", "archive", "--format=tar.gz", `--prefix=${name}-${version}/`, `--output=${archive}`, revision]);
-const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(archive).arrayBuffer()).digest("hex");
-const checksum = `${archive}.sha256`;
-await Bun.write(checksum, `${digest}  ${filename}\n`);
-console.log(`Packaged ${revision}\n${archive}\n${checksum}`);
+await run([process.execPath, "pm", "pack", "--ignore-scripts", "--filename", join(directory, packageFilename)]);
+const assets: string[] = [];
+for (const filename of [sourceFilename, packageFilename]) {
+  const path = join(directory, filename);
+  const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(path).arrayBuffer()).digest("hex");
+  const checksum = `${path}.sha256`;
+  await Bun.write(checksum, `${digest}  ${filename}\n`);
+  assets.push(path, checksum);
+}
+console.log(`Packaged ${revision}\n${assets.join("\n")}`);
 if (publish) {
-  console.log(await run(["gh", "release", "create", tag, archive, checksum,
+  console.log(await run(["gh", "release", "create", tag, ...assets,
     "--verify-tag", "--title", `${name} ${version}`, "--notes-file", notes]));
 }

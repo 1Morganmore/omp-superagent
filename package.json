@@ -1,11 +1,29 @@
 {
   "name": "omp-superagent",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
+  "description": "One messenger-connected OMP head with independent work sessions",
   "license": "MIT",
   "author": "dbc-hbin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbc-hbin/omp-superagent.git"
+  },
+  "homepage": "https://github.com/dbc-hbin/omp-superagent#readme",
+  "bugs": "https://github.com/dbc-hbin/omp-superagent/issues",
   "type": "module",
   "packageManager": "bun@1.4.4",
+  "files": [
+    "src/",
+    "scripts/",
+    "skills/",
+    "upstream/ulw.json",
+    "assets/",
+    "docs/",
+    "config.example.json",
+    "DESIGN.md",
+    "README.ko.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "bin": {
     "omp-sa": "src/cli.ts"
   },

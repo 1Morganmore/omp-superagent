@@ -4,7 +4,9 @@
 [설정 예제](../config.example.json) · [출처·라이선스 고지](../THIRD_PARTY_NOTICES.md)
 
 이 문서는 설치·설정·일상 제어와 복구 절차를 다룬다. 파일·코드 경로와 셸 명령은 별도
-설명이 없으면 **저장소 루트 기준**이다. 현재 구조·권한 계약은 [설계](../DESIGN.md),
+설명이 없으면 **저장소 루트 기준**이다. npm 설치에서는 같은 관리 명령을
+`bun --no-env-file src/cli.ts` 대신 `omp-sa`로 실행하며 설정 파일은 사용자 작업 디렉터리에 둔다.
+현재 구조·권한 계약은 [설계](../DESIGN.md),
 실행 날짜·기준선·범위가 있는 검증 결과는 [릴리즈 검증 기록](releases/0.1.0.md#verification-records)을 따른다.
 
 Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 입력은 하나의 헤드를 거친다.
@@ -96,7 +98,20 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 OMP 18.20.2 이상·major 18, 로컬 Unix socket을 지원하는 환경이다. 테스트 기준선은 OMP
 18.20.2 소스 revision `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`다.
 OMP 공식 설치를 먼저 완료해 `omp`가 PATH에 있어야 한다. 이 저장소는 OMP 소스 checkout이나
-native addon 빌드를 하지 않는다. 저장소 루트에서 실행한다.
+native addon 빌드를 하지 않는다. npm 레지스트리에서 설치할 때는:
+
+```sh
+bun add --global --trust omp-superagent@0.1.1
+omp-sa --help
+```
+
+`--trust`는 OMP 검사·관리형 ULW 준비 lifecycle 스크립트를 허용한다.
+`bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
+`npm install --global omp-superagent@0.1.1`도 사용할 수 있다.
+설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
+`omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
+
+소스 checkout이나 GitHub 소스 tarball은 저장소 루트에서 실행한다.
 
 ```sh
 bun install --frozen-lockfile
@@ -544,8 +559,8 @@ OMP 소스 CLI나 프로젝트 패치 바이너리를 지정하지 않는다. �
 
 ## 4. 명령과 일상 사용
 
-CLI 실행 이름은 `omp-sa`다. 준비한 저장소 루트에서 `bun link`로 등록하고 Bun의 전역
-bin 디렉터리를 `PATH`에 포함하면 `omp-sa --help`나
+CLI 실행 이름은 `omp-sa`다. 위의 전역 패키지 설치 또는 준비한 저장소의 `bun link`로
+등록하고 해당 전역 bin 디렉터리를 `PATH`에 포함하면 `omp-sa --help`나
 `omp-sa status --config config.local.json`처럼 실행할 수 있다. 프로젝트·패키지 이름은
 `omp-superagent`로 유지한다. 아래 소스 호출 방식도 같은 CLI이며, 두 방식 모두 `.env`
 자동 로딩을 끈다.
@@ -992,9 +1007,9 @@ OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-ulw/index.ts bun test test/skills.t
 [ULW 설치 계약](../DESIGN.md#필수-ulw-설치와-일반-코드-갱신-경계)을 따르며 import·합성 성공을
 모델 호출·Agent 실행·goal 생성·workflow 완료의 증거로 확대하지 않는다.
 
-### 소스 릴리즈
+### 소스·npm 릴리즈
 
-0.1.0은 Bun으로 실행하는 GitHub 소스 배포다. npm 패키지나 단일 실행 파일이 아니며,
+0.1.1부터 GitHub 소스 아카이브와 npm 패키지를 함께 배포한다. 실행에는 Bun이 필요하다.
 OMP·ULW·node_modules·native addon·사용자 설정·세션은 아카이브에 포함하지 않는다.
 `package.json`의 버전과 `docs/releases/<version>.md`를 준비하고 의도한 변경을 커밋한 뒤:
 
@@ -1002,9 +1017,14 @@ OMP·ULW·node_modules·native addon·사용자 설정·세션은 아카이브�
 bun run release
 ```
 
-`scripts/release.ts`는 깨끗한 Git checkout의 HEAD만 `git archive`로 내보내고
-`dist/omp-superagent-<version>.tar.gz`와 `.sha256`을 만든다. 이 명령 자체는 게시하지 않는다.
+`scripts/release.ts`는 깨끗한 Git checkout의 HEAD를 `git archive`로 내보내고
+`bun pm pack --ignore-scripts`로 `package.json`의 files 목록에 한정한 npm 패키지를 만든다.
+`dist/omp-superagent-<version>.tar.gz`, `.tgz`와 각각의 `.sha256`이 생성된다.
+이 명령 자체는 게시하지 않는다.
 승인받은 버전 태그를 원격에 푸시하면 `.github/workflows/ci.yml`이 양쪽 플랫폼 검증 후
 `bun run release --publish`로 GitHub Release를 게시한다. 버전과 태그·commit이 일치해야 하며
 기존 릴리즈를 덮어쓰거나 실패한 검증을 우회하지 않는다.
+같은 검증을 통과한 `.tgz`를 npm 인증이 있는 환경에서
+`npm publish ./dist/omp-superagent-<version>.tgz --access public`으로 게시한다.
+GitHub workflow가 npm 인증을 대신하거나 npm에 자동 게시하지는 않는다.
 외부 게시, 태그 푸시, 운영 Gateway 재시작은 로컬 테스트 성공과 별개의 명시적 작업이다.
