@@ -799,6 +799,27 @@ describe("Discord markdown tables in outbound payloads", () => {
     expect(attached.split("```")).toHaveLength(3);
     await messenger.stop();
   });
+
+  test("a sparse table that would exceed the upload limit is attached as its original text", async () => {
+    const { messenger, channel } = await fixture();
+    const text = ["| a | b |", "|---|---|", `| ${"x".repeat(10_000)} | y |`, ...Array(1000).fill("| 1 | 2 |")].join("\n");
+    const record = output(text);
+    await expect(messenger.send(record)).resolves.toBe("remote-1");
+    expect(channel.sent).toHaveLength(1);
+    expect(channel.sent[0]!.files).toHaveLength(1);
+    const attached = (channel.sent[0]!.files![0] as unknown as { attachment: Buffer }).attachment;
+    expect(attached.equals(Buffer.from(text, "utf8"))).toBe(true);
+    expect(record.text).toBe(text);
+    await messenger.stop();
+  });
+
+  test("an original table above the upload limit is still rejected before sending", async () => {
+    const { messenger, channel } = await fixture();
+    const text = `| a | b |\n|---|---|\n| ${"x".repeat(8 * 1024 * 1024)} | y |`;
+    await expect(messenger.send(output(text))).rejects.toMatchObject({ certainty: "rejected" });
+    expect(channel.sent).toHaveLength(0);
+    await messenger.stop();
+  });
 });
 
 describe("Discord message activity", () => {

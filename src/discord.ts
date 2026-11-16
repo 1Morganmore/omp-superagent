@@ -306,7 +306,7 @@ export class DiscordMessenger implements Messenger {
   private payload(text: string, nonce: string, components?: Controls): MessageCreateOptions {
     // Discord renders no markdown tables, so outbound tables become aligned fences.
     // The stored OutputRecord text is never modified; only this payload changes.
-    const content = renderDiscordMarkdown(text);
+    const content = renderDiscordMarkdown(text, FILE_LIMIT);
     if (Buffer.byteLength(content, "utf8") > FILE_LIMIT) throw new DeliveryError("Discord text attachment exceeds the safe 8 MiB upload limit", "rejected");
     return {
       ...(content.length <= MESSAGE_LIMIT ? { content: content || "(empty output)" } : {

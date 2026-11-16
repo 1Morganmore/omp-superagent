@@ -6,16 +6,15 @@
  * table is converted into an aligned fenced block before it leaves this package.
  *
  * Column padding uses display width, not string length, so CJK and other wide
- * characters line up. The width primitive is `Bun.stringWidth` (UAX #11 east
- * asian width, grapheme clusters, ANSI escapes ignored). OMP's own
- * `visibleWidth()` in `.upstream/omp/packages/tui/src/utils.ts` is a wrapper over
- * that same primitive, but `@oh-my-pi/pi-tui` is not a dependency of this
- * package, so this is a local adaptation rather than an import.
+ * characters line up. Bun.stringWidth supplies the display width directly;
+ * no OMP source checkout or private module is needed.
  */
 
 type Align = "left" | "center" | "right";
 
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t\r]*$/;
+const BLOCK_START = /^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$))/;
 const DELIMITER_CELL = /^:?-+:?$/;
 
 /**
@@ -88,19 +87,33 @@ function pad(value: string, width: number, align: Align): string {
   return value + " ".repeat(missing);
 }
 
-/** Render the table lines as one fenced block with padded monospace columns. */
-function formatTable(rows: string[][], aligns: Align[]): string[] {
-  const columns = Math.max(aligns.length, ...rows.map(row => row.length));
+/** Check the byte budget before allocating any padded cells or separators. */
+function formatTable(rows: string[][], aligns: Align[], maxBytes: number): { lines: string[]; bytes: number } | null {
+  const widths = aligns.map(() => 3);
+  for (const row of rows) {
+    for (let column = 0; column < row.length; column++) {
+      widths[column] = Math.max(widths[column] ?? 3, Bun.stringWidth(row[column]!));
+    }
+  }
   const alignOf = (column: number): Align => aligns[column] ?? "left";
-  // Three cells minimum keeps every separator a readable `---` run.
-  const widths = Array.from({ length: columns }, (_, column) =>
-    Math.max(3, ...rows.map(row => Bun.stringWidth(row[column] ?? ""))));
+  const fence = "```";
+  // Each row has a frame, display-width cells, and one newline. UTF-8 cell
+  // bytes may exceed their display width; the separator contains only ASCII.
+  const rowWidth = 3 * widths.length + 1 + widths.reduce((sum, width) => sum + width, 0);
+  let bytes = 2 * fence.length + rows.length + 2 + (rows.length + 1) * rowWidth;
+  for (const row of rows) {
+    for (const cell of row) bytes += Buffer.byteLength(cell, "utf8") - Bun.stringWidth(cell);
+  }
+  if (bytes > maxBytes) return null;
   const line = (cells: string[]) =>
     `| ${widths.map((width, column) => pad(cells[column] ?? "", width, alignOf(column))).join(" | ")} |`;
   // Pure dashes keep the grid exact; alignment is already visible in the padded
   // cells, and `:` markers would only shift every following column by one.
   const separator = `| ${widths.map(width => "-".repeat(width)).join(" | ")} |`;
-  return ["```", line(rows[0]!), separator, ...rows.slice(1).map(line), "```"];
+  const lines = [fence, line(rows[0]!), separator];
+  for (let index = 1; index < rows.length; index++) lines.push(line(rows[index]!));
+  lines.push(fence);
+  return { lines, bytes };
 }
 
 /**
@@ -109,10 +122,13 @@ function formatTable(rows: string[][], aligns: Align[]): string[] {
  * Everything else passes through byte for byte: prose, lists, headings, links,
  * blockquotes, inline code, and existing fenced blocks. Pipes inside a fence are
  * never treated as a table, and an already-converted table stays inside its own
- * fence, so the transform is idempotent.
+ * fence, so the transform is idempotent. If alignment would exceed the complete
+ * message's byte budget, return the original text for the existing delivery path.
  */
-export function renderDiscordMarkdown(text: string): string {
+export function renderDiscordMarkdown(text: string, maxBytes: number): string {
   if (!text.includes("|")) return text;
+  let bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > maxBytes) return text;
   const lines = text.split("\n");
   const out: string[] = [];
   let fence: { char: string; length: number } | null = null;
@@ -121,7 +137,8 @@ export function renderDiscordMarkdown(text: string): string {
     const marker = FENCE_OPEN.exec(line)?.[1];
     if (fence) {
       out.push(line);
-      if (marker && marker[0] === fence.char && marker.length >= fence.length) fence = null;
+      const close = FENCE_CLOSE.exec(line)?.[1];
+      if (close && close[0] === fence.char && close.length >= fence.length) fence = null;
       continue;
     }
     if (marker) {
@@ -129,21 +146,26 @@ export function renderDiscordMarkdown(text: string): string {
       out.push(line);
       continue;
     }
-    const delimiter = index + 1 < lines.length ? parseDelimiter(lines[index + 1]!) : null;
+    const delimiter = !BLOCK_START.test(line) && index + 1 < lines.length ? parseDelimiter(lines[index + 1]!) : null;
     const header = delimiter ? splitRow(line) : null;
     if (!delimiter || !header || header.length !== delimiter.length) {
       out.push(line);
       continue;
     }
     const rows = [header];
+    let sourceBytes = Buffer.byteLength(line, "utf8") + 1 + Buffer.byteLength(lines[index + 1]!, "utf8");
     let next = index + 2;
     for (; next < lines.length; next++) {
-      if (FENCE_OPEN.test(lines[next]!)) break;
+      if (FENCE_OPEN.test(lines[next]!) || BLOCK_START.test(lines[next]!)) break;
       const row = splitRow(lines[next]!);
       if (!row) break;
       rows.push(row);
+      sourceBytes += 1 + Buffer.byteLength(lines[next]!, "utf8");
     }
-    out.push(...formatTable(rows, delimiter));
+    const table = formatTable(rows, delimiter, maxBytes - bytes + sourceBytes);
+    if (!table) return text;
+    bytes += table.bytes - sourceBytes;
+    for (const rendered of table.lines) out.push(rendered);
     index = next - 1;
   }
   return out.join("\n");
