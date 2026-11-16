@@ -296,8 +296,8 @@ try {
     check("lane_inspect", {}, true);
     check("lane_message", { id: "lane", text: "instruction", sourceId: "source" }, true);
     check("lane_message", { id: "lane", text: "instruction" }, false);
-    for (const name of ["ulw", "ulw-plan", "ulw-execute", "ulw-loop", "mass-ulw", "ulw-research"]) {
-      const workflow = { name, reason: "Existing objective requires durable dependency handoffs" };
+    for (const name of ["ulw", "ulw-plan", "ulw-execute", "ulw-loop", "mass-ulw", "ulw-research", "jevify"]) {
+      const workflow = { name, reason: "Selected method serves the authorized objective" };
       check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, workflow }, true);
       check("lane_message", { id: "lane", text: "instruction", sourceId: "source", workflow }, true);
     }

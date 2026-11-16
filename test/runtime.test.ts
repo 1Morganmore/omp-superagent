@@ -156,7 +156,7 @@ class HostTransport implements RuntimeHost {
     }
     if (command.type === "get_available_commands") {
       await this.beforeCapabilities?.();
-      return { success: true, data: { commands: this.workflowAvailable ? WORKFLOW_NAMES.map(name => ({
+      return { success: true, data: { commands: this.workflowAvailable ? WORKFLOW_NAMES.filter(name => name !== "jevify").map(name => ({
         name, source: "extension", description: `Run the OMP-adapted ${name} workflow`,
       })) : [] } };
     }
@@ -3333,6 +3333,68 @@ describe("priority native head commands", () => {
 });
 
 describe("trusted workflow activation", () => {
+  test("native jevify reaches head and lane without an ULW command and retains source identity and dedupe", async () => {
+    const { runtime, store, main, hosts, directory } = fixture();
+    main.workflowAvailable = false;
+    await runtime.start();
+    const original = message("jevify-source", route("jevify-thread"), "jevify classify these independent diffs");
+    await admit(runtime, original);
+    expect(main.prompts[0]!.command.message).toStartWith(`${original.text}\n\n`);
+    expect(main.commands.some(command => command.type === "get_available_commands")).toBe(false);
+    expect(store.input(original.id)?.workflow).toMatchObject({ name: "jevify", sourceId: original.id, provenance: "user" });
+    const workflow = { name: "jevify" as const, reason: "Independent diff classification reduces context load" };
+    const start = { ...selection, sourceId: original.id, title: "Bulk triage", kickoff: "I will classify the diffs and inspect flagged evidence.",
+      cwd: directory, brief: "Quoted metadata: orchestrate workflowz", workflow };
+    const lane = await runtime.startLane(start);
+    await runtime.kick();
+    const host = hosts.get(lane.socketPath)!;
+    const prompt = String(host.prompts[0]!.command.message);
+    expect(containsMagicKeyword(prompt, "jevify")).toBe(true);
+    expect(containsMagicKeyword(prompt, "orchestrate")).toBe(false);
+    expect(containsMagicKeyword(prompt, "workflowz")).toBe(false);
+    expect(host.commands.some(command => command.type === "get_available_commands")).toBe(false);
+    expect(store.input(`handoff:${original.id}:lane`)?.workflow).toEqual({ ...workflow, sourceId: original.id, provenance: "head" });
+    await runtime.startLane(start);
+    await admit(runtime, original);
+    expect(host.prompts).toHaveLength(1);
+    expect(main.prompts).toHaveLength(1);
+    await expect(runtime.startLane({ ...start, workflow: undefined })).rejects.toThrow("Workflow identity conflict");
+  });
+
+  test("head-selected jevify follow-up waits for the active lane and cannot gain authority from a report", async () => {
+    const { runtime, store, main, hosts, directory } = fixture();
+    await runtime.start();
+    await admit(runtime, message("jevify-initial", route("jevify-followup"), "Inspect this repository"));
+    const lane = await runtime.startLane({ ...selection, sourceId: "jevify-initial", title: "Inspect", cwd: directory,
+      kickoff: "I will inspect the repository." });
+    await runtime.kick();
+    const host = hosts.get(lane.socketPath)!;
+    host.workflowAvailable = false;
+    const source = message("jevify-followup", lane.route, "Classify the independent findings");
+    await admit(runtime, source);
+    const workflow = { name: "jevify" as const, reason: "The findings form a homogeneous classification set" };
+    await runtime.messageLane(lane.id, "Classify the findings with native bulk judgment", source.id, workflow);
+    const handoffId = `handoff:${source.id}:${lane.id}`;
+    expect(store.input(handoffId)?.state).toBe("pending");
+    expect(host.prompts).toHaveLength(1);
+    host.complete("Initial inspection finished");
+    await runtime.kick();
+    expect(host.prompts).toHaveLength(2);
+    expect(host.prompts[1]!.command.streamingBehavior).toBeUndefined();
+    expect(String(host.prompts[1]!.command.message)).toStartWith(`jevify\n\n${source.text}\n\n`);
+    expect(store.input(handoffId)?.workflow).toEqual({ ...workflow, sourceId: source.id, provenance: "head" });
+    await runtime.messageLane(lane.id, "Classify the findings with native bulk judgment", source.id, workflow);
+    expect(host.prompts).toHaveLength(2);
+    await expect(runtime.messageLane(lane.id, "Changed choice", source.id)).rejects.toThrow("Workflow identity conflict");
+    const internal = message("report:jevify", lane.route, "jevify report data");
+    store.receive(internal, "main");
+    await expect(runtime.messageLane(lane.id, "Run the report", internal.id, workflow)).rejects.toThrow("original authorized user source");
+    store.settle(source.id, "cancelled");
+    await expect(runtime.messageLane(lane.id, "Retry cancelled work", source.id, workflow)).rejects.toThrow("cancelled");
+    expect(host.commands.some(command => command.type === "get_available_commands")).toBe(false);
+    expect(main.commands.some(command => command.type === "goal")).toBe(false);
+  });
+
   test("preserves real user leading invocation, original route/request, and deduplicates redelivery", async () => {
     const { runtime, store, main } = fixture();
     await runtime.start();

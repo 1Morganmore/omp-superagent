@@ -1,7 +1,7 @@
 import { WORKFLOW_NAMES, type WorkflowActivation, type WorkflowChoice, type WorkflowName } from "./contracts";
 
 // Boundary contract inspected against omp-ulw/ulw.ts (2026-11-14). This bridge
-// recognizes only its six ULW workflows, not arbitrary mentions or skill prose.
+// recognizes its six ULW workflows and native jevify, not arbitrary mentions or skill prose.
 const aliases: Array<[WorkflowName, RegExp]> = [
   ["ulw-research", /^(?:ulw|mass[\s-]*ulw|ulw[\s-]*mass|mulw|meth)[\s-]*research\b/i],
   ["mass-ulw", /^(?:mass[\s-]*ulw|ulw[\s-]*mass|mulw|meth)\b/i],
@@ -18,6 +18,9 @@ const nativeWord: Partial<Record<WorkflowName, string>> = {
 
 /** Only the original authorized user's leading invocation is eligible. */
 function invocation(text: string): { name: WorkflowName; length: number } | null {
+  // Unlike ULW commands, native jevify is lowercase prose, never a slash command.
+  const native = /^\s*jevify(?=$|[\s:.,!?])/.exec(text);
+  if (native && !identifierTail.test(text.slice(native[0].length))) return { name: "jevify", length: native[0].length };
   const prefix = /^\s*\/?/.exec(text)![0].length;
   const leading = text.slice(prefix);
   for (const [name, expression] of aliases) {

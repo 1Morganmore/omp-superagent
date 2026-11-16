@@ -133,7 +133,7 @@ export interface Lane {
 }
 
 export type InputState = "pending" | "submitted" | "done" | "uncertain" | "cancelled";
-export const WORKFLOW_NAMES = ["ulw", "mass-ulw", "ulw-plan", "ulw-loop", "ulw-execute", "ulw-research"] as const;
+export const WORKFLOW_NAMES = ["ulw", "mass-ulw", "ulw-plan", "ulw-loop", "ulw-execute", "ulw-research", "jevify"] as const;
 export type WorkflowName = typeof WORKFLOW_NAMES[number];
 export interface WorkflowChoice {
   name: WorkflowName;

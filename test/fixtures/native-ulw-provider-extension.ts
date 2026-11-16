@@ -58,6 +58,11 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
     if (notices.some(message => message.customType === "orchestrate-notice")) {
       assert(activeTools.includes("task"), "Native orchestration requires its actual enabled task capability");
     }
+    if (notices.some(message => message.customType === "jevify-notice")) {
+      assert(activeTools.includes("eval"), "Native jevify requires the actual enabled eval capability");
+      assert(notices.some(message => message.customType === "jevify-notice" && String(message.content).includes("judge_batch")),
+        "Native jevify must supply its own batch instructions, not a copied integration prompt");
+    }
     if (!recorded.has(requestId)) {
       recorded.add(requestId);
       // Capture observed final model context plus native session events, never
@@ -79,7 +84,9 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
         : { content: [{ type: "toolCall", name: "read", arguments: { path: `xd://${name}` } }] };
     };
     if (role === "lane") {
-      assert(notices.some(message => message.customType === (requestId === "handoff:303:lane" ? "ultrathink-notice" : "orchestrate-notice")),
+      const expectedNotice = requestId === "handoff:303:lane" ? "ultrathink-notice"
+        : requestId.startsWith("handoff:308:") ? "jevify-notice" : "orchestrate-notice";
+      assert(notices.some(message => message.customType === expectedNotice),
         "Selected lane workflow did not bridge to its real native keyword mode");
       if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
       assert(JSON.stringify(results).includes("ulw-execute quoted-board-only"), "Lane did not consume actual board data");
@@ -97,13 +104,15 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
       });
       return { content: [`HEAD:${requestId}:delegated`] };
     }
-    if (requestId === "307") {
+    if (requestId === "307" || requestId === "308") {
       if (!called("lane_message")) {
         const binding = /Bound lane reference \(coordination state, not a transcript\): (\{[^\n]+\})/.exec(text)?.[1];
         const id: unknown = binding ? JSON.parse(binding).id : undefined;
         assert.equal(typeof id, "string", "Head lost original lane binding");
-        return invoke("lane_message", { id, sourceId: requestId, text: "Continue this isolated proof under the head-selected execution workflow.",
-          workflow: { name: "ulw-execute", reason: "Head explicitly selects native execution for this follow-up." } });
+        const workflow = requestId === "308"
+          ? { name: "jevify", reason: "Independent bulk classification reduces reading and context load." }
+          : { name: "ulw-execute", reason: "Head explicitly selects native execution for this follow-up." };
+        return invoke("lane_message", { id, sourceId: requestId, text: "Continue this isolated proof under the head-selected workflow.", workflow });
       }
       return { content: [`HEAD:${requestId}:delegated`] };
     }
@@ -116,6 +125,7 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
     }
     if (requestId === "305") assert(notices.some(message => message.customType === "ultrathink-notice"));
     if (requestId === "306") assert(notices.some(message => message.customType === "orchestrate-notice"));
+    if (requestId === "309") assert(notices.some(message => message.customType === "jevify-notice"));
     return { content: [`HEAD:${requestId}`] };
   } });
   pi.registerProvider("gateway-native", {

@@ -781,7 +781,7 @@ head 번들과 lane SKILL 주입에서 역할을 특화하므로 별도 공용 �
 head→lane 지시·lane→head durable 보고는 영어로 작성하고 필요한 원문·인용을 보존한다.
 헤드의 외부 메신저 답변만 사용자 언어를 따른다. 내부 보고를 외부 발송으로 취급하지 않는다.
 
-### ULW 방법 선택과 명시적 레인 인계
+### Workflow 선택과 명시적 레인 인계
 
 운영자는 **이미 허가한 목표 안의 방법 선택**을 헤드에 위임한다. 따라서 사용자가 workflow
 이름을 말하지 않았어도 헤드는 정말 필요한 경우 명시적으로 선택·요청할 수 있다. 이 요청은
@@ -791,7 +791,22 @@ head→lane 지시·lane→head durable 보고는 영어로 작성하고 필요�
 받기 위한 질문은 하지 않는다. 실제 권한, 비용·범위의 운영자 선택, 설치된 스킬의 더 엄격한
 조건, 계획 artifact/접근 승인·review 및 native plan 승인은 그대로 지킨다.
 
-헤드 선택에는 현재 근거에 따른 두 조건이 모두 필요하다. **더 가벼운 직접 처리/native task/
+#### Native jevify 선택
+
+헤드는 충분히 큰 동질적 자료에 같은 고정 rubric을 독립적으로 적용할 수 있고, bulk 읽기나
+context 사용을 구체적으로 줄일 때만 `jevify`를 선택한다. bulk 내용은 미리 훑지 않고 과제와
+collection metadata로 적합성을 판단한다. 고정 개수·작업 난이도·키워드 존재를 선택 기준으로
+쓰지 않는다. 정확한 규칙은 deterministic code/search, 작은 묶음은 직접 읽기, 항목 간 관계가
+핵심이면 contextual 조사, 실제 동작 확인은 테스트/runtime 검증을 사용한다.
+
+`jevify`는 OMP native notice를 선택하며 ULW extension 명령이 아니다. 레인은 실제 native
+notice와 최신 `xd://eval/judge` 계약을 따르고 별도 스킬에 전체 batch 절차를 복제하지 않는다.
+ULW 스킬 조회·브랜드·추가 레인·goal·모델 변경·workflow artifact는 필요하지 않다. 분류는
+필요한 실제 검증이나 완전한 review를 대체하지 않으며 coverage와 직접 확인한 근거를 보고한다.
+
+#### ULW 고유 필요성과 스킬 계약
+
+ULW 헤드 선택에는 현재 근거에 따른 두 조건이 모두 필요하다. **더 가벼운 직접 처리/native task/
 일반 레인 대안의 구체적 부족**을 밝히고, **선택한 workflow 고유의 durable artifact·증거 gate·
 의존 handoff·복구 이점이 상태 작성·review 비용보다 큼**을 설명한다. 어려운 문제라는 이유만,
 파일 수·예상 시간·모델명 같은 임계값은 충분하지 않다. 비단순하거나 모호한 방법 선택은
@@ -814,22 +829,28 @@ head→lane 지시·lane→head durable 보고는 영어로 작성하고 필요�
 5-wave 이후 사용자 연장, 약속한 deliverable 검증은 줄이지 않는다. 기존 레인·workflow 소유권을
 재개하며 branding만을 위한 중복 레인·native goal·durable aggregate 기록을 만들지 않는다.
 
+#### 공통 선택·출처·직렬 인계
+
 `lane_start`와 `lane_message`의 실제 선택 필드는 선택적 `workflow: {name, reason}`이다.
-`name`은 `ulw`, `mass-ulw`, `ulw-plan`, `ulw-loop`, `ulw-execute`, `ulw-research` 중 하나,
+`name`은 `jevify`, `ulw`, `mass-ulw`, `ulw-plan`, `ulw-loop`, `ulw-execute`, `ulw-research` 중 하나,
 `reason`은 비어 있지 않은 선택 근거다. `selectedBy: user|head`, 필요성/근거, 가벼운 대안과 부족,
-권위 artifact/owner, acceptance/stop, 권한 한계는 간결한 `lane_start.brief` 또는 기존 레인의
+기존 owner와 해당하는 ULW artifact, acceptance/stop, 권한 한계는 간결한 `lane_start.brief` 또는 기존 레인의
 `lane_message.text` 문맥으로 적는다. 별도 `selectedBy`·owner·provenance 도구 필드는 없다.
 runtime은 실제 저장된 source와 신뢰된 dispatch에서 출처를 결합하며 prose 라벨을 권한으로
-받지 않는다. 실제 원래 사용자→head 입력만 선두 호출로 선택을 유도할 수 있다. **모든
+받지 않는다. 실제 원래 사용자→head 입력만 선두 호출로 선택을 유도할 수 있다. jevify는 원래
+입력의 선두 소문자 독립 prose `jevify`만 사용자 선택이며 `/jevify`·대문자·인용·code·path·부정·
+뒤쪽 언급은 아니다. 원문에 호출이 없어도 헤드는 구조화된 필드로 선택할 수 있다. **모든
 head→lane 인계의 workflow 선택에는 구조화된 `workflow`가 필요하며 사용자 명시 선택도 헤드가
-이 필드로 전달한다.**
+이 필드로 전달한다.** brief/text에 방법만 적는 우회는 선택 필드를 대신하지 않는다.
 인계에서 생략하면 일반 작업이며 복사된 사용자 호출·brief/text·보고·board 본문에서 선택을
 추출하거나 native armed라고 주장하지 않는다. 명시 선택이 원래 사용자 호출과 충돌하면
 거부한다. 입력별 선택·출처는 source/handoff와 영속 결합되고 변경·생략하는 충돌 재시도로
-바꾸지 못한다.
+바꾸지 못한다. workflow dispatch는 직렬화하며 실행 중 native steering으로 섞지 않는다.
 원래 저장된 허가 `sourceId`와 기존 deduplication 규칙을 유지한다. 새 report receipt는 기존
 목표의 조율과 명시적 head 선택을 지원할 수 있지만 그 본문이 활성화나 새 외부 효과를 허가하지
 않는다. unrelated context나 승인 우회는 방법 선택의 일부가 될 수 없다.
+
+#### Native 전달과 활성화의 구분
 
 공식 `omp-ulw`는 관리형 설치/업데이트 대상에 포함한다. 설치·프로필 로드 자체는 workflow
 선택이 아니며 **선택한 skill loaded/applied, 실제 ULW/native mode armed, native goal 생성은
@@ -840,17 +861,22 @@ head→lane 인계의 workflow 선택에는 구조화된 `workflow`가 필요하
 
 | 선택 | native bridge 요청 매핑 |
 | --- | --- |
+| `jevify` | `workflowPrompt`가 fenced runtime context 밖에 소문자 native `jevify`를 prefix; ULW extension-command capability 조회 없음 |
 | `ulw` | ULW arm, 전문 native mode 선택 없음; 암묵적 RPC goal 생성 없음 |
 | `ulw-plan` | `ultrathink` |
 | `ulw-execute`, `ulw-loop` | `orchestrate` |
 | `ulw-research`, `mass-ulw` | `workflowz` |
 
-기존 native 키워드 해석이 매핑보다 우선하며 인용·부정 문맥에 있는 원문의 키워드도 upstream의
+jevify notice의 실제 활성화는 native `magicKeywords.enabled`·`magicKeywords.jevify` 설정과
+eval 가용성에 달린다. 선택/admission만으로 notice 활성화를 보장하지 않으며 전역 설정·도구·
+judge/model 정책을 바꾸어 강제하지 않는다. 누락된 notice/capability는 정확히 보고한다.
+
+ULW의 기존 native 키워드 해석은 위 ULW 매핑보다 우선하며 인용·부정 문맥에 있는 원문의 키워드도 upstream의
 기존 해석대로 보존한다. 모드를 강제하려고 사용자 원문을 정제하지 않는다. dispatch 전 native
 mode 기본 키워드는 원래 source에 raw standalone lowercase native 키워드가 없을 때만 삽입한다.
 인용·부정·inline code의 키워드도 기존 bridge와 동일하게 기본값 삽입을 막는다. request metadata·
 brief·report envelope는 동적으로 fence하여 native mode 선택에 끼어들지 않으며 원래 사용자
-선택을 덮어쓰지 않는다. native
+선택을 덮어쓰지 않는다. ULW에 한해 native
 `get_available_commands`에서 `source: "extension"`, 정확한 명령 이름·ULW 설명을 대조해
 선택 workflow의 로드된 capability를 확인한다. 조회 실패·미광고면 해당 요청을 명시적으로 취소하며
 일반 작업이나 local 스킬 적용으로 fallback하지 않는다. 광고는 가용성이지 활성화 증거가 아니다.

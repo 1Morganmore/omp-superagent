@@ -82,18 +82,44 @@ The head can explicitly select a method on behalf of the already authorized obje
 under the operator's delegated discretion. It uses the real optional lane-tool field
 `workflow: {name, reason}` for explicit selection, with a supported name and nonempty
 reason. Its concise brief/text keeps `selectedBy: user|head`, necessity/evidence,
-lighter alternative, authoritative artifact/owner, acceptance/stop and permission
-limits as context, not additional API fields. Runtime binds choice/provenance to the
+lighter alternative, existing owner (and ULW artifacts when applicable),
+acceptance/stop and permission limits as context, not additional API fields.
+Runtime binds choice/provenance to the
 stored source/handoff. All head-to-lane workflow handoffs require this structured
 field, even when forwarding the original user's explicit choice. Omission means
 ordinary work; copied user invocations, arbitrary head text, reports and board posts
 cannot activate it. Only actual original user inputs to the head may derive a leading
-invocation. A conflicting explicit selection or changed/omitted retry is rejected.
+invocation. For jevify, only original leading lowercase standalone prose `jevify`
+qualifies, not `/jevify`, uppercase, quotations, code, paths, negation or later mentions.
+A head-selected field can select it for ordinary original text without that token.
+A conflicting explicit selection or changed/omitted retry is rejected; retain the
+authorized source, route and deduplication constraints. Workflow dispatch is
+serialized, not mid-run native steering.
 Honor authorized structured head selection even when the user did not name the brand;
 do not relabel it as user selection. Do not independently promote ordinary lane work
-into ULW. Report genuinely unclear selection to the head without creating state.
+into a workflow. Report genuinely unclear selection to the head without creating state.
 
-Before substantive workflow work, use native `read` for the actual selected
+### Follow native jevify, not a parallel protocol
+
+For a structured jevify selection, runtime's `workflowPrompt` prefixes
+lowercase native `jevify` outside fenced runtime context, without an ULW extension
+command capability lookup. This is selection, not evidence the notice activated:
+native `magicKeywords.enabled`, `magicKeywords.jevify` and eval availability still
+control activation. Follow OMP's actual native jevify notice and current
+`xd://eval/judge` docs for the batch protocol. Do not reproduce the notice as another
+local procedure, hand-scan the bulk instead, or infer activation from admission.
+Report a missing notice/capability accurately; do not change global settings, tools,
+judge roles, credentials or policy to force it. Jevify requires no ULW skill lookup,
+brand, extra lane, goal, model change or workflow artifacts.
+
+Keep the assigned source/revision and scope intact. Report coverage and directly
+checked flagged evidence, not just a successful batch or confidence score. Native
+classification does not replace required tests, real-surface verification or a
+complete review.
+
+### Apply the selected ULW contract
+
+For the six ULW values only, before substantive work use native `read` for the selected
 `skill://ultrawork`, `skill://ulw-plan`, `skill://ulw-execute`, `skill://ulw-loop`,
 `skill://mass-ulw`, or `skill://ulw-research` and its required authority/artifact
 references. Load only the selected contract and applicable references, not every
@@ -137,8 +163,8 @@ run is a conflict, not permission to replace/adopt it. Preserve scope, pauses,
 cancellation, uncertainty and required user-directed recovery across hook events.
 Optional children do not inherit workflow activation or shared state ownership.
 
-Report selected SKILL loading/application separately from observed ULW/native mode
-activation. Runtime places the trusted user invocation or structured head selection
+For ULW, report selected SKILL loading/application separately from observed
+ULW/native mode activation. Runtime places the trusted user invocation or structured head selection
 before retained `Request ID`/source metadata for native activation. Plain `ulw`
 arms ULW without choosing a specialty native mode; `ulw-plan` maps to `ultrathink`,
 `ulw-execute`/`ulw-loop` to `orchestrate`, and `ulw-research`/`mass-ulw` to `workflowz`.

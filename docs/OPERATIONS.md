@@ -31,11 +31,24 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 
 관리형 ULW 설치·일반 프로필 로드만으로 workflow를 선택하거나 goal을 만들지 않는다.
 일반 작업은 직접 처리·native task·일반 레인으로 충분할 수 있다. 사용자의 명시적 선택 또는
-허가 목표 안에서의 헤드 판단으로만 workflow를 선택한다. 더 가벼운 대안보다 유용한 이유를
-남기고 실제 선택 SKILL을 읽는다. 계획만 요청받았으면 구현하지 않으며 native 승인·artifact
+허가 목표 안에서의 헤드 판단으로만 workflow를 선택한다. `lane_start`/`lane_message`의 실제
+`workflow: {name, reason}`에 `jevify` 또는 여섯 ULW 값과 비어 있지 않은 이유를 전달한다.
+기존 source/provenance·dedupe를 유지하며 workflow 선택은 실행 중 steering이 아닌 직렬
+dispatch다. ULW는 더 가벼운 대안보다 유용한 이유를 남기고 실제 선택 SKILL을 읽는다.
+jevify는 충분히 큰 동질적 자료에 고정 rubric을 독립 적용하여 읽기/context 비용을 줄일 때만
+선택하며 개수·난이도로 고정하지 않는다. 정확한 규칙·작은 묶음·항목 간 추론·실제 검증은
+각각 deterministic 처리·직접 읽기·contextual 조사·테스트/runtime 검증을 쓴다.
+계획만 요청받았으면 구현하지 않으며 native 승인·artifact
 review·비용·범위·pause/cancel·불확실성 보류를 우회하지 않는다.
 방법별 선택 기준·구조화된 인계·native mode 매핑은
-[설계의 ULW 계약](../DESIGN.md#ulw-방법-선택과-명시적-레인-인계)에 모은다.
+[설계의 workflow 계약](../DESIGN.md#workflow-선택과-명시적-레인-인계)에 모은다.
+사용자 jevify 선택은 원래 입력 선두의 소문자 독립 prose `jevify`만 인정하며 `/jevify`·대문자·
+인용/code/path·부정·뒤쪽 언급은 아니다. 호출 없는 일반 원문에도 헤드 선택 필드는 사용 가능하다.
+runtime의 `workflowPrompt`는 fenced context 밖에 소문자 native `jevify`를 prefix하며 ULW
+extension-command capability 조회를 하지 않는다. 레인은 실제 OMP jevify notice와 최신
+`xd://eval/judge`를 따른다. notice 활성화는 native `magicKeywords.enabled`·`magicKeywords.jevify`와
+eval 가용성에 달리므로 admission만으로 보장하지 않는다. 전역 설정을 바꾸지 않으며 jevify에는
+ULW 스킬 조회·브랜드·추가 레인·goal·모델 변경·workflow artifact가 필요하지 않다.
 레인의 보고는 헤드용이며 외부 발송이 아니다. 내부 지시·보고는 영어, 헤드의 외부 답변은
 사용자 언어를 사용한다.
 

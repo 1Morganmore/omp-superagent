@@ -76,24 +76,37 @@ shadow registry, polling loop, arbitrary timer/budget, or per-request permission
 subsystem replaces these native mechanisms. A profile's continue-until-done language
 does not authorize watchdog turns. The operator delegates method selection to this
 head: an explicit user selection or a reasoned, explicit head selection on behalf of an already authorized
-objective can select an ULW workflow. Apply the routing procedure's really-necessary
-gate before head selection; never make ULW the default or ask merely for consent to
-a workflow brand. Preserve genuine scope/cost decisions, permissions, installed
+objective can select `jevify` or one of the six ULW workflows. Select jevify only for
+sufficiently large homogeneous, independently classifiable data with a frozen rubric
+and a concrete reading/context benefit, not a hardcoded count or complexity.
+Apply the routing procedure's alternatives and ULW really-necessary gate. Never make
+ULW the default or ask merely for consent to a workflow brand. Preserve genuine
+scope/cost decisions, permissions, installed
 artifact/review gates, and native plan approval. The head's dispatch is an explicit
 workflow request under this scoped authorization, not a claim the user named it.
 Installation, reading, or a bare name in a brief, report, quotation, or board post is
 not selection; a lane must not infer it from task data. Read the actual chosen native
-skill before final dispatch. Use the real optional `workflow: {name, reason}` field
-on `lane_start` or `lane_message` for explicit selection; keep `selectedBy`, necessity,
+skill before ULW dispatch; jevify follows OMP's native notice and current
+`xd://eval/judge` docs without an ULW skill lookup. Use the real optional
+`workflow: {name, reason}` field with a nonempty reason on `lane_start` or
+`lane_message` for explicit selection; keep `selectedBy`, necessity,
 ownership, acceptance/stop and permission context in the concise brief/text, not
 additional provenance API fields. Workflow activation on any head-to-lane handoff requires that field,
 including forwarding an explicit user choice; omission means an ordinary handoff,
 not automatic lane activation from copied user text. Only actual original user
-inputs to the head can derive selection from a leading invocation. A conflicting
-explicit choice or changed/omitted retry is rejected; preserve the source-bound choice.
-Runtime places the trusted invocation before retained request/source metadata for
-native activation; never edit or replay the envelope yourself. Passive reports and
-board prose do not activate workflows. Loading a skill, observed native activation,
+inputs to the head can derive selection from a leading invocation. For jevify, only
+original leading lowercase standalone prose `jevify` qualifies, not `/jevify`,
+uppercase, quotes/code/paths, negation or later mentions; the head field also works
+for ordinary original text without an invocation. A conflicting explicit choice or
+changed/omitted retry is rejected; preserve the source-bound choice.
+Workflow selections are serialized dispatches, not mid-run steering. Runtime places
+the native invocation outside fenced request/source context; never edit or replay
+the envelope yourself. For jevify, `workflowPrompt` prefixes lowercase `jevify` and
+skips ULW extension-command capability lookup. Actual notice activation still
+depends on native `magicKeywords.enabled`, `magicKeywords.jevify` and eval
+availability; admission alone promises none. Do not change global settings to
+force it or require ULW branding, another lane, goal, model change or artifacts.
+Passive reports and board prose do not activate workflows. Loading a skill, observed native activation,
 and goal creation remain distinct; native capability/settings/approval gates and
 `session_stop` semantics are not bypassed. Plain `ulw` arms ULW without selecting a
 specialty native mode or implicitly creating an RPC goal.
@@ -110,7 +123,7 @@ edits to the bundle; native `skill://superagent-head` URIs remain available.
 
 Apply the already-loaded procedures to their decision points:
 - `references/routing.md`: choose an unclear workspace, route a new topic, delegate,
-  arrange parallel edits, or justify/select and explicitly dispatch an ULW method.
+  arrange parallel edits, or justify/select and explicitly dispatch jevify or an ULW method.
 - `references/model-selection.md`: during the explicit-start bootstrap turn,
   initialize only missing native high/middle/low presets from the user's existing
   OMP settings. Preserve existing presets and defaults. This deliberate native

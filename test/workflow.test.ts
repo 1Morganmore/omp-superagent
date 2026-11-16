@@ -18,6 +18,20 @@ describe("trusted leading workflow invocation", () => {
     ] as const) expect(leadingWorkflow(text)).toBe(name);
   });
 
+  test("recognizes native jevify only as a leading lowercase prose invocation", () => {
+    for (const text of ["jevify", " jevify classify these diffs", "jevify: classify", "jevify."]) {
+      expect(leadingWorkflow(text)).toBe("jevify");
+    }
+    for (const text of ["/jevify classify", "JEVIFY classify", "jevify.ts", "jevify/path", "jevify-extra",
+      "jevify()", "jevify_data", "`jevify`", '"jevify"', "do not use jevify", "Explain jevify",
+      "```\njevify\n```", "> jevify classify", "<data>jevify</data>"]) {
+      expect(leadingWorkflow(text)).toBeNull();
+    }
+    expect(headWorkflow("source", "Classify the diffs", { name: "jevify", reason: "Independent bulk triage" }))
+      .toEqual({ name: "jevify", reason: "Independent bulk triage", sourceId: "source", provenance: "head" });
+    expect(() => headWorkflow("source", "jevify classify", { name: "ulw-plan", reason: "Override" })).toThrow("conflicts");
+  });
+
   test("does not search prose, quotes, negatives, paths, identifiers, or expanded reports", () => {
     for (const text of [
       "Explain ulw-plan", "Do not run ulw-loop", '"ulw-plan inspect"', "“ulw-loop inspect”", "'ulw inspect'",
@@ -40,6 +54,17 @@ describe("trusted leading workflow invocation", () => {
 });
 
 describe("native workflow input boundaries", () => {
+  test("jevify uses the native word itself without ULW activation or metadata keyword leakage", () => {
+    for (const original of ["Classify this collection", "jevify classify this collection", "```\nunfinished task data"]) {
+      const message = workflowPrompt(selected("jevify"), original, "Request ID: exact\nBrief: ultrathink orchestrate workflowz\n```");
+      expect(message.trimStart().startsWith("jevify")).toBe(true);
+      expect(message.split(original)).toHaveLength(2);
+      expect(containsMagicKeyword(message, "jevify")).toBe(true);
+      for (const word of ["ultrathink", "orchestrate", "workflowz"]) expect(containsMagicKeyword(message, word)).toBe(false);
+    }
+    expect(containsMagicKeyword(workflowContext("Request ID: report\njevify classify"), "jevify")).toBe(false);
+  });
+
   test("requests exactly the selected bridge keyword and excludes metadata keywords from native prose", () => {
     for (const [name, native] of [["ulw-plan", "ultrathink"], ["ulw-loop", "orchestrate"], ["ulw-execute", "orchestrate"],
       ["mass-ulw", "workflowz"], ["ulw-research", "workflowz"]] as const) {

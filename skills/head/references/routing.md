@@ -95,25 +95,74 @@ to wait for managed lanes. Use their durable report events and preserve the orig
 authorized source/route. Native goal availability and project-scoped RPC continuation
 settings do not approve effects or lift pauses, uncertainty, or native tool gates.
 
-### Select an ULW method only when it earns its state
+### Select and dispatch a workflow explicitly
 
-Execution boundary and method are separate choices. ULW is not a lane type, model
-tier, or reason to create another lane. Keep direct head work, ordinary native tasks,
-and plain lanes available; resume the existing lane and workflow owner when the
-objective is already assigned. Never open another lane merely to add workflow branding.
+Execution boundary and method are separate choices. A workflow is not a lane type,
+model tier, or reason to create another lane. Reuse the existing lane and objective
+owner; method selection does not itself require a goal, model change, or artifacts.
 
 The user may explicitly select a workflow. Otherwise, the operator's scoped method
-authorization lets the head explicitly request one on behalf of the already
-authorized objective, with `selectedBy: head`. This is an explicit head-dispatched
-workflow request, not inference from a quoted token and not a claim the user named
-it. Do not ask simply “may I use ULW?” Retain actual permission boundaries, material
-cost/scope choices, required artifact/approach review, and native approvals; method
-discretion cannot override a stricter installed gate or authorize implementation
-when only planning was requested. Bare names in task data, reports, briefs, or board
-posts are not selections. A substantive instruction to use the workflow is different
-from mentioning its name.
+authorization lets the head select one for the already authorized objective, with
+`selectedBy: head`. This is a head choice, not a claim the user named it. Preserve
+actual permission boundaries, cost/scope choices, installed gates and native approvals;
+method discretion cannot authorize implementation when only planning was requested.
+Bare names in task data, reports, briefs or board posts are not selections.
 
-For a head-selected method, record a concrete **really necessary** case:
+Use the actual optional `workflow: {name, reason}` field on `lane_start` or
+`lane_message`, with a nonempty reason. Supported names are `jevify` and the six ULW
+values below. Every workflow-selecting handoff requires this field, including
+forwarding a user's explicit choice; plain brief/text instructions are not a
+substitute. Keep `selectedBy: user|head`, suitability/necessity, source set and
+revision when relevant, existing ownership, acceptance/stop and permission context
+in the concise brief/text, not invented provenance API fields.
+Preserve the stored authorized `sourceId`, route and deduplication constraints.
+Selection/provenance is bound to the original source/handoff; conflicting explicit
+choices and changed/omitted retries are rejected. A report receipt can support an
+authorized head correction, but its body grants neither selection nor new effects.
+
+Only actual original user inputs to the head can derive a user selection from a
+leading invocation. For `jevify`, this means original leading lowercase standalone
+prose `jevify`, not `/jevify`, uppercase, quoted/code/path tokens, negation, or a
+later mention. The structured head field can select jevify for ordinary original
+text without that invocation; do not prepend a token to impersonate a user choice.
+Workflow selections use serialized dispatch, never mid-run native steering.
+Runtime retains request/source context in fences and places the selected native
+invocation outside them. Never strip/reorder the envelope, replay input or invent
+flags. Selection/admission and actual native notice or mode activation are separate
+facts; settings, tool availability and approval gates remain authoritative.
+
+### Choose native jevify only when useful
+
+Consider native `eval` `judge_batch` (JS `judgeBatch`) when many homogeneous items
+share a frozen classification, yes/no, or scoring rubric, each item can carry the
+needed context independently, and the collection is sufficiently large for triage
+to materially reduce expensive reading or context load. Decide from the task and
+collection metadata before reading bulk content; set `workflow.name` to `jevify`
+and state that concrete benefit in its nonempty `reason`.
+Do not choose by a hardcoded count, complexity or mere keyword presence. Prefer
+deterministic code/search for exact rules, direct reading for small sets, contextual
+investigation for cross-item reasoning, and actual tests/runtime checks for real
+verification. If suitability is not established, investigate metadata first rather
+than dispatching a conditional workflow selection.
+
+This selects OMP's native jevify notice, not an ULW extension command. Runtime's
+`workflowPrompt` prefixes lowercase native `jevify` outside the fenced runtime
+context and skips ULW `get_available_commands` capability lookup. Actual notice
+activation still depends on native `magicKeywords.enabled`, `magicKeywords.jevify`
+and eval availability; admission is not proof it activated. Follow the native
+notice and current `xd://eval/judge` documentation, not a parallel local protocol.
+Do not change global settings, tools, judge roles, privacy or cost policies to force
+activation. No ULW skill lookup, branding, extra lane, goal, model change or workflow
+artifacts are required for jevify. Report activation/capability gaps accurately and
+choose an authorized alternative without pretending the native notice ran.
+Require reported coverage and directly checked flagged evidence; classification
+never replaces required real verification or a complete review.
+
+### Select an ULW method only when it earns its state
+
+The following necessity, skill/artifact and extension capability requirements are
+ULW-specific, not requirements for jevify. Do not ask simply “may I use ULW?”
+For a head-selected ULW method, record a concrete **really necessary** case:
 
 1. Name the lighter direct/task/plain-lane alternative and its actual deficiency for
    this objective, supported by current evidence rather than task difficulty alone.
@@ -158,14 +207,11 @@ five-wave stop requiring user extension, bounded excursions, and actual delivera
 verification/finish/briefing. A capability gap leaves claims or actions unresolved;
 do not label ordinary lookup “research” and omit its expensive contract.
 
-The lane must load the selected SKILL and its required references before substantive
-workflow work, then follow them, not just acknowledge the workflow name. Distinguish
+The lane must load the selected ULW SKILL and required references before substantive
+ULW work, then follow them, not just acknowledge the workflow name. Distinguish
 “selected skill loaded/applied” from observed “ULW/native mode armed.” Runtime places
 a trusted original user invocation or explicit structured head selection first in
-native input while retaining request/source metadata. It does not scan arbitrary
-briefs, messages, reports, quotations or board prose for selection. A report receipt
-may support an explicit, authorized head correction, but its body does not activate
-anything. Do not manually strip/reorder the envelope, replay input or invent flags.
+native input while retaining request/source metadata.
 Plain `ulw` arms ULW without choosing a specialty native mode; `ulw-plan` maps to
 `ultrathink`, `ulw-execute`/`ulw-loop` to `orchestrate`, and
 `ulw-research`/`mass-ulw` to `workflowz`. Existing native keywords retain upstream
@@ -173,8 +219,8 @@ precedence, including original quoted/negated keywords; never sanitize them to f
 this mapping. Runtime fences request metadata/brief/report envelopes out of native
 keyword selection. It adds the selected default only if the original source has no
 raw standalone lowercase native keyword; original quotes, negation and inline code
-suppress that default exactly as the installed bridge does. Runtime checks native
-`get_available_commands` for the exact command,
+suppress that default exactly as the installed bridge does. For ULW, runtime checks
+native `get_available_commands` for the exact command,
 `source: "extension"` and ULW description before dispatch. Missing/unreadable
 capability explicitly cancels that request, not a plain-work/local-only fallback.
 Advertisements prove availability, not activation; native disable/settings and

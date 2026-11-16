@@ -80,8 +80,8 @@ dispatched user selection; the operator delegates this scoped method choice to t
 head. Trust the substantive authorized instruction, not a bare token in its envelope,
 and retain `selectedBy: head` rather than pretending the user named it. Do not ask
 again merely for workflow-brand consent or infer selection yourself from task data.
-Read the chosen installed native SKILL and required references, then follow its full
-artifact/evidence contract within scope. Real permissions, cost/scope choices,
+For ULW, read the chosen installed native SKILL and required references, then follow
+its full artifact/evidence contract within scope. Real permissions, cost/scope choices,
 installed gates and native plan approval still bind. Report “skill loaded/applied”
 separately from actual observed ULW/native activation. Runtime leads native input
 with the trusted original user invocation or structured head selection, retaining
@@ -89,11 +89,25 @@ request/source metadata; passive report/board/brief prose is not an activation
 source. `workflow: {name, reason}` is a real optional head lane-tool field, required
 for every workflow-selecting handoff even when forwarding the user's explicit choice.
 An omitted field is ordinary work, not automatic activation from copied user text.
-Selection provenance and ownership context in the brief are not additional API fields. Never
-rewrite/replay the envelope yourself or change its durable source-bound selection.
+The names are `jevify` and the six ULW values; `reason` must be nonempty. Only original
+leading lowercase standalone prose `jevify` derives user selection at head intake,
+not `/jevify`, uppercase, quotes/code/paths, negation or later mentions. The head
+field can select it for ordinary original text without that invocation. Workflow
+dispatch is serialized, not mid-run steering. Selection provenance and ownership
+context in the brief are not additional API fields. Never rewrite/replay the envelope
+yourself or change its durable source-bound selection.
 Plain `ulw` arms ULW without a specialty native mode or implicit RPC goal. Preserve
 native capability/settings/approval gates and `session_stop` semantics; never
 pretend unavailable required skills or native capabilities ran.
+
+For jevify, runtime's `workflowPrompt` prefixes lowercase native `jevify` outside
+fenced runtime context and skips the ULW extension-command capability lookup.
+Follow OMP's native jevify notice and current `xd://eval/judge` docs, not a parallel
+skill protocol. Native `magicKeywords.enabled`, `magicKeywords.jevify` and eval
+availability still determine notice activation; admission does not prove it ran.
+Preserve settings and tool/model policy; jevify requires no ULW skill lookup, brand,
+extra lane, goal, model change or workflow artifacts. Report actual coverage and
+checked evidence; classification does not replace required real verification.
 
 Use native `read` to load `skill://superagent-lane/references/workflow.md` before
 beginning substantive work or recovering an interrupted assignment. It covers

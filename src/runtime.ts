@@ -3302,7 +3302,9 @@ export class Superagent {
       this.store.settle(input.id, "cancelled");
       return;
     }
-    if (input.workflow) {
+    // Native jevify is a prose keyword, not an advertised ULW extension command.
+    // OMP retains its own magic-keyword settings and enabled-eval capability gate.
+    if (input.workflow && input.workflow.name !== "jevify") {
       try {
         const capabilities = successful(await live.connection.request({ type: "get_available_commands" }), "get_available_commands");
         if (!advertisedWorkflow(capabilities, input.workflow.name)) throw new Error("ULW extension command is not advertised");

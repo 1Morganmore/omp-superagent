@@ -137,7 +137,8 @@ const settings = {
   disabledProviders: nativeDisabledProviders, modelRoles: { default: model, judge: model },
   // Explicitly grant only the native keyword settings this proof exercises;
   // native task capability requirements still control orchestration notices.
-  ...(ulwEntrypoint ? { magicKeywords: { enabled: true, ultrathink: true, orchestrate: true } } : {}),
+  ...(ulwEntrypoint ? { magicKeywords: { enabled: true, ultrathink: true, orchestrate: true, jevify: true },
+    eval: { js: true, py: false } } : {}),
   ...(["valid", "recovery"].includes(presetScenario) || ulwEntrypoint ? {
     modelPresets: Object.fromEntries(["high", "middle", "low"].map(name => [name, { modelRoles: { default: model, judge: model } }])),
   } : {}),

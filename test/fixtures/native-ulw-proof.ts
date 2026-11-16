@@ -43,9 +43,11 @@ export async function runNativeUlwProof(options: {
     "ulw-plan inspect native planning activation in the main conversation.",
     "ulw-execute inspect native execution activation in the main conversation.",
     "Continue the same independent local topic under an explicitly selected execution workflow.",
+    "Classify the independent findings in the same topic using the head-selected bulk method.",
+    "jevify inspect native bulk classification activation in the main conversation.",
   ];
   const inputs = texts.map((text, index) => ({ id: String(301 + index), messageId: String(301 + index),
-    route: index === 2 || index === 6 ? thread : route, text, receivedAt: Date.now() + index, attachments: [],
+    route: index === 2 || index === 6 || index === 7 ? thread : route, text, receivedAt: Date.now() + index, attachments: [],
   } satisfies Inbound));
   const input = (id: string) => {
     const row = db.query("SELECT data,target,state FROM inputs WHERE id=?").get(id) as { data: string; target: string; state: InputRecord["state"] } | null;
@@ -90,12 +92,13 @@ export async function runNativeUlwProof(options: {
   assert.equal((await actualLane.client.getState()).goal, null);
   const firstHandoff = "handoff:303:lane";
   const secondHandoff = `handoff:307:${lane.id}`;
+  const bulkHandoff = `handoff:308:${lane.id}`;
   const headEntries = parseSessionEntries(await fs.readFile(main.sessionFile, "utf8"));
   const laneEntries = parseSessionEntries(await fs.readFile(lane.sessionFile, "utf8"));
   const headRequests = userRequests(headEntries);
   const laneRequests = userRequests(laneEntries);
-  assert.deepEqual(headRequests.map(request => request.id).sort(), [...inputs.map(item => item.id), `report:${firstHandoff}`, `report:${secondHandoff}`].sort());
-  assert.deepEqual(laneRequests.map(request => request.id), [firstHandoff, secondHandoff]);
+  assert.deepEqual(headRequests.map(request => request.id).sort(), [...inputs.map(item => item.id), `report:${firstHandoff}`, `report:${secondHandoff}`, `report:${bulkHandoff}`].sort());
+  assert.deepEqual(laneRequests.map(request => request.id), [firstHandoff, secondHandoff, bulkHandoff]);
   for (const item of inputs) {
     const original = headRequests.find(request => request.id === item.id)!;
     // Native specialised invocation may insert its default keyword immediately
@@ -109,7 +112,7 @@ export async function runNativeUlwProof(options: {
     assert.equal(output.length, 1);
     assert.deepEqual(output[0]!.route, item.route);
   }
-  for (const [sourceId, handoffId, name] of [["303", firstHandoff, "ulw-plan"], ["307", secondHandoff, "ulw-execute"]] as const) {
+  for (const [sourceId, handoffId, name] of [["303", firstHandoff, "ulw-plan"], ["307", secondHandoff, "ulw-execute"], ["308", bulkHandoff, "jevify"]] as const) {
     const handed = input(handoffId)!;
     assert.equal(handed.target, lane.id);
     assert.deepEqual(handed.record.route, thread);
@@ -122,8 +125,8 @@ export async function runNativeUlwProof(options: {
     assert.equal(input(`report:${handoffId}`)?.record.workflow, null, "Native report text never authorizes a workflow");
     assert.equal(messenger.sent.find(output => output.text === `HEAD:${sourceId}`)?.sourceId, `report:${handoffId}`);
   }
-  for (const id of ["301", "302", "303", "307"]) assert.equal(input(id)?.record.workflow, null);
-  for (const [id, name] of [["304", "ulw"], ["305", "ulw-plan"], ["306", "ulw-execute"]] as const) {
+  for (const id of ["301", "302", "303", "307", "308"]) assert.equal(input(id)?.record.workflow, null);
+  for (const [id, name] of [["304", "ulw"], ["305", "ulw-plan"], ["306", "ulw-execute"], ["309", "jevify"]] as const) {
     const workflow = input(id)?.record.workflow;
     assert.equal(workflow?.name, name);
     assert.equal(workflow?.sourceId, id);
@@ -133,7 +136,7 @@ export async function runNativeUlwProof(options: {
   const headEvidence = evidence(headEntries);
   const laneEvidence = evidence(laneEntries);
   assert.equal(headEvidence.length, headRequests.length);
-  assert.equal(laneEvidence.length, 2);
+  assert.equal(laneEvidence.length, 3);
   for (const id of ["301", "302", "303", `report:${firstHandoff}`]) {
     const actual = headEvidence.find(record => record.requestId === id)!;
     assert(actual);
@@ -147,20 +150,26 @@ export async function runNativeUlwProof(options: {
   assert.deepEqual(plain.directives, []);
   assert.equal(laneRequests[0]!.text.split(inputs[2]!.text).length - 1, 1, "Explicit initial lane workflow retains its original task once");
   assert.equal(laneRequests[1]!.text.split(inputs[6]!.text).length - 1, 1, "Explicit lane follow-up retains its original task once");
-  for (const [records, selected] of [[headEvidence, { "305": "ultrathink-notice", "306": "orchestrate-notice" }],
-    [laneEvidence, { [firstHandoff]: "ultrathink-notice", [secondHandoff]: "orchestrate-notice" }]] as const) {
+  assert.equal(laneRequests[2]!.text.split(inputs[7]!.text).length - 1, 1, "Native bulk selection retains its original task once");
+  assert(laneRequests[2]!.text.startsWith("jevify\n\n"));
+  for (const [records, selected] of [[headEvidence, { "305": "ultrathink-notice", "306": "orchestrate-notice", "309": "jevify-notice" }],
+    [laneEvidence, { [firstHandoff]: "ultrathink-notice", [secondHandoff]: "orchestrate-notice", [bulkHandoff]: "jevify-notice" }]] as const) {
     for (const record of records) {
       const notice = (selected as Record<string, string>)[record.requestId];
       assert.deepEqual(record.notices, notice ? [notice] : [], "Only this dispatch's actual native keyword event proves its mode");
-      assert.equal(record.directives.length, notice ? 1 : 0, "Ordinary replies/reports must not inherit an earlier workflow directive");
-      if (notice) assert(record.directives[0]!.includes(notice === "ultrathink-notice" ? "<omp-ulw-plan-pointer>" : "<omp-ulw-execute-pointer>"));
+      const ulwDirective = notice && notice !== "jevify-notice";
+      assert.equal(record.directives.length, ulwDirective ? 1 : 0, "Native jevify and ordinary replies/reports must not inherit an earlier ULW directive");
+      if (ulwDirective) assert(record.directives[0]!.includes(notice === "ultrathink-notice" ? "<omp-ulw-plan-pointer>" : "<omp-ulw-execute-pointer>"));
     }
   }
   for (const [entries, actual] of [[headEntries, headEvidence], [laneEntries, laneEvidence]] as const) {
     assert.equal(nativeMessages(entries, "ultrathink-notice").length, 1);
     assert.equal(nativeMessages(entries, "orchestrate-notice").length, 1);
+    assert.equal(nativeMessages(entries, "jevify-notice").length, 1);
     assert(actual.filter(record => record.notices.includes("orchestrate-notice")).every(record => record.activeTools.includes("task")),
       "Native execution notices must honor the native enabled-task capability gate");
+    assert(actual.filter(record => record.notices.includes("jevify-notice")).every(record => record.activeTools.includes("eval")),
+      "Native bulk classification notices must honor the native enabled-eval capability gate");
     const directives = nativeMessages(entries, "omo-ultrawork:directive");
     assert.equal(directives.length, 2);
     assert(directives.some(message => String(message.content).includes("<omp-ulw-plan-pointer>")));
@@ -168,7 +177,7 @@ export async function runNativeUlwProof(options: {
     assert.equal(entries.filter(entry => entry.type === "custom" && entry.customType === "omo-ultrawork:state" && entry.data === true).length, 1);
     assert(actual.every(record => record.sessionId === (entries === headEntries ? headState.sessionId : lane.sessionId)));
   }
-  for (const id of ["303", "307"]) {
+  for (const id of ["303", "307", "308"]) {
     assert.equal(messenger.sent.filter(output => output.text === `HEAD:${id}:delegated`).length, 1,
       "Head acknowledges its actual handoff without provoking native empty-stop recovery");
   }
@@ -177,7 +186,7 @@ export async function runNativeUlwProof(options: {
     id: "303:kickoff", sourceId: firstHandoff, route: thread,
     text: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.",
   }], "The initial lane handoff delivers its exact authorized kickoff once in the work topic");
-  assert.equal(messenger.sent.length, inputs.length + 2 + kickoff.length);
+  assert.equal(messenger.sent.length, inputs.length + 3 + kickoff.length);
   assert(messenger.sent.filter(output => output.id !== "303:kickoff").every(output => output.text.startsWith("HEAD:")));
   for (const connection of [head, actualLane]) {
     await until(async () => (await connection.client.getState()).isSettled, "native ULW workflow settlement");
@@ -199,5 +208,5 @@ export async function runNativeUlwProof(options: {
     assert.equal(shutdowns[0]!.networkAttempts, 0);
   }
   console.log(`NATIVE_ULW_GATEWAY_PROOF ${JSON.stringify({ inputs: inputs.length, headTurns: headEvidence.length, laneTurns: laneEvidence.length,
-    nativeNotices: ["ultrathink-notice", "orchestrate-notice"], networkAttempts: 0 })}`);
+    nativeNotices: ["ultrathink-notice", "orchestrate-notice", "jevify-notice"], networkAttempts: 0 })}`);
 }
