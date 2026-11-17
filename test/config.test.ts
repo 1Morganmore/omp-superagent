@@ -6,7 +6,9 @@ import { authorizeRoute, configuredPlatforms, credentialEnvNames, loadConfig } f
 import { main } from "../src/cli";
 import { discoverInstalledOmp, inspectInstalledOmp } from "../src/installed-omp";
 import type { Route } from "../src/contracts";
+import { dependencies } from "../package.json";
 
+const testedVersion = dependencies["@oh-my-pi/pi-coding-agent"];
 const dirs: string[] = [];
 async function config(patch: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "superagent-config-"));
@@ -102,7 +104,7 @@ describe("operator execution limits", () => {
 });
 
 describe("installed OMP prerequisite", () => {
-  async function executable(version = "18.20.2", help = "--mode rpc --resume PATH --extension FILE --model MODEL") {
+  async function executable(version = testedVersion, help = "--mode rpc --resume PATH --extension FILE --model MODEL") {
     const directory = mkdtempSync(join(tmpdir(), "superagent-installed-"));
     dirs.push(directory);
     const command = join(directory, "omp");
@@ -137,7 +139,7 @@ else process.exit(8);
       const result = await inspectInstalledOmp(["omp", "--profile", "isolated", "-e", "/must-not-load.ts"], ["INSTALLED_OMP_TEST_TOKEN"], {
         PATH: f.directory, INSTALLED_OMP_TEST_TOKEN: "provided-token", INSTALLED_OMP_TEST_SCOPE: "isolated",
       });
-      expect(result).toMatchObject({ version: "18.20.2", testedVersion: "18.20.2", stdioRpc: true, sessions: true });
+      expect(result).toMatchObject({ version: testedVersion, testedVersion, stdioRpc: true, sessions: true });
       const rows = (await Bun.file(f.audit).text()).trim().split("\n").map(line => JSON.parse(line));
       expect(rows).toEqual([
         { args: ["--version"], credential: null, scope: "isolated", parentOnly: null },
@@ -151,15 +153,15 @@ else process.exit(8);
     }
   });
 
-  test.each(["18.20.1", "17.99.0", "19.0.0", "18.20.2-preview"])("rejects unsupported version %s", async version => {
+  test.each(["18.20.1", "18.20.2", "17.99.0", "19.0.0", "18.20.2-preview"])("rejects unsupported version %s", async version => {
     const f = await executable(version);
     await expect(inspectInstalledOmp([f.command])).rejects.toThrow("Install a supported stock OMP");
   });
 
   test("does not confuse patched flags or prefix matches with public capabilities", async () => {
-    const f = await executable("18.20.2", "--mode rpc-ui --session-settings FILE --extensions FILE --model-preset high");
+    const f = await executable(testedVersion, "--mode rpc-ui --session-settings FILE --extensions FILE --model-preset high");
     await expect(inspectInstalledOmp([f.command])).rejects.toThrow("public stdio RPC");
-    const ui = await executable("18.20.2", "--mode rpc-ui --resume PATH --extension FILE --model MODEL");
+    const ui = await executable(testedVersion, "--mode rpc-ui --resume PATH --extension FILE --model MODEL");
     await expect(inspectInstalledOmp([ui.command])).rejects.toThrow("public stdio RPC");
   });
 
@@ -175,7 +177,7 @@ else process.exit(8);
     ]);
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     expect(JSON.parse(stdout)).toMatchObject({
-      omp: { version: "18.20.2", testedVersion: "18.20.2", stdioRpc: true },
+      omp: { version: testedVersion, testedVersion, stdioRpc: true },
       nativeTuiAttach: false, messengersActivated: false,
       credentials: { DISCORD_BOT_TOKEN: false },
     });

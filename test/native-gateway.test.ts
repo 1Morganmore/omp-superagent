@@ -34,7 +34,7 @@ nativeTest(`production Gateway native preset startup (${presetScenario}) preserv
         CODEX_HOME: path.join(root, "codex"), CLAUDE_CONFIG_DIR: path.join(root, "claude"), COPILOT_HOME: path.join(root, "copilot"),
         TMPDIR: root, TMP: root, TEMP: root, OMP_NATIVE_GATEWAY_ROOT: root,
         OMP_NATIVE_GATEWAY_PRESETS: presetScenario,
-        OMP_TEST_COMMAND: process.env.OMP_TEST_COMMAND ?? "",
+        ...(process.env.OMP_TEST_COMMAND === undefined ? {} : { OMP_TEST_COMMAND: process.env.OMP_TEST_COMMAND }),
         ...(process.env.OMP_TEST_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.OMP_TEST_NATIVES_DIR } : {}),
       },
       stdout: "pipe", stderr: "pipe",

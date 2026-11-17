@@ -4,14 +4,12 @@ import { join, resolve } from "node:path";
 import { HostConnection, startHost, type HostFrame } from "../src/host";
 import { BoardFixture } from "./fixtures/board";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
+import { nativeTestCommand } from "./fixtures/native-command";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
 
 nativeTest("actual unrelated OMP sessions with copied head/lane environment cannot access the board or receive notices", async () => {
-  const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-  if (!Array.isArray(parsed) || !parsed.length || parsed.some(arg => typeof arg !== "string" || !arg)) {
-    throw new Error("Native board proof requires OMP_TEST_COMMAND as installed OMP argv JSON");
-  }
+  const nativeCommand = await nativeTestCommand();
   const f = new BoardFixture();
   const connections: HostConnection[] = [];
   const pids: number[] = [];
@@ -21,7 +19,7 @@ nativeTest("actual unrelated OMP sessions with copied head/lane environment cann
   mkdirSync(agent, { mode: 0o700 });
   writeFileSync(join(agent, "config.yml"), JSON.stringify({ disabledProviders: nativeDisabledProviders }), { mode: 0o600 });
   writeFileSync(join(agent, "models.yml"), "providers: {}\n", { mode: 0o600 });
-  const command = [...parsed, "-e", resolve(import.meta.dir, "fixtures/native-extension.ts")];
+  const command = [...nativeCommand, "-e", resolve(import.meta.dir, "fixtures/native-extension.ts")];
   const config = {
     stateDir: f.directory, headCwd: f.directory, command, maxHosts: 2, maxSubagents: 2, idleMs: 0,
     discord: { tokenEnv: "UNUSED_BOARD_FIXTURE_TOKEN", ownerId: "1", allowedGuildIds: [], allowedChannelIds: [] },

@@ -15,6 +15,7 @@ import { DeliveryError } from "../../src/delivery";
 import { HostConnection } from "../../src/host";
 import { nativeDisabledProviders } from "./native-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
+import { nativeTestCommand } from "./native-command";
 
 interface Event {
   readonly kind: string;
@@ -59,10 +60,7 @@ assert(scenario === "busy" || scenario === "approval" || scenario === "lane" || 
 const recoveryWindow = scenario === "lane-failure-recovery-window" || scenario === "lane-abort-recovery-window";
 const abortedLane = scenario === "lane-abort" || scenario === "lane-abort-recovery-window";
 const detachedLane = scenario === "lane-failure" || scenario === "lane-abort" || recoveryWindow;
-const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-assert(Array.isArray(parsed) && parsed.length > 0 && parsed.every((value: unknown) => typeof value === "string" && value.length > 0),
-  "OMP_TEST_COMMAND must explicitly name the installed native CLI argv");
-const command = parsed.filter((value: unknown): value is string => typeof value === "string");
+const command = await nativeTestCommand();
 const interrupted = new AbortController();
 const terminate = () => { interrupted.abort(new Error("Owned native restart proof interrupted")); };
 process.on("SIGTERM", terminate);

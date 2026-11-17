@@ -10,6 +10,7 @@ import { Store } from "../../src/store";
 import { workflowContext } from "../../src/workflow";
 import { nativeDisabledProviders } from "./native-extension";
 import { autonomyModel } from "./autonomy-native-extension";
+import { nativeTestCommand } from "./native-command";
 
 async function within<T>(promise: Promise<T>, label: string): Promise<T> {
   const timeout = Promise.withResolvers<never>();
@@ -52,9 +53,7 @@ class RecordingMessenger implements Messenger {
 
 /** Real managed Host/role/goal lifecycle with a local deterministic provider and recording transport. */
 export async function nativeAutonomyRuntime(): Promise<void> {
-  const command: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-  if (!Array.isArray(command) || !command.every((arg): arg is string => typeof arg === "string" && arg.length > 0)
-    || command.length === 0) throw new Error("Native autonomy requires OMP_TEST_COMMAND as installed CLI argv JSON");
+  const command = await nativeTestCommand();
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osa-"));
   const home = path.join(root, "home");
   const agentDir = path.join(root, "agent");

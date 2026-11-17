@@ -55,8 +55,10 @@ head; the head replies to the original conversation.
 
 ## Quick start
 
-Requires Git, **Bun >= 1.4.4**, an installed **OMP >= 18.20.2 and < 19**, and local Unix
-sockets. The tested OMP version is **18.20.2**. Windows is unsupported.
+Requires Git, **Bun >= 1.4.4**, an installed **OMP >= 18.22.0 and < 19**, and local Unix
+sockets. The SDK baseline is **18.22.0**. Native tests use the currently installed OMP;
+CI installs the latest published release and verifies its checksum. Neither silently
+falls back to an older runtime. Windows is unsupported.
 Configure `command` with the installed OMP executable followed by native CLI flags;
 runtime/script wrappers are unsupported.
 

@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 import { delimiter, dirname, join, resolve } from "node:path";
-import { discoverInstalledOmp, inspectInstalledOmp } from "../src/installed-omp";
 import { activeManagedUlw } from "../src/managed-ulw";
+import { nativeTestCommand } from "../test/fixtures/native-command";
 
 const root = resolve(import.meta.dir, "..");
-const command = [discoverInstalledOmp()];
-const omp = await inspectInstalledOmp(command);
+const command = await nativeTestCommand();
 const ulw = activeManagedUlw();
 const manifest = await Bun.file(join(ulw, "package.json")).json() as { omp: { extensions: string[] } };
 if (manifest.omp.extensions.length !== 1) throw new Error("Native composition tests require one managed ULW entrypoint");
@@ -18,7 +17,7 @@ const env = {
   OMP_TEST_COMMAND: JSON.stringify(command),
   OMP_TEST_ULW_EXTENSION: resolve(ulw, manifest.omp.extensions[0]!),
 };
-console.log(`CI: Bun ${Bun.version}; installed OMP ${omp.version} (${command[0]}); ULW ${ulw}`);
+console.log(`CI: Bun ${Bun.version}; ULW ${ulw}`);
 for (const args of [["run", "check"], ["test", "test"]]) {
   const child = Bun.spawn([process.execPath, "--no-env-file", ...args], {
     cwd: root, env, stdin: "ignore", stdout: "inherit", stderr: "inherit",

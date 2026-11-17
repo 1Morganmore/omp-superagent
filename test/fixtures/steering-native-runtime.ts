@@ -12,6 +12,7 @@ import { Store } from "../../src/store";
 import { nativeDisabledProviders } from "./native-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { steeringModel, steeringRecord } from "./steering-native-extension";
+import { nativeTestCommand } from "./native-command";
 
 type Handlers = Parameters<Messenger["start"]>[0];
 type Trace = { sequence: number; socketPath: string; frame: HostFrame; inputStates?: Record<string, string> };
@@ -89,10 +90,7 @@ function alive(pid: number): boolean {
 
 /** Independent installed-OMP proof through the owned stdio adapter. */
 export async function nativeSteeringRuntime(): Promise<void> {
-  const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-  if (!Array.isArray(parsed) || !parsed.length || parsed.some(value => typeof value !== "string" || !value))
-    throw new Error("Native steering requires OMP_TEST_COMMAND as an explicit installed CLI argv JSON array");
-  const nativeCommand: string[] = parsed;
+  const nativeCommand = await nativeTestCommand();
   const natives = process.env.OMP_TEST_NATIVES_DIR;
   if (natives && !path.isAbsolute(natives)) throw new Error("OMP_TEST_NATIVES_DIR must be absolute");
   const managedUlwPath = process.env.OMP_TEST_ULW_EXTENSION

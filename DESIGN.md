@@ -1,9 +1,13 @@
 # omp-superagent 설계
 
 이 문서는 **현재 구조와 안전·권한 계약**을 정의한다. 별도로 설치한 수정 없는
-OMP >= 18.20.2, < 19와 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
-하지 않는다. 테스트 기준선은 stock OMP 18.20.2 소스 revision
-`7c49c11aa5bbaf3f418406583096168ad5b8c6dc`다.
+OMP >= 18.22.0, < 19와 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
+하지 않는다. SDK/API 기준선은 stock OMP 18.22.0 소스 revision
+`3e8cff3b7ce19a805c11a26a6dd1703066435851`이다. native 테스트 실행 파일은 현재 설치에서
+발견하고 CI는 최신 공식 릴리즈를 checksum 검증 후 사용한다. 새 버전이 호환되지 않으면
+실패를 드러내며 과거 실행 파일로 우회하거나 테스트 중 SDK lockfile을 자동 변경하지 않는다.
+비동기 wake 여부는 native RPC와 동일하게 `session.wakeSources !== undefined`로 읽고,
+소유 서비스·하위 작업·미확인 delivery의 별도 해제 차단은 유지한다.
 설치·일상 제어는 [운영 가이드](docs/OPERATIONS.md), 날짜·환경별 실행 결과와 이전 패치된
 18.20.0의 제한된 증거는 [릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records)에 둔다.
 설계 계약이나 과거 통과 기록을 현재 운영 계정·제공자·attach 지원의 검증으로 해석하지 않는다.
@@ -152,8 +156,8 @@ Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서
 공식 원격은 `https://github.com/dbc-hbin/omp-ulw.git`이며 `upstream/ulw.json`에 기록한다.
 별도 설치한 OMP의 preinstall 검사 뒤 루트 postinstall 또는 명시적인
 `bun run prepare:ulw`로 ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
-SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-utils`
-18.20.2 패키지다.
+SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-tui`, `pi-utils`
+18.22.0 패키지다.
 0.1.1부터 npm 패키지로 같은 소스·역할 스킬·설치 자원을 배포한다.
 `bun add --global --trust omp-superagent@0.1.1` 또는 Bun이 PATH에 있는 환경의
 `npm install --global omp-superagent@0.1.1`로 `omp-sa`를 설치한다. Bun의 `--trust`는
@@ -1304,7 +1308,7 @@ native `tool_call` hook이 복구 도구 이외의 실행을 거부하고 한 �
 
 재사용 기준은 기존 `rpc_prompt_result`/`rpc_agent_start` journal, `get_entries`, native
 tool-call 차단, preset bootstrap의 내부 턴 경로다. 이전 소스 기준선
-`c308970263ae13744ea15ab67302e3dac840e266`와 현재 테스트 기준선
+`c308970263ae13744ea15ab67302e3dac840e266`와 이전 18.20.2 기준선
 `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`의 completion/tool-blocking 계약을 조사했다.
 이 조사는 새 stock 통합 경로의 실행 증거가 아니다. 코어 패치·외부 엔진·전역 도구 설정은
 추가하지 않는다. 실행 결과는 [릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records)을 따른다.

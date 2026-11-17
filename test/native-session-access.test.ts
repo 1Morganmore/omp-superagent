@@ -5,12 +5,12 @@ import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { HostConnection, startHost } from "../src/host";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
+import { nativeTestCommand } from "./fixtures/native-command";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
 
 nativeTest("stock OMP resumes a managed session by ID, respects a live native writer, and permits intentional continuation after release", async () => {
-  if (!process.env.OMP_TEST_COMMAND) throw new Error("Native session access requires OMP_TEST_COMMAND");
-  const command = JSON.parse(process.env.OMP_TEST_COMMAND) as string[];
+  const command = await nativeTestCommand();
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "sasa-"));
   const cwd = path.join(root, "workspace");
   const otherCwd = path.join(root, "other");

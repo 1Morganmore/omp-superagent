@@ -13,6 +13,7 @@ import { nativeDisabledProviders } from "./native-extension";
 import { runNativeUlwProof } from "./native-ulw-proof";
 import { runNativeRecoveryProof } from "./native-recovery-proof";
 import { nativeRequestEnvelope } from "./native-request-envelope";
+import { nativeTestCommand } from "./native-command";
 
 type Handlers = Parameters<Messenger["start"]>[0];
 const interrupted = new AbortController();
@@ -114,8 +115,7 @@ assert(root && path.isAbsolute(root), "Native Gateway proof needs a private abso
 const presetScenario = process.env.OMP_NATIVE_GATEWAY_PRESETS ?? "create";
 assert(["create", "valid", "failed", "skipped", "interrupted", "recovery"].includes(presetScenario));
 assert.equal(process.env.HOME, path.join(root, "home"));
-const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-assert(Array.isArray(parsed) && parsed.length && parsed.every(value => typeof value === "string" && value), "OMP_TEST_COMMAND must explicitly name the installed native CLI argv");
+const nativeCommand = await nativeTestCommand();
 const ulwEntrypoint = process.env.OMP_TEST_ULW_EXTENSION ? await fs.realpath(process.env.OMP_TEST_ULW_EXTENSION) : undefined;
 const managedUlwPath = ulwEntrypoint
   ? (await fs.stat(ulwEntrypoint)).isDirectory() ? ulwEntrypoint : path.dirname(ulwEntrypoint)
@@ -149,7 +149,7 @@ const settingsBytes = new Map(await Promise.all(["config.yml", "models.yml"].map
 const recoveryProvider = path.resolve(import.meta.dir, "recovery-provider-extension.ts");
 const config: Config = {
   path: path.join(root, "superagent.json"), stateDir: root, headCwd,
-  command: [...parsed, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
+  command: [...nativeCommand, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
     presetScenario === "recovery" ? recoveryProvider
       : path.resolve(import.meta.dir, ulwEntrypoint ? "native-ulw-provider-extension.ts" : "gateway-provider-extension.ts")],
   maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model,

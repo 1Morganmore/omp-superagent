@@ -68,13 +68,13 @@ export default function hostExtension(pi: ExtensionAPI): void {
       || typeof session.isCompacting !== "boolean" || typeof session.isDisposed !== "boolean"
       || !Number.isSafeInteger(session.queuedMessageCount) || session.queuedMessageCount < 0
       || typeof session.instanceKey !== "string" || !session.instanceKey
-      || typeof session.hasPendingAsyncWork !== "function" || typeof session.getAsyncJobTree !== "function"
+      || !("wakeSources" in session) || typeof session.getAsyncJobTree !== "function"
       || typeof session.getAsyncJobSnapshot !== "function" || typeof session.beginDispose !== "function"
       || typeof session.abortCompaction !== "function" || typeof session.goalRuntime.pauseGoal !== "function"
       || typeof session.waitForIdle !== "function" || typeof session.yieldQueue?.has !== "function"
       || typeof session.sessionManager.ensureOnDisk !== "function" || typeof session.sessionManager.flushSync !== "function"
       || typeof session.settings.reloadFromDisk !== "function" || typeof session.settings.mirrorState !== "function"
-      || typeof session.settings.getModelRoles !== "function" || typeof session.hasPendingAsyncWork() !== "boolean")
+      || typeof session.settings.getModelRoles !== "function")
       throw new Error("Installed OMP lacks required public native lifecycle capabilities");
     if (instanceKey !== undefined && session.instanceKey !== instanceKey)
       throw new Error("Native session instance changed within this managed Host");
@@ -161,7 +161,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
       && !(ref.session instanceof pi.pi.AgentSession));
     const descendantsBusy = () => refs.some(ref => agents.has(ref.id) && ref.id !== pi.pi.MAIN_AGENT_ID
       && (registry.isRunning(ref) || ref.session instanceof pi.pi.AgentSession
-        && (ref.session.hasPendingAsyncWork() || ref.session.hasAdmittedSubmission || ref.session.hasPostPromptWork
+        && (ref.session.wakeSources !== undefined || ref.session.hasAdmittedSubmission || ref.session.hasPostPromptWork
           || ref.session.isBusyForSnapshot || ref.session.yieldQueue.has() || deliveriesPending(ref.session))));
     const trackingKnown = journal.some(entry => entry.type === "custom" && entry.customType === "superagent_service_tracking"
       && (entry.data as Frame)?.rootSessionId === identity.id && (entry.data as Frame)?.known === true);
@@ -227,7 +227,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     const { session } = exact();
     return !mutationHeld && !observationHeld && !session.isDisposed && !session.isBusyForSnapshot && !session.isStreaming
       && !session.isCompacting && !session.hasAdmittedSubmission && !session.hasPostPromptWork
-      && session.queuedMessageCount === 0 && !session.hasPendingAsyncWork()
+      && session.queuedMessageCount === 0 && session.wakeSources === undefined
       && !session.yieldQueue.has()
       && !session.getGoalModeState()?.enabled;
   };
@@ -236,7 +236,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     if (command.type === "get_state") {
       const { session } = exact();
       const queued = session.getQueuedMessages();
-      // Adapted from oh-my-pi v18.20.2 rpc-mode.ts (MIT; THIRD_PARTY_NOTICES.md).
+      // Adapted from oh-my-pi v18.22.0 rpc-mode.ts (MIT; THIRD_PARTY_NOTICES.md).
       // Copyright (c) 2025 Mario Zechner; 2025-2026 Can Bölük; 2026 Stencil Labs, Inc.
       // This is a live observation while an owner command is pending, never an
       // idle receipt. Disposal still requires the stock RPC settlement check.
@@ -247,7 +247,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
         interruptMode: session.interruptMode, sessionFile: session.sessionFile,
         sessionId: session.sessionId, sessionName: session.sessionName,
         autoCompactionEnabled: session.autoCompactionEnabled,
-        queuedMessageCount: session.queuedMessageCount, hasPendingAsyncWork: session.hasPendingAsyncWork(),
+        queuedMessageCount: session.queuedMessageCount, hasPendingAsyncWork: session.wakeSources !== undefined,
         isSettled: false,
         queuedMessages: { steering: [...queued.steering], followUp: [...queued.followUp], liveSteered: queued.liveSteered },
         todoPhases: session.getTodoPhases(), fastModeEnabled: session.isFastModeEnabled(),

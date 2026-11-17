@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
-import { discoverInstalledOmp } from "../src/installed-omp";
+import { nativeTestCommand } from "./fixtures/native-command";
 
 // Opt in because this exercises the installed real native CLI, Python, and Unix PTYs.
 const ptyTest = process.env.OMP_SUPERAGENT_SETUP_PTY_TEST === "1" ? test : test.skip;
@@ -337,7 +337,16 @@ Bun.spawn = function (...args) {
     SETUP_PTY_IMPORT_AUDIT: importAudit,
     SETUP_PTY_VIOLATION: violation, SETUP_PTY_NAMES: JSON.stringify(trackedNames),
   };
-  const nativeCommand = [discoverInstalledOmp(env.PATH)];
+  const selectedCommand = await nativeTestCommand();
+  const selectedExecutable = Bun.which(selectedCommand[0]!, { PATH: env.PATH });
+  if (!selectedExecutable) throw new Error("Selected native test executable is unavailable to the PTY fixture");
+  const nativeCommand = [await fs.realpath(selectedExecutable), ...selectedCommand.slice(1)];
+  // Fresh setup discovers a standalone CLI through PATH, not test-only argv.
+  // A private alias also supports explicit installations not named "omp".
+  const nativeBin = path.join(root, "native-bin");
+  await fs.mkdir(nativeBin);
+  await fs.symlink(nativeCommand[0]!, path.join(nativeBin, "omp"));
+  env.PATH = [nativeBin, env.PATH].join(path.delimiter);
   // Resolve isolated fixture paths through native APIs in a fresh process; do
   // not import native dirs/dotenv into this runner's real HOME or cache them.
   const settingsModule = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
@@ -567,7 +576,7 @@ ptyTest("actual traced setup wrapper prepares all messengers privately; explicit
     const config = JSON.parse(bytes);
     expect(config.headCwd).toBe(context.root);
     expect(config.stateDir).toBe(context.state);
-    expect(config.command).toEqual(context.nativeCommand);
+    expect(config.command).toEqual([context.nativeCommand[0]]);
     expect([config.maxHosts, config.maxSubagents, config.idleMs]).toEqual([4, 8, 300000]);
     expect(config.discord).toEqual({ tokenEnv: defaultNames[0], ownerId: "123456789", allowedGuildIds: ["11111", "22222"], allowedChannelIds: ["33333"] });
     expect(config.telegram).toEqual({ tokenEnv: defaultNames[1], ownerId: "246813579", allowedChatIds: ["-97531"] });

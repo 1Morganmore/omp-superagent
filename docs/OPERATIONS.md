@@ -96,8 +96,9 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 ## 1. 로컬 준비 — 봇은 시작하지 않음
 
 필요 조건은 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`), 별도 설치한 수정 없는
-OMP 18.20.2 이상·major 18, 로컬 Unix socket을 지원하는 환경이다. 테스트 기준선은 OMP
-18.20.2 소스 revision `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`다.
+OMP 18.22.0 이상·major 18, 로컬 Unix socket을 지원하는 환경이다. SDK/API 기준선은 OMP
+18.22.0 소스 revision `3e8cff3b7ce19a805c11a26a6dd1703066435851`이며 native 검증은 현재 설치된
+실행 파일을 사용한다.
 OMP 공식 설치를 먼저 완료해 `omp`가 PATH에 있어야 한다. 이 저장소는 OMP 소스 checkout이나
 native addon 빌드를 하지 않는다. npm 레지스트리에서 설치할 때는:
 
@@ -120,7 +121,7 @@ bun install --frozen-lockfile
 
 preinstall의 `scripts/check-omp.ts`가 설치된 CLI의 버전·필요 기능을 확인한다.
 루트 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-ai`,
-`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-utils` 18.20.2다. 설치는 봇을 시작하지 않으며
+`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils` 18.22.0이다. 설치는 봇을 시작하지 않으며
 기존 OMP 실행 파일·전역 설정을 교체하지 않는다.
 
 시스템 Bun을 바꾸지 않으려면 선택적으로 격리된 로컬 도구를 사용한다.
@@ -985,27 +986,39 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
 일반 회귀는 `bun run check`와 `bun test test`(`bun run test`와 같음)로 실행한다.
 기본 테스트는 opt-in native/PTY 시나리오를 제외한다. `.upstream`까지 탐색하는 인수 없는
 `bun test`로 대체하지 않는다. 설치 OMP와 ULW가 준비된 checkout의 `bun run test:ci`는
-타입 검사와 모든 로컬 project/native/PTY·관리형 ULW 회귀를 실행한다. `scripts/ci.ts`가 설치
-CLI와 활성 ULW entrypoint를 사용한다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
+타입 검사와 모든 로컬 project/native/PTY·관리형 ULW 회귀를 실행한다. `scripts/ci.ts`는 활성
+ULW entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선택기로 PATH의 현재 설치
+standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
+선택한 OMP 버전·실행 경로를 출력하고 지원 범위·공개 RPC 기능을 metadata로 확인한다.
+로컬 테스트 runner는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
 
-GitHub Actions는 Linux와 macOS에서 checksum을 확인한 공식 OMP 18.20.2 binary로 같은
-회귀를 실행하며 OMP 소스나 native addon을 빌드하지 않는다. 이 검사는 실제 계정·유료
+GitHub Actions는 Linux와 macOS에서 upstream의 최신 published release tag를 조회하고 해당 공식
+OMP binary를 다운로드한 뒤 checksum을 확인해 같은 회귀를 실행한다. SDK 의존성 pin으로
+실행 binary 버전을 고정하거나 OMP 소스·native addon을 빌드하지 않는다. 최신 release가 지원
+범위를 벗어나거나 검사가 실패해도 과거 binary로 자동 대체하지 않는다. 이 검사는 실제 계정·유료
 제공자·herdr·실제 로그인/재부팅을 검증하지 않으며 과거의 동일 프로세스 TUI attach 지원도
 뜻하지 않는다. 실행 결과는 [릴리즈 검증 기록](releases/0.1.0.md#verification-records)에 모은다.
-stock 18.20.2와 이전 패치된 18.20.0의 결과를 구분하며 이후 변경의 증거로 재사용하지 않는다.
+이전 stock 18.20.2와 패치된 18.20.0의 결과는 현재 기준 버전의 검증과 구분하며 이후 변경의 증거로 재사용하지 않는다.
 
 ### 대상별 native·ULW 회귀
 
-설치 stock CLI argv를 JSON으로 지정해 native 시나리오를 명시적으로 켤 수 있다.
-다음은 치환을 마친 설정을 재사용하며 실제 CLI/소켓·결정적인 로컬 provider·기록용 Messenger를
+native 시나리오는 기존 opt-in을 명시적으로 켜며 `OMP_TEST_COMMAND`가 없으면 PATH에서 현재
+설치 stock CLI를 자동 선택한다. 실제 CLI/소켓·결정적인 로컬 provider·기록용 Messenger를
 사용한다. 사용자 설정·인증은 분리하며 실제 메신저 로그인이나 동일 프로세스 TUI/herdr attach의
-검증 명령이 아니다.
+검증 명령이 아니다. CLI 자동 선택은 native/PTY·외부 ULW opt-in을 대신 켜지 않는다.
 
 ```sh
-export OMP_TEST_COMMAND="$(bun -e 'const c = await Bun.file("config.local.json").json(); console.log(JSON.stringify(c.command));')"
 OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-host.test.ts test/native-runtime.test.ts test/native-model-selection.test.ts test/native-board.test.ts test/native-gateway.test.ts
 OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-autonomy.test.ts
 ```
+
+의도적으로 격리한 설치를 검증할 때만 `OMP_TEST_COMMAND`에 standalone CLI argv의 비어 있지
+않은 JSON 문자열 배열을 지정한다. 직접 실행·fixture 하위 프로세스·PTY·`test:ci` 모두 같은
+override를 존중한다. 잘못된 argv·미지원 버전·실행 실패는 자동 선택으로 숨기지 않고 실패한다.
+override 첫 인수가 `omp`여도 dependency shim이 아닌 설치 CLI로 해석한다.
+PTY 새 설정 테스트는 선택된 실행 파일을 격리된 PATH에 연결해 실제 setup이 그 파일을
+발견하게 한다. 새 설정은 제품 계약대로 실행 파일 하나만 저장하며 테스트 override의 추가
+CLI 옵션을 자동 주입하지 않는다. 기존 설정의 명시된 옵션은 그대로 보존한다.
 
 ULW 병합 회귀는 외부 checkout을 수정하거나 설치하지 않고 명시한 entrypoint를 읽어 실행한다.
 환경변수를 생략하면 외부 ULW 조합은 건너뛴다.

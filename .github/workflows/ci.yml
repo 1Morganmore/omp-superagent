@@ -31,15 +31,16 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.runtime.outputs.bun }}
-      - name: Install published OMP binary
+      - name: Install latest published OMP binary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="$(jq -r '.dependencies["@oh-my-pi/pi-coding-agent"]' package.json)"
+          tag="$(gh release view --repo can1357/oh-my-pi --json tagName --jq .tagName)"
           asset="$(bun -p '`omp-${process.platform}-${process.arch}`')"
           directory="$RUNNER_TEMP/omp"
           mkdir -p "$directory"
-          gh release download "v$version" --repo can1357/oh-my-pi \
+          echo "Testing current upstream OMP release: $tag"
+          gh release download "$tag" --repo can1357/oh-my-pi \
             --pattern "$asset" --pattern SHA256SUMS.txt --dir "$directory"
           (cd "$directory" && grep "  $asset\$" SHA256SUMS.txt | shasum -a 256 -c -)
           mv "$directory/$asset" "$directory/omp"

@@ -2,9 +2,13 @@ import { chmod, realpath, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { HostChannel, type Frame } from "../../src/host-protocol";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { dependencies } from "../../package.json";
 
 // Metadata belongs to this explicit fake executable, not production detection.
-if (process.argv.includes("--version")) { console.log("omp/18.20.2"); process.exit(0); }
+if (process.argv.includes("--version")) {
+  console.log(`omp/${dependencies["@oh-my-pi/pi-coding-agent"]}`);
+  process.exit(0);
+}
 if (process.argv.includes("--help")) {
   console.log("--mode rpc rpc-ui --resume FILE --extension PATH --model MODEL");
   process.exit(0);

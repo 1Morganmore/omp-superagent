@@ -276,11 +276,12 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## OMP: installed runtime and published SDK
 
-- Runtime baseline: [can1357/oh-my-pi v18.20.2](https://github.com/can1357/oh-my-pi/tree/7c49c11aa5bbaf3f418406583096168ad5b8c6dc),
-  revision `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`.
+- SDK/API baseline: [can1357/oh-my-pi v18.22.0](https://github.com/can1357/oh-my-pi/tree/3e8cff3b7ce19a805c11a26a6dd1703066435851),
+  revision `3e8cff3b7ce19a805c11a26a6dd1703066435851`.
 - The operator installs OMP separately. This repository does not patch, build,
-  or redistribute an OMP executable. CI downloads upstream release binaries and
-  verifies them against the upstream checksum manifest.
+  or redistribute an OMP executable. Local native tests discover that installed
+  runtime by default. CI downloads the latest published upstream release binary
+  and verifies it against that release's checksum manifest.
 - Published `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-tui`, and `pi-utils`
   dependencies are pinned in `package.json`; `bun.lock` records resolved packages
   and integrity data. Public SDK interfaces support this project's managed
@@ -288,14 +289,16 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 - `pi-tui` supplies native thinking-level helpers and the keyword matcher used by
   tests; no TUI implementation is copied into this project.
 - The live state projection in `src/host-extension.ts` adapts the `get_state`
-  object from [`rpc-mode.ts` at the baseline revision](https://github.com/can1357/oh-my-pi/blob/7c49c11aa5bbaf3f418406583096168ad5b8c6dc/packages/coding-agent/src/modes/rpc/rpc-mode.ts).
+  object from [`rpc-mode.ts` at the baseline revision](https://github.com/can1357/oh-my-pi/blob/3e8cff3b7ce19a805c11a26a6dd1703066435851/packages/coding-agent/src/modes/rpc/rpc-mode.ts).
   It reads the actual session through public getters so status remains observable
   during a serialized command. It conservatively reports unsettled while that
   command is pending; idle disposal still requires the stock RPC settlement check.
+  The async-work flag follows the public `wakeSources` getter, not the removed
+  `hasPendingAsyncWork()` method; separate owned-resource checks remain intact.
   The upstream copyright and MIT terms below apply to this adapted projection.
 - The published SDK and the source artwork identified above retain the following
   MIT notice, also present in the installed package's `LICENSE` and the
-  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/7c49c11aa5bbaf3f418406583096168ad5b8c6dc/LICENSE):
+  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/3e8cff3b7ce19a805c11a26a6dd1703066435851/LICENSE):
 
 ```text
 MIT License

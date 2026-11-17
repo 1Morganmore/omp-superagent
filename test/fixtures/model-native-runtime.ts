@@ -15,6 +15,7 @@ import { nativeDisabledProviders } from "./native-extension";
 import { modelAbortMarker, modelCompactAbortInstructions, modelCompactInstructions, modelCompactMarker, modelCompactSummary,
   modelFixtureModels, modelFixtureProvider, modelJudgeMarker, modelRolesMarker } from "./model-selection-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
+import { nativeTestCommand } from "./native-command";
 
 const selectionProviderFixture = path.resolve(import.meta.dir, "model-selection-extension.ts");
 const networkGuardFixture = path.resolve(import.meta.dir, "native-extension.ts");
@@ -119,11 +120,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   const modelReason = modelSelection
     ? "The native judge advised the head model; the head independently selected this available text chat model for the isolated lane."
     : "Use the available deterministic local text chat model for the native lifecycle proof.";
-  const parsed: unknown = JSON.parse(process.env.OMP_TEST_COMMAND ?? "null");
-  if (!Array.isArray(parsed) || !parsed.length || parsed.some(arg => typeof arg !== "string" || !arg)) {
-    throw new Error("Native runtime smoke requires OMP_TEST_COMMAND as an explicit installed CLI argv JSON array");
-  }
-  const nativeCommand: string[] = parsed;
+  const nativeCommand = await nativeTestCommand();
   const natives = process.env.OMP_TEST_NATIVES_DIR;
   if (natives && !path.isAbsolute(natives)) throw new Error("OMP_TEST_NATIVES_DIR must be absolute");
   const managedUlwPath = process.env.OMP_TEST_ULW_EXTENSION

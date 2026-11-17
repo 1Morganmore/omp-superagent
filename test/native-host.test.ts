@@ -5,6 +5,7 @@ import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
 import { startHost, HostConnection, type HostFrame, type HostOptions } from "../src/host";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { serviceCompletionRecorded } from "../src/host-protocol";
+import { nativeTestCommand } from "./fixtures/native-command";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
 const RECORD_TYPE = "omp-superagent-native-test";
@@ -20,17 +21,6 @@ interface FixtureRecord {
   agentStarts: number;
   networkAttempts: number;
   answers?: FixtureRecord[];
-}
-
-function nativeCommand(): string[] {
-  if (!process.env.OMP_TEST_COMMAND) {
-    throw new Error("Native smoke requires OMP_TEST_COMMAND as an explicit installed CLI argv JSON array");
-  }
-  const command: unknown = JSON.parse(process.env.OMP_TEST_COMMAND);
-  if (!Array.isArray(command) || !command.length || command.some(arg => typeof arg !== "string" || !arg)) {
-    throw new Error("OMP_TEST_COMMAND must be a nonempty JSON array of argv strings");
-  }
-  return command;
 }
 
 function observe(connection: HostConnection, matches: (frame: HostFrame) => boolean) {
@@ -70,7 +60,7 @@ async function checkpoint(connection: HostConnection, token: string, id: string)
 }
 
 nativeTest("actual OMP keeps one persistent host across controller detach, pending approval, and graceful shutdown", async () => {
-  const command = nativeCommand();
+  const command = await nativeTestCommand();
   const nativesDirectory = process.env.OMP_TEST_NATIVES_DIR;
   if (nativesDirectory && !path.isAbsolute(nativesDirectory)) {
     throw new Error("OMP_TEST_NATIVES_DIR must be an explicit absolute native-cache path");
