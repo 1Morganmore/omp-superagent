@@ -497,37 +497,38 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       const headBefore = await nativeModelRoles(initial, "before-head-controls");
       const resultsBefore = nativeResults.length;
       const commandReply = async (id: string, text: string, outcome: "done" | "cancelled" = "done") => {
-        await messenger.deliver(inbound(id, threadRoute, text));
+        const input = inbound(id, threadRoute, text);
+        await messenger.deliver(input);
         await until(() => store.input(id)?.state === outcome && outbox().some(row => row.source_id === id && row.state === "sent"), `head command ${text}`);
         const response = messenger.sent.find(output => output.sourceId === id)!;
         expect(response.route).toEqual(threadRoute);
         expect(response.text).not.toContain("local-test-only");
         expect(response.text).not.toContain("mock://");
-        return response.text;
+        return { input, text: response.text };
       };
       const visibleNumber = (text: string, value: number) => {
         expect(Number.isFinite(value)).toBe(true);
         expect(text.replaceAll(",", "")).toMatch(new RegExp(`\\b${String(value).replaceAll(".", "\\.")}\\b`));
       };
-      const help = await commandReply("210", "/help");
+      const { text: help } = await commandReply("210", "/help");
       for (const name of ["help", "status", "stop", "context", "compact", "usage", "model", "effort"]) expect(help).toContain(`/${name}`);
-      const status = await commandReply("211", "/status");
+      const { text: status } = await commandReply("211", "/status");
       expect(status).toContain(headState.sessionId);
       expect(status).toContain(`${mainModel.provider}/${mainModel.id}`);
       expect(status).toContain(finalLane.id);
       const nativeContext = (await initial.client.getState()).contextUsage;
       expect(nativeContext).toBeDefined();
       expect(nativeContext!.tokens).toBeGreaterThan(0);
-      const context = await commandReply("212", "/context");
+      const { text: context } = await commandReply("212", "/context");
       visibleNumber(context, nativeContext!.tokens);
       visibleNumber(context, nativeContext!.contextWindow);
       const nativeUsage = await initial.client.getSessionStats();
       expect(nativeUsage.tokens.input).toBeGreaterThan(0);
       expect(nativeUsage.tokens.output).toBeGreaterThan(0);
-      const usage = await commandReply("213", "/usage");
+      const { text: usage } = await commandReply("213", "/usage");
       for (const value of [nativeUsage.tokens.input, nativeUsage.tokens.output, nativeUsage.tokens.total, nativeUsage.cost]) visibleNumber(usage, value);
       for (const [id, text] of [["214", "/model preset"], ["215", "/model preset list"]]) {
-        const presets = await commandReply(id!, text!);
+        const { text: presets } = await commandReply(id!, text!);
         for (const name of Object.keys(agentConfig.modelPresets!)) expect(presets).toMatch(new RegExp(`\\b${name}\\b`));
       }
       expect((await nativeModelRoles(initial, "after-read-only-head-controls")).calls).toEqual(headBefore.calls);
@@ -607,7 +608,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
 
       const beforeCompactEntries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
       const beforeCompactMessages = await initial.client.getMessages();
-      const compactReply = await commandReply("217", `/compact ${modelCompactInstructions}`);
+      const { text: compactReply } = await commandReply("217", `/compact ${modelCompactInstructions}`);
       const compactEntries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
       const compactions = compactEntries.filter(entry => entry.type === "compaction");
       expect(compactions).toHaveLength(beforeCompactEntries.filter(entry => entry.type === "compaction").length + 1);
@@ -704,7 +705,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
         expect(store.input(compactInput.id)).toMatchObject({ state: "submitted" });
         expect(await initial.client.getState()).toMatchObject({ isCompacting: true, sessionId: headState.sessionId });
         expect(messenger.sent.some(output => output.sourceId === compactInput.id)).toBe(false);
-        const duringCompact = await commandReply("306", "/status");
+        const { text: duringCompact } = await commandReply("306", "/status");
         expect(duringCompact).toContain(headState.sessionId);
         await commandReply("307", "/context");
         await commandReply("308", "/usage");
@@ -748,8 +749,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       const nativeResultsBeforeGlobal = nativeResults.length;
       expect(beforeGlobalConfig.modelRoles).not.toEqual(lowPreset.modelRoles);
       expect(beforeGlobalConfig.defaultThinkingLevel).not.toBe(lowPreset.defaultThinkingLevel);
-      const globalLow = inbound("218", threadRoute, "/model preset low --global");
-      const globalNotice = await commandReply(globalLow.id, globalLow.text);
+      const { input: globalLow, text: globalNotice } = await commandReply("218", "/model preset low --global");
       expect(globalNotice).toContain(`Preset "low": previous model: "${modelFixtureModels.changedDefault.provider}/${modelFixtureModels.changedDefault.id}"; effort: ${Effort.Minimal} -> actual model: "${modelFixtureModels.changedLane.provider}/${modelFixtureModels.changedLane.id}"; effort: ${Effort.Low}.`);
       expect(globalNotice).toContain("Session applied; global saved (future/default settings).");
       expect(globalNotice).toContain("Existing lanes unchanged.");
