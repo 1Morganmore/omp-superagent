@@ -20,6 +20,7 @@ import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "./contracts";
 import { headRecoveryEvidence } from "./head-recovery";
 import { PrWatcher, type PrWatchCommand } from "./pr-watch";
 import type { readPrSnapshot } from "./pr-github";
+import { acknowledgeDecision, decisionRequestId, decisionViews, type DecisionView } from "./decisions";
 
 const key = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 24);
 const dialogs = new Set(["select", "confirm", "input", "editor", "ask"]);
@@ -1767,6 +1768,58 @@ export class Superagent {
   listPrWatches() {
     if (this.stopped) throw new Error("Controller is stopped");
     return this.prWatcher.list();
+  }
+
+  listDecisions(state: "open" | "all" = "open", laneId?: string): DecisionView[] {
+    if (this.stopped) throw new Error("Controller is stopped");
+    return decisionViews(this.store).filter(decision => (laneId === undefined || decision.target === laneId)
+      && (state === "all" || decision.state === "pending" || decision.state === "answering"));
+  }
+
+  inspectDecision(id: string): DecisionView {
+    const decision = this.listDecisions("all").find(decision => decision.id === id);
+    if (!decision) throw new Error("Unknown decision");
+    return decision;
+  }
+
+  async withdrawDecision(id: string, sourceId: string, reason: string): Promise<DecisionView> {
+    this.assertRestartOpen();
+    if (!reason.trim()) throw new Error("Decision withdrawal requires a reason");
+    const decision = this.inspectDecision(id);
+    const source = this.store.input(sourceId);
+    if (!source || source.state === "cancelled" || this.store.getMeta(`user-source:${sourceId}`) !== "true")
+      throw new Error("Decision withdrawal requires an original active owner source");
+    this.authorized(source.route);
+    if (routeKey(source.route) !== routeKey(decision.route)) throw new Error("Decision belongs to another conversation");
+    const approval = this.store.approval(decision.approvalId)!;
+    const live = this.live.get(approval.target);
+    if (decision.state !== "pending") throw new Error("Decision is already settled or its answer is unresolved");
+    if (!live || live.generation !== approval.generation || live.sessionId !== decision.sessionId || this.callbacks.has(approval.id))
+      throw new Error("Original decision host is unavailable or busy");
+    this.callbacks.add(approval.id);
+    let attempted = false;
+    try {
+      const state = await this.state(live);
+      const pending = state.pendingUiRequests?.find(frame => frame.id === approval.requestId);
+      if (!this.current(live) || !pending || !isDeepStrictEqual(pending, approval.request))
+        throw new Error("Original decision is no longer pending");
+      this.assertRestartOpen();
+      if (this.store.input(sourceId)?.state === "cancelled") throw new Error("Withdrawal source was cancelled");
+      if (!this.store.resolveApproval(approval.id, approval.generation, "cancelled", { reason, sourceId }))
+        throw new Error("Decision was already settled");
+      attempted = true;
+      live.connection.uiResponse(approval.requestId, { cancelled: true });
+      const acknowledged = await this.state(live);
+      if (!this.current(live) || !Array.isArray(acknowledged.pendingUiRequests)
+        || acknowledged.pendingUiRequests.some(frame => frame.id === approval.requestId))
+        throw new Error("Native question cancellation was not acknowledged");
+      acknowledgeDecision(this.store, this.store.approval(approval.id)!, live.sessionId);
+      await this.messenger.dismissApproval(this.store.approval(approval.id)!);
+      return this.inspectDecision(id);
+    } catch (error) {
+      if (attempted) throw new DeliveryError("Decision is withdrawn locally; native cancellation outcome is unresolved", "uncertain", undefined, { cause: error });
+      throw error;
+    } finally { this.callbacks.delete(approval.id); }
   }
 
   private observePrs(): void {
@@ -3834,6 +3887,11 @@ export class Superagent {
         if (this.store.resolveApproval(approval.id, approval.generation, "cancelled")) await this.messenger.dismissApproval(approval);
       }
     }
+    for (const decision of this.listDecisions("all", live.id)) {
+      if (decision.generation === live.generation && decision.sessionId === live.sessionId
+        && decision.state !== "pending" && decision.confirmedAt === undefined && !ids.has(decision.requestId))
+        acknowledgeDecision(this.store, this.store.approval(decision.approvalId)!, live.sessionId);
+    }
     for (const frame of state.pendingUiRequests) await this.frame(live, frame);
   }
 
@@ -3873,13 +3931,16 @@ export class Superagent {
       if (persisted && this.store.resolveApproval(persisted.id, live.generation, "cancelled")) await this.messenger.dismissApproval(persisted);
       return;
     }
+    const decision = decisionRequestId(frame);
     const approval: Approval = persisted ?? {
       id, target: live.id, generation: live.generation, requestId: frame.id,
       route, request: frame, state: "pending", remoteId: null,
+      ...(decision ? { decision: { id: decision, sessionId: live.sessionId,
+        sourceId: live.input ? this.store.ownerSource(live.input.id)?.id ?? null : null } } : {}),
     };
     for (const { input } of live.admitted.values()) this.activity(input, false);
-    this.cards.add(id);
     this.store.putApproval(approval);
+    this.cards.add(id);
     try {
       const remoteId = await this.messenger.showApproval(approval);
       this.store.setApprovalMessage(id, remoteId);
@@ -3908,11 +3969,16 @@ export class Superagent {
       if (generation !== approval.generation) return "rejected";
       const live = this.live.get(approval.target);
       if (!live) return "unresolved";
-      if (live.generation !== approval.generation) return "rejected";
+      if (live.generation !== approval.generation
+        || approval.decision && approval.decision.sessionId !== live.sessionId) return "rejected";
       const state = await this.state(live);
       if (!this.current(live) || !Array.isArray(state.pendingUiRequests)) return "unresolved";
       const pending = state.pendingUiRequests.find(frame => frame.id === approval.requestId);
-      if (approval.state === "answered") return pending ? "unresolved" : "accepted";
+      if (approval.state === "answered") {
+        if (pending) return "unresolved";
+        acknowledgeDecision(this.store, approval, live.sessionId);
+        return "accepted";
+      }
       if (!pending || !isDeepStrictEqual(pending, approval.request)) return "rejected";
       return "retry";
     } catch { return "unresolved"; }
@@ -3935,13 +4001,16 @@ export class Superagent {
       if (!this.current(live) || !Array.isArray(state.pendingUiRequests)) throw new Error("Native dialog state unavailable");
       const pending = state.pendingUiRequests.find(frame => frame.id === approval.requestId);
       if (!pending || !isDeepStrictEqual(pending, approval.request)) throw new DeliveryError("Native dialog is no longer pending", "rejected");
-      if (!this.store.resolveApproval(id, approval.generation, "answered")) throw new DeliveryError("Approval was already settled", "rejected");
+      if (approval.decision && approval.decision.sessionId !== live.sessionId)
+        throw new DeliveryError("Decision belongs to another native session", "rejected");
+      if (!this.store.resolveApproval(id, approval.generation, "answered", { response })) throw new DeliveryError("Approval was already settled", "rejected");
       attempted = true;
       live.connection.uiResponse(approval.requestId, response);
       const acknowledged = await this.state(live);
-      if (!Array.isArray(acknowledged.pendingUiRequests) || acknowledged.pendingUiRequests.some(frame => frame.id === approval.requestId)) {
+      if (!this.current(live) || !Array.isArray(acknowledged.pendingUiRequests) || acknowledged.pendingUiRequests.some(frame => frame.id === approval.requestId)) {
         throw new Error("Native dialog response was not acknowledged; it will not be replayed");
       }
+      acknowledgeDecision(this.store, this.store.approval(id)!, live.sessionId);
       if (!acknowledged.pendingUiRequests.length) {
         for (const { input } of live.admitted.values()) this.activity(input, true);
       }

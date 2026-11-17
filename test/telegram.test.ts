@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Message, Update } from "grammy/types";
 import { TelegramMessenger, telegramDeliveryError } from "../src/telegram.ts";
 import { DeliveryError } from "../src/delivery.ts";
+import { decisionId } from "../src/decisions";
 import { Store } from "../src/store.ts";
 import type { Approval, DialogResponse, Inbound, OutputRecord, Route } from "../src/contracts.ts";
 import { type Config, hostPaths } from "../src/config.ts";
@@ -835,6 +836,33 @@ describe("Telegram approvals and exact-card interaction", () => {
     expect(restarted.received.map(input => input.text)).toEqual(["ordinary group reply"]);
     expect(restarted.received[0]?.reply).toEqual({ messageId: String(id), authorId: bot, text: closed.text ?? null });
   });
+  test("empty tracked choices preserve the Telegram question and do not admit an answer", async () => {
+    const { messenger, http, answers, errors, ledger } = await fixture();
+    const decision = decisionId("native-session", "telegram-question");
+    const id = Number(await messenger.showApproval(approval({
+      decision: { id: decision, sourceId: null, sessionId: "native-session" },
+      request: { method: "ask", questions: [
+        { id: `${decision}:0`, question: "Which scope?", options: [{ label: "Local" }], recommended: 0 },
+        { id: `${decision}:1`, question: "Which check?", options: [{ label: "Native" }] },
+      ] },
+    })));
+    http.callback(1, id, "next-0"); await drain();
+    expect(answers).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(ledger.getMeta("telegram:900:offset")).toBe("2");
+    http.callback(2, id, "q0-0"); await drain();
+    http.callback(3, id, "next-0"); await drain();
+    http.callback(4, id, "next-1"); await drain();
+    expect(answers).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(ledger.getMeta("telegram:900:offset")).toBe("5");
+    http.callback(5, id, "q1-0"); await drain();
+    http.callback(6, id, "next-1"); await drain();
+    expect(answers.map(answer => answer.response)).toEqual([{ answers: [
+      { id: `${decision}:0`, selectedOptions: ["Local"] }, { id: `${decision}:1`, selectedOptions: ["Native"] },
+    ] }]);
+  });
+
   test("closing a dialog discards persisted partial free-text answers and retains only receipt safety state", async () => {
     const { messenger, http, ledger } = await fixture();
     const id = Number(await messenger.showApproval(approval({ request: { method: "ask", questions: [

@@ -200,6 +200,13 @@ export interface Approval {
   request: Record<string, unknown>;
   state: "pending" | "answered" | "cancelled";
   remoteId: string | null;
+  decision?: { id: string; sourceId: string | null; sessionId: string };
+}
+
+export interface ApprovalResolution {
+  response?: DialogResponse;
+  reason?: string;
+  sourceId?: string;
 }
 
 export interface HeadRecoveryDecision {
@@ -273,7 +280,7 @@ export interface StorePort {
   putApproval(approval: Approval): void;
   approval(id: string): Approval | null;
   approvals(target?: string): Approval[];
-  resolveApproval(id: string, generation: number, state: "answered" | "cancelled"): boolean;
+  resolveApproval(id: string, generation: number, state: "answered" | "cancelled", resolution?: ApprovalResolution): boolean;
   setApprovalMessage(id: string, remoteId: string): void;
   recoverDeliveries(): void;
   getMeta(key: string): string | null;

@@ -20,6 +20,7 @@ import { Store } from "../src/store";
 import type { LaneReport } from "../src/lane-report";
 import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "../src/contracts";
 import { headRecoveryEvidence } from "../src/head-recovery";
+import { decisionId } from "../src/decisions";
 
 test("a delayed durable receipt cannot cancel a later native run", () => {
   const owner = { sessionId: "native-session", sessionFile: "/private/session.jsonl", requestId: "original", cursor: null };
@@ -5597,6 +5598,109 @@ describe("real Store runtime coordination", () => {
     expect(host.state.isStreaming).toBe(false);
     expect(host.cancelled).toEqual(["old-child"]);
     await expect(runtime.resume(lane.id)).rejects.toThrow("Cancelled");
+  });
+
+  async function ownerDecision() {
+    const f = fixture();
+    await f.runtime.start();
+    await admit(f.runtime, message("decision-source"));
+    const id = decisionId(f.main.state.sessionId, "decision-call");
+    const frame = { type: "extension_ui_request", method: "ask", id: "decision-native",
+      questions: [{ id: `${id}:0`, question: "Which database?", options: [{ label: "SQLite" }, { label: "Redis" }], recommended: 0 }] };
+    f.main.state.pendingUiRequests = [frame];
+    f.main.emit(frame);
+    await f.messenger.whenApproval();
+    await f.messenger.handlers!.reconnect!();
+    const approval = [...f.messenger.shown.values()][0]!;
+    return { ...f, id, frame, approval, response: { answers: [{ id: `${id}:0`, selectedOptions: ["Redis"] }] } };
+  }
+
+  test.each(["report", "progress"])("a decision raised from %s retains the original owner source through activity and handoff links", async kind => {
+    const { runtime, store, main, messenger } = fixture();
+    await runtime.start();
+    store.receive(message("owner-source"), "main", { "user-source:owner-source": "true" });
+    store.settle("owner-source", "done");
+    store.receive(message("handoff-source"), "main", { "handoff-source:handoff-source": "owner-source" });
+    store.settle("handoff-source", "done");
+    const synthetic = `${kind}:handoff-source`;
+    store.receive(message(synthetic), "main", { [`activity-source:${synthetic}`]: "handoff-source" });
+    await runtime.kick();
+    const id = decisionId(main.state.sessionId, `${kind}-decision`);
+    const frame = { type: "extension_ui_request", method: "ask", id: `${kind}-question`,
+      questions: [{ id: `${id}:0`, question: "Which scope?", options: [{ label: "Local" }] }] };
+    main.state.pendingUiRequests = [frame];
+    main.emit(frame);
+    await messenger.whenApproval();
+    await messenger.handlers!.reconnect!();
+    expect(runtime.inspectDecision(id).sourceId).toBe("owner-source");
+    const withdrawn = await runtime.withdrawDecision(id, runtime.inspectDecision(id).sourceId!, "Owner changed the requirement");
+    expect(withdrawn).toMatchObject({ state: "withdrawn", withdrawal: { sourceId: "owner-source" } });
+    expect(main.responses).toEqual([{ id: frame.id, response: { cancelled: true } }]);
+  });
+
+  test("owner decisions use the existing authenticated card and preserve answers without duplicate delivery", async () => {
+    const { runtime, messenger, main, id, frame, approval, response, store } = await ownerDecision();
+    expect(runtime.listDecisions()).toMatchObject([{ id, state: "pending", sourceId: "decision-source", target: "main",
+      requestId: frame.id, route: route(), remoteId: `card-${approval.id}`,
+      questions: [{ question: "Which database?", recommended: 0 }] }]);
+    await expect(messenger.handlers!.answer(approval.id, response, route("foreign"))).rejects.toMatchObject({ certainty: "rejected" });
+    expect(runtime.inspectDecision(id).state).toBe("pending");
+    expect(main.responses).toEqual([]);
+    await messenger.handlers!.answer(approval.id, response, route());
+    expect(runtime.listDecisions()).toEqual([]);
+    expect(runtime.listDecisions("all", "main")).toMatchObject([{ id, state: "answered", response }]);
+    expect(main.responses).toEqual([{ id: frame.id, response }]);
+    await expect(messenger.handlers!.answer(approval.id, response, route())).rejects.toMatchObject({ certainty: "rejected" });
+    main.emit(frame);
+    await messenger.handlers!.reconnect!();
+    expect(main.responses).toHaveLength(1);
+    expect(messenger.shown.size).toBe(1);
+    expect(store.outputs()).toEqual([]);
+  });
+
+  test("lost decision answer acknowledgement remains held until exact native reconciliation, never defaults or replays", async () => {
+    const { runtime, messenger, main, id, approval, response } = await ownerDecision();
+    main.uiAcknowledges = false;
+    await expect(messenger.handlers!.answer(approval.id, response, route())).rejects.toMatchObject({ certainty: "uncertain" });
+    expect(runtime.inspectDecision(id)).toMatchObject({ state: "answering", response });
+    expect(await messenger.handlers!.reconcileAnswer!(approval.id, route())).toBe("unresolved");
+    await expect(runtime.withdrawDecision(id, "decision-source", "Changed mind")).rejects.toThrow("unresolved");
+    await messenger.handlers!.reconnect!();
+    expect(runtime.inspectDecision(id).state).toBe("answering");
+    expect(main.responses).toHaveLength(1);
+    main.state.pendingUiRequests = [];
+    expect(await messenger.handlers!.reconcileAnswer!(approval.id, route())).toBe("accepted");
+    expect(runtime.inspectDecision(id)).toMatchObject({ state: "answered", response });
+    expect(main.responses).toHaveLength(1);
+  });
+
+  test("decision withdrawal needs an original same-conversation owner source and cancels only the original question", async () => {
+    const { runtime, messenger, main, id, frame, approval, response, store } = await ownerDecision();
+    store.receive(message("internal-data"), "main");
+    await expect(runtime.withdrawDecision(id, "internal-data", "Reported by a worker")).rejects.toThrow("original active owner");
+    store.receive(message("foreign-owner-source", route("foreign")), "main", { "user-source:foreign-owner-source": "true" });
+    await expect(runtime.withdrawDecision(id, "foreign-owner-source", "Another topic")).rejects.toThrow("another conversation");
+    const result = await runtime.withdrawDecision(id, "decision-source", "The original requirement was withdrawn");
+    expect(result).toMatchObject({ state: "withdrawn", confirmedAt: expect.any(Number),
+      withdrawal: { sourceId: "decision-source", reason: "The original requirement was withdrawn" } });
+    expect(result.response).toBeUndefined();
+    expect(runtime.listDecisions()).toEqual([]);
+    expect(main.responses).toEqual([{ id: frame.id, response: { cancelled: true } }]);
+    await expect(messenger.handlers!.answer(approval.id, response, route())).rejects.toMatchObject({ certainty: "rejected" });
+    await expect(runtime.withdrawDecision(id, "decision-source", "Duplicate withdrawal")).rejects.toThrow("already settled");
+    expect(main.responses).toHaveLength(1);
+    expect(messenger.dismissed).toContain(approval.id);
+  });
+
+  test("native decision cancellation removes the pending decision without recording a recommendation as consent", async () => {
+    const { runtime, messenger, main, id, frame } = await ownerDecision();
+    main.state.pendingUiRequests = [];
+    main.emit({ type: "extension_ui_request", method: "cancel", targetId: frame.id });
+    await messenger.handlers!.reconnect!();
+    expect(runtime.inspectDecision(id)).toMatchObject({ state: "withdrawn" });
+    expect(runtime.inspectDecision(id).response).toBeUndefined();
+    expect(runtime.listDecisions()).toEqual([]);
+    expect(main.responses).toEqual([]);
   });
 
   test("reconnect UI replay rehydrates one durable card and accepts only one native answer", async () => {

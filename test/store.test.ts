@@ -10,6 +10,7 @@ import { DiscordMessenger } from "../src/discord.ts";
 import { Store } from "../src/store.ts";
 import type { LaneReport } from "../src/lane-report";
 import type { HeadRecoveryAttempt } from "../src/contracts";
+import { acknowledgeDecision, decisionId, decisionViews } from "../src/decisions";
 
 const stores: Store[] = [];
 const directories: string[] = [];
@@ -60,6 +61,14 @@ function approval(id = "approval", target = "lane", generation = 0): Approval {
     id, target, generation, requestId: "native-dialog", route: route(),
     request: { method: "confirm", title: "Allow action?" }, state: "pending", remoteId: null,
   };
+}
+function decisionApproval(): Approval {
+  const id = decisionId("decision-session", "decision-tool");
+  return { ...approval("decision-approval", "main"), decision: { id, sourceId: "owner-request", sessionId: "decision-session" },
+    request: { method: "ask", questions: [
+      { id: `${id}:0`, question: "Which storage?", options: [{ label: "SQLite", description: "No new service" }, { label: "Redis" }], recommended: 0 },
+      { id: `${id}:1`, question: "Which checks?", options: [{ label: "Unit" }, { label: "Native" }], multi: true },
+    ] } };
 }
 function storedOutput(path: string, id: string): { state: string; remote_id: string | null } | null {
   const db = new Database(path, { readonly: true });
@@ -1111,6 +1120,74 @@ describe("durable coordination store", () => {
     expect(store.outputs()).toEqual([]);
     expect(store.input("report:source-lane")?.text).toContain("Cancelled");
     expect(store.input("report:source-lane")?.text).not.toContain("Too late");
+  });
+
+  test("decision ledger keeps original choices, recommendation, card and exact owner response across restart", () => {
+    const { store, path } = fixture();
+    const question = decisionApproval();
+    store.putApproval(question);
+    store.setApprovalMessage(question.id, "original-card");
+    store.putApproval(question);
+    expect(decisionViews(store)).toMatchObject([{ id: question.decision!.id, state: "pending",
+      sessionId: "decision-session", sourceId: "owner-request", remoteId: "original-card",
+      questions: [{ question: "Which storage?", recommended: 0, options: [{ label: "SQLite", description: "No new service" }, { label: "Redis" }] },
+        { multi: true }] }]);
+    const response = { answers: [
+      { id: `${question.decision!.id}:0`, selectedOptions: [], customInput: "Use the existing database" },
+      { id: `${question.decision!.id}:1`, selectedOptions: ["Unit", "Native"] },
+    ] };
+    expect(store.resolveApproval(question.id, 0, "answered", { response })).toBe(true);
+    expect(store.resolveApproval(question.id, 0, "cancelled", { reason: "Lost race" })).toBe(false);
+    expect(decisionViews(store)[0]).toMatchObject({ state: "answering", response });
+    store.close();
+    const reopened = open(path);
+    expect(decisionViews(reopened)[0]).toMatchObject({ state: "answering", remoteId: "original-card", response });
+    acknowledgeDecision(reopened, reopened.approval(question.id)!, "different-session");
+    expect(decisionViews(reopened)[0]!.state).toBe("answering");
+    acknowledgeDecision(reopened, reopened.approval(question.id)!, "decision-session");
+    expect(decisionViews(reopened)[0]).toMatchObject({ state: "answered", response, confirmedAt: expect.any(Number) });
+    expect(decisionViews(reopened)[0]!.withdrawal).toBeUndefined();
+    expect(reopened.outputs()).toEqual([]);
+  });
+
+  test("decision dedupe and malformed answers roll back without changing the original native approval", () => {
+    const { store } = fixture();
+    const question = decisionApproval();
+    store.putApproval(question);
+    expect(() => store.putApproval({ ...question, id: "duplicate-decision", requestId: "new-native-id" })).toThrow("already has a native request");
+    expect(store.approval("duplicate-decision")).toBeNull();
+    expect(() => store.resolveApproval(question.id, 0, "answered")).toThrow("exact owner answer");
+    const first = `${question.decision!.id}:0`, second = `${question.decision!.id}:1`;
+    for (const response of [
+      { confirmed: true },
+      { answers: [{ id: first, selectedOptions: ["A"] }, { id: second, selectedOptions: [] }] },
+      { answers: [{ id: first, selectedOptions: [] }, { id: second, selectedOptions: [] }] },
+      { answers: [{ id: second, selectedOptions: ["Unit"] }, { id: first, selectedOptions: ["SQLite"] }] },
+      { answers: [{ id: first, selectedOptions: ["SQLite", "Redis"] }, { id: second, selectedOptions: [] }] },
+      { answers: [{ id: first, selectedOptions: ["SQLite"], customInput: "Conflicting" }, { id: second, selectedOptions: [] }] },
+      { answers: [{ id: first, selectedOptions: ["SQLite"] }, { id: second, selectedOptions: ["Unit", "Unit"] }] },
+    ]) {
+      expect(() => store.resolveApproval(question.id, 0, "answered", { response })).toThrow();
+      expect(store.approval(question.id)?.state).toBe("pending");
+      expect(decisionViews(store)[0]!.response).toBeUndefined();
+    }
+    expect(decisionViews(store)).toHaveLength(1);
+  });
+
+  test("withdrawal is not approval and ordinary confirmations and unmarked asks never become decisions", () => {
+    const { store } = fixture();
+    store.putApproval(approval("permission", "main"));
+    store.putApproval({ ...approval("ordinary-question", "main"), requestId: "ordinary-native",
+      request: { method: "ask", questions: [{ id: "ordinary", question: "Question", options: [] }] } });
+    expect(decisionViews(store)).toEqual([]);
+    const question = { ...decisionApproval(), requestId: "decision-native" };
+    store.putApproval(question);
+    expect(store.resolveApproval(question.id, 0, "cancelled", { reason: "Requirement changed", sourceId: "withdraw-request" })).toBe(true);
+    expect(store.resolveApproval(question.id, 0, "answered", { response: { cancelled: true } })).toBe(false);
+    expect(decisionViews(store)[0]).toMatchObject({ state: "withdrawn",
+      withdrawal: { reason: "Requirement changed", sourceId: "withdraw-request" } });
+    expect(decisionViews(store)[0]!.response).toBeUndefined();
+    expect(store.approvals().map(approval => approval.id)).toEqual(["permission", "ordinary-question"]);
   });
 
   test("approval identity survives restart and duplicate answer/cancellation resolves exactly once", async () => {

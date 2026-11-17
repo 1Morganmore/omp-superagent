@@ -20,7 +20,9 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 헤드만 `lane_models`, `lane_init_presets`, `lane_start`, `lane_set_model`,
 `lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`,
 `thread_inspect`, `lane_thread_update`, `pr_watch`, `pr_watch_list`,
-`discord_context`, `discord_purpose_list`, `discord_purpose_set`, `discord_purpose_clear`를 사용한다.
+`discord_context`, `discord_purpose_list`, `discord_purpose_set`, `discord_purpose_clear`,
+`decision_list`, `decision_inspect`, `decision_withdraw`를 사용한다.
+`decision_ask`는 HEAD와 레인 root에서 사용하며 native 자식에는 제공하지 않는다.
 `lane_inspect({})`가 목록 조회다. 레인에는 관리 권한을, native 자식에는 관리·게시판 권한을 주지 않는다.
 일반 OMP에 이 확장들을 전역 설치하지 않는다. 도구 인자·역할 경계는
 [설계의 관리 도구 계약](../DESIGN.md#5-레인-관리-도구와-운영-스킬)을 따른다.
@@ -889,6 +891,20 @@ seance를 제거했으므로 major 18 전체에 제공된다고 가정하지 않
 독립적이다. Mnemopi 기억은 기존 native 수명과 설정된 프로젝트/공유 범위에서 저장·회수한다.
 
 ### 승인·질문 응답
+
+추적할 owner 선택은 `decision_ask({questions: [...]})`로 묻는다. 각 질문은
+`question`, `options: [{label, description?, preview?}]`, 선택적 `header`, `multi`,
+0부터 시작하는 `recommended`를 사용한다. 기존 native 질문 카드로 표시하며 시간 초과로
+추천을 확정하지 않는다. 별도 질문 메시지나 응답 명령은 없다.
+
+HEAD는 `decision_list({})`로 미결 결정을, `decision_list({state: "all"})`로 이력을 확인하고
+`decision_inspect({id})`로 원래 질문·선택지·추천·답변과 source/native/card 신원을 읽는다.
+`answering`은 전송한 답변의 native 반영이 아직 확인되지 않았다는 뜻이며 재전송하지 않는다.
+`decision_withdraw({id, sourceId, reason})`는 같은 원래 대화의 실제 owner 입력을 근거로
+미결 질문만 철회한다. `withdrawn`은 동의가 아니며 `confirmedAt`이 없으면 native 취소
+확인까지 주장하지 않는다. 일반 `ask`·tool permission 승인은 이 장부와 별개다.
+답변은 원래 인증 카드로만 받으며 HEAD가 답변을 만들어 넣거나 일반 채팅의 A/B를 추정하지 않는다.
+장부에 답변이 생겨도 일시정지된 레인이 자동 재개되지는 않는다.
 
 승인·질문은 각 플랫폼의 아래 UI로 응답한다. 주제를 바꾼 뒤에도 이전 주제의
 미해결 승인은 **그 카드에 연결된 정확한 native 요청**으로만 응답할 수 있다.

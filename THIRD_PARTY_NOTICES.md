@@ -138,14 +138,19 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   it does not bundle GitHub CLI or establish live-account/production verification.
   Channel metadata and PR text are context, never instruction or authorization.
 
+### Discord reply references and tracked owner decisions
 
-### Discord reply references
-
-- Conceptual reference: [Dori #68](https://github.com/vntrevx/omp-dori/pull/68)
-  at `f7072950ad6744b4756f69209e7bd7a19cd720f0`.
-- Independently implemented through the existing SQLite outbox and discord.js
-  reply references. No Dori source, prompt, tests, or reply-splitting engine
-  was copied.
+- Conceptual references: [Dori #68](https://github.com/vntrevx/omp-dori/pull/68)
+  at `f7072950ad6744b4756f69209e7bd7a19cd720f0` and
+  [Dori #71](https://github.com/vntrevx/omp-dori/pull/71)
+  at `8a777dc22f667eb4044b9f322f7677c770496414`.
+- Independently implemented through the existing SQLite outbox and approval
+  transactions, discord.js reply references, and the public OMP
+  `ExtensionUIContext.askDialog` / `set_ask_dialog`. No Dori source, prompt,
+  tests, question transport, registry, or reply-splitting engine was copied.
+- Owner answers remain bound to original authenticated native cards. The ledger
+  is coordination metadata, not a transcript copy, tool-permission approval,
+  automatic lane resumer, or a second messaging engine.
 
 ## Telegram transport: grammY
 

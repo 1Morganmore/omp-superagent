@@ -5,6 +5,7 @@ import { AbortController as ApiAbortController, type AbortSignal as ApiAbortSign
 import type { CallbackQuery, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, UserFromGetMe } from "grammy/types";
 import { physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
+import { validateDecisionAnswer, validateDecisionResponse } from "./decisions";
 import { DeliveryError } from "./delivery.ts";
 import { MESSENGER_COMMANDS } from "./messenger-commands.ts";
 
@@ -522,6 +523,7 @@ export class TelegramMessenger implements Messenger {
     } catch (error) { if (!notModified(error)) throw telegramDeliveryError(error); }
   }
   private async finish(pending: Pending, response: DialogResponse, eventId: string): Promise<void> {
+    validateDecisionResponse(pending.approval, response);
     pending.active = false; pending.lastUpdate = eventId;
     pending.answerRequest = hash(JSON.stringify(pending.approval.request)); this.save(pending);
     try { await this.handlers!.answer(pending.approval.id, response, pending.approval.route); }
@@ -531,8 +533,8 @@ export class TelegramMessenger implements Messenger {
   private async callback(query: CallbackQuery): Promise<void> {
     const parsed = /^omp:([a-f0-9]{24}):([a-z]+[0-9]*(?:-[0-9]+)?)$/.exec(query.data ?? "");
     const pending = parsed ? this.pending.get(parsed[1]!) : undefined;
-    const reject = async () => {
-      try { await this.api.answerCallbackQuery(query.id, { text: "This request is expired, unauthorized, or already being handled." }); }
+    const reject = async (text = "This request is expired, unauthorized, or already being handled.") => {
+      try { await this.api.answerCallbackQuery(query.id, { text }); }
       catch (error) { this.report(telegramDeliveryError(error)); }
     };
     if (!parsed || query.from.is_bot || String(query.from.id) !== this.options.ownerId || !pending?.active || !pending.verified || pending.busy || !this.handlers ||
@@ -559,7 +561,18 @@ export class TelegramMessenger implements Messenger {
           pending.selected = question.multi ? (pending.selected.includes(option.label) ? pending.selected.filter(value => value !== option.label) : [...pending.selected, option.label]) : [option.label];
           if (!question.multi) pending.customInput = undefined;
         } else if (action === `next-${pending.question}`) {
-          pending.answers.push({ id: question.id, selectedOptions: [...pending.selected], ...(pending.customInput !== undefined ? { customInput: pending.customInput } : {}) });
+          const answer = { id: question.id, selectedOptions: [...pending.selected], ...(pending.customInput !== undefined ? { customInput: pending.customInput } : {}) };
+          if (pending.approval.decision) {
+            try { validateDecisionAnswer(question, answer); }
+            catch (error) {
+              if (!(error instanceof DeliveryError) || error.certainty !== "rejected") throw error;
+              // Definitive rejection is a consumed callback, not a polling
+              // failure: retain the draft while allowing the next update.
+              await reject("Choose an option or enter an answer before continuing.");
+              return;
+            }
+          }
+          pending.answers.push(answer);
           pending.question++; pending.selected = []; pending.customInput = undefined;
           if (pending.question === dialog.questions.length) { await this.finish(pending, { answers: pending.answers }, eventId); return; }
         } else { await reject(); return; }

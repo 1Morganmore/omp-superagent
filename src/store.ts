@@ -28,6 +28,8 @@ import {
   type OutputRecord, type Route, type StorePort, type WorkflowActivation,
   type HeadRecoveryAttempt, type HeadRecoveryEffect,
 } from "./contracts.ts";
+import type { ApprovalResolution } from "./contracts";
+import { captureDecision, resolveDecision } from "./decisions";
 import { isLaneModel, sameLaneModel } from "./lane-models";
 import { workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
@@ -141,6 +143,7 @@ function inboundIdentity(input: Inbound) {
 const approvalIdentity = (approval: Approval) => ({
   id: approval.id, target: approval.target, generation: approval.generation,
   requestId: approval.requestId, route: approval.route, request: approval.request,
+  ...(approval.decision ? { decision: approval.decision } : {}),
 });
 
 export class Store implements StorePort {
@@ -754,6 +757,7 @@ export class Store implements StorePort {
       this.db.query("INSERT INTO approvals(id, target, generation, request_id, data, state, remote_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(approval.id, approval.target, approval.generation, approval.requestId, JSON.stringify(approvalIdentity(approval)),
           approval.state, approval.remoteId);
+      captureDecision(this, approval);
     }).immediate();
   }
 
@@ -767,12 +771,13 @@ export class Store implements StorePort {
       AND (?1 IS NULL OR target = ?1) ORDER BY sequence`).all(target ?? null) as ApprovalRow[]).map(toApproval);
   }
 
-  resolveApproval(id: string, generation: number, state: "answered" | "cancelled"): boolean {
+  resolveApproval(id: string, generation: number, state: "answered" | "cancelled", resolution?: ApprovalResolution): boolean {
     return this.db.transaction(() => {
       const approval = this.approval(id);
       if (!approval || approval.state !== "pending" || approval.generation !== generation) return false;
       const lane = this.lane(approval.target);
       if (state === "answered" && lane && (lane.generation !== generation || lane.workState !== "open")) return false;
+      resolveDecision(this, approval, state, resolution);
       return this.db.query("UPDATE approvals SET state = ? WHERE id = ? AND generation = ? AND state = 'pending'")
         .run(state, id, generation).changes === 1;
     }).immediate();

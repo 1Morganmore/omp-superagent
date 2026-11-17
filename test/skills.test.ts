@@ -62,11 +62,11 @@ test.each(cases)("native packaged skills, scoped tools, and preserved selections
     if (selection === "narrow") expect(proof.active).not.toContain("bash");
     else expect(proof.active).toContain("bash");
     if (role === "lane") {
-      expect(Object.keys(proof.schemas)).toEqual(["lane_report"]);
+      expect(Object.keys(proof.schemas)).toEqual(["lane_report", "decision_ask"]);
       if (kind === "sub" || selection === "narrow") expect(proof.active).not.toContain("lane_report");
       else expect(proof.active).toContain("lane_report");
     } else {
-      expect(Object.keys(proof.schemas).sort()).toEqual(["discord_context", "discord_purpose_clear", "discord_purpose_list", "discord_purpose_set", "head_recovery", "lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start", "lane_thread_update", "pr_watch", "pr_watch_list", "thread_inspect"]);
+      expect(Object.keys(proof.schemas).sort()).toEqual(["decision_ask", "decision_inspect", "decision_list", "decision_withdraw", "discord_context", "discord_purpose_clear", "discord_purpose_list", "discord_purpose_set", "head_recovery", "lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start", "lane_thread_update", "pr_watch", "pr_watch_list", "thread_inspect"]);
       if (kind === "sub") expect(proof.active).not.toContain("head_recovery");
       if (kind === "sub") expect(proof.active).not.toContain("thread_inspect");
       if (kind === "sub") expect(proof.active.some(name => name.startsWith("discord_"))).toBe(false);
@@ -75,6 +75,9 @@ test.each(cases)("native packaged skills, scoped tools, and preserved selections
       else if (selection === "narrow") expect(proof.active).not.toContain("lane_message");
       else expect(proof.active).toContain("lane_message");
     }
+    if (kind === "sub" || selection === "narrow") expect(proof.active).not.toContain("decision_ask");
+    else expect(proof.active).toContain("decision_ask");
+    if (kind === "sub") expect(proof.active.some(name => name.startsWith("decision_"))).toBe(false);
   } finally {
     clearTimeout(timeout);
     if (child.exitCode === null) child.kill("SIGKILL");

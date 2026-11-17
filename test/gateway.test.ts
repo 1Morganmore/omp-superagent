@@ -13,6 +13,7 @@ import { gatewayCall, gatewayPaths, gatewayRequest, readGatewayJson, type Gatewa
 import { GatewayServer, type GatewayStatus } from "../src/gateway-server";
 import { GatewayStore } from "../src/gateway-store";
 import { Store } from "../src/store";
+import { decisionId, decisionViews } from "../src/decisions";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -453,6 +454,40 @@ test("only explicit definitive rejection settles failed admission and unblocks f
   await eventually(() => f.store.pending() === 0);
   expect(seen).toEqual(["rejected", "valid"]);
   expect(f.server.connected).toBe(true);
+});
+
+test("a definitively invalid decision response cannot quarantine the Gateway ahead of ordinary intake", async () => {
+  const f = await fixture();
+  const coordination = new Store(":memory:");
+  cleanups.push(async () => coordination.close());
+  const id = decisionId("native-session", "decision");
+  const approval: Approval = { id: "decision-approval", target: "main", generation: 0, requestId: "native-question",
+    route, state: "pending", remoteId: "original-card", decision: { id, sourceId: null, sessionId: "native-session" },
+    request: { method: "ask", questions: [{ id: `${id}:0`, question: "Which scope?", options: [{ label: "Local" }] }] } };
+  coordination.putApproval(approval);
+  let attempts = 0;
+  let reconciliations = 0;
+  const received: string[] = [];
+  const client = f.client();
+  await client.start({
+    message: async message => { received.push(message.id); },
+    answer: async (approvalId, response) => {
+      attempts++;
+      coordination.resolveApproval(approvalId, 0, "answered", { response });
+    },
+    reconcileAnswer: async () => { reconciliations++; return "retry"; },
+  });
+  await f.server.initialReady.promise;
+  // Simulate a previously admitted invalid callback. Current adapters reject it before admission.
+  await f.messenger.handlers!.answer(approval.id, { answers: [{ id: `${id}:0`, selectedOptions: [] }] }, route);
+  await f.messenger.emit(input("after-invalid-decision"));
+  await eventually(() => received.length === 1 && f.store.pending() === 0);
+  expect(received).toEqual(["after-invalid-decision"]);
+  expect(attempts).toBe(1);
+  expect(reconciliations).toBe(0);
+  expect(f.store.unresolved()).toBe(0);
+  expect(coordination.approval(approval.id)?.state).toBe("pending");
+  expect(decisionViews(coordination)[0]!.response).toBeUndefined();
 });
 
 test("ambiguous native answer is retained and reconciled without duplicate approval effects", async () => {

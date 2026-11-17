@@ -12,6 +12,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildHostArgs } from "../../src/host";
 import { nativeDisabledProviders } from "./native-extension";
+import { decisionId } from "../../src/decisions";
+import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult, ExtensionUIDialogOptions } from "@oh-my-pi/pi-coding-agent";
 
 // A fresh process keeps OMP's native discovery caches, active profile, and URL
 // snapshot isolated, just as production's independent head/lane hosts are.
@@ -24,7 +26,8 @@ const packageRoot = path.resolve(import.meta.dir, "../..");
 const extensionPath = path.join(packageRoot, role === "head" ? "src/extension.ts" : "src/lane-extension.ts");
 const customDirectory = path.join(root, "operator-custom-skills");
 const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update",
-  "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear", "pr_watch", "pr_watch_list"];
+  "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear", "pr_watch", "pr_watch_list",
+  "decision_list", "decision_inspect", "decision_withdraw"];
 const skillSettings = {
   customDirectories: [customDirectory],
   ignoredSkills: ["ignored-*"],
@@ -128,7 +131,7 @@ try {
 
   if (selection === "narrow") {
     await session.setActiveToolsByName(session.getEnabledToolNames().filter(name =>
-      name !== "bash" && name !== "lane_message" && name !== "lane_report"));
+      name !== "bash" && name !== "lane_message" && name !== "lane_report" && name !== "decision_ask"));
   }
   const before = session.getEnabledToolNames();
   const errors: Array<{ event: string; error: string }> = [];
@@ -143,7 +146,7 @@ try {
     assert.deepEqual(errors, [], "Task/lane sessions must never attempt head startup");
   }
   const expectedActive = kind === "sub"
-    ? before.filter(name => role === "head" ? !managerNames.includes(name) : name !== "lane_report") : before;
+    ? before.filter(name => name !== "decision_ask" && (role === "head" ? !managerNames.includes(name) : name !== "lane_report")) : before;
   assert.deepEqual(session.getEnabledToolNames(), expectedActive);
   if (selection === "narrow") assert(!session.getEnabledToolNames().includes("bash"));
 
@@ -263,21 +266,125 @@ try {
     reads.push(uri);
   }
 
-  const schemas = Object.fromEntries([...managerNames, "lane_report"].flatMap(name => {
+  const schemas = Object.fromEntries([...managerNames, "lane_report", "decision_ask"].flatMap(name => {
     const info = session.getAllToolInfos().find(tool => tool.name === name);
     return info ? [[name, toolWireSchema(info)]] : [];
   }));
+  const check = (name: string, input: Record<string, unknown>, valid: boolean) => {
+    const tool = runner.getRegisteredTool(name)!.definition;
+    const validate = () => validateToolArguments(tool, { type: "toolCall", id: "schema-check", name, arguments: input });
+    if (valid) assert.doesNotThrow(validate, `${name} schema validation`);
+    else assert.throws(validate, /Validation failed for tool/, `${name} schema validation: ${JSON.stringify(input)}`);
+  };
+  const question = { question: "Select a release route", header: "Release", options: [
+    { label: "Local", description: "Keep the work local", preview: "No deployment" },
+    { label: "Review", description: "Prepare a review" },
+  ], recommended: 1 };
+  check("decision_ask", { questions: [question] }, true);
+  for (const input of [{}, { questions: [] }, { questions: [{ question: "Missing options" }] },
+    { questions: [{ ...question, multi: "invalid" }] }, { questions: [{ ...question, recommended: -1 }] }]) {
+    check("decision_ask", input, false);
+  }
+  const ask = runner.getRegisteredTool("decision_ask")!.definition;
+  assert.equal(ask.approval, "read");
+  assert.equal(ask.loadMode, "essential");
+  const askChild = { ...runner.createContext(), agent: { kind: "sub" as const, id: "advisor", name: "advisor", depth: 0 } };
+  assert.deepEqual(await runner.emitToolCall({ type: "tool_call", toolName: "decision_ask", toolCallId: "child-ask",
+    input: { questions: [question] } }, undefined, askChild.agent),
+  { block: true, reason: "Owner decisions are restricted to the root managed HEAD or lane session" });
+  await assert.rejects(() => ask.execute("child-ask", { questions: [question] }, undefined, undefined, askChild),
+    /restricted to the root managed HEAD or lane session/);
+  if (kind === "sub") {
+    assert(!session.getEnabledToolNames().includes("decision_ask"));
+    await session.setActiveToolsByName([...expectedActive, "decision_ask"]);
+    await assert.rejects(() => session.getToolByName("decision_ask")!.execute("reactivated-child-ask", { questions: [question] }),
+      /restricted to the root managed HEAD or lane session/);
+    await runner.emit({ type: "session_start" });
+    assert.deepEqual(session.getEnabledToolNames(), expectedActive);
+  } else if (selection === "narrow") assert(!session.getEnabledToolNames().includes("decision_ask"));
+  else assert(session.getEnabledToolNames().includes("decision_ask"));
+  if (role === "lane" && kind === "main" && selection === "default") {
+    const context = runner.createContext();
+    const id = decisionId(sessionManager.getSessionId(), "native-owner-question");
+    assert.match(id, /^d-[0-9a-f]{24}$/);
+    const questions = [{ ...question, id: `${id}:0` }];
+    const answers = [{ id: `${id}:0`, question: question.question, options: ["Local", "Review"],
+      multi: false, selectedOptions: ["Local"] }];
+    const controller = new AbortController();
+    const requests: { questions: ExtensionAskDialogQuestion[]; options: ExtensionUIDialogOptions | undefined }[] = [];
+    const execute = async (answer: ExtensionAskDialogResult | undefined) => {
+      const output = await ask.execute("native-owner-question", { questions: [question] }, controller.signal, undefined, {
+        ...context, ui: { ...context.ui, askDialog: async (questions, options) => {
+          requests.push({ questions, options });
+          return answer;
+        } },
+      });
+      assert.deepEqual(requests.at(-1), { questions: [{ ...questions[0], multi: undefined,
+        options: question.options.map(option => ({ ...option, preview: "preview" in option ? option.preview : undefined })) }],
+      options: { signal: controller.signal } });
+      const text = output.content.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
+      assert.deepEqual(JSON.parse(text), output.details);
+      return output.details;
+    };
+    assert.deepEqual(await execute({ kind: "submit", results: answers }), { id, status: "submitted", answers });
+    assert.deepEqual(await execute(undefined), { id, status: "cancelled" });
+    assert.deepEqual(await execute({ kind: "chat" }), { id, status: "chat" });
+    const timedOut = answers.map(answer => ({ ...answer, selectedOptions: ["Review"], timedOut: true }));
+    assert.deepEqual(await execute({ kind: "submit", results: timedOut }), { id, status: "timed_out", answers: timedOut });
+    const unavailable = { ...context, ui: { ...context.ui, askDialog: undefined } };
+    await assert.rejects(() => ask.execute("no-ui", { questions: [question] }, undefined, undefined, unavailable),
+      /Native structured decision UI is unavailable/);
+    for (const invalid of [
+      { ...question, options: [{ label: "Same" }, { label: "Same" }] },
+      { ...question, recommended: 2 },
+    ]) {
+      await assert.rejects(() => ask.execute("invalid-question", { questions: [invalid] }, undefined, undefined, unavailable),
+        /Ask option labels are not unique|Malformed recommended option/);
+    }
+    assert.equal(requests.length, 4, "Invalid/unavailable calls must never open native UI");
+    for (const outcome of ["cancel", "error"] as const) {
+      const pending = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
+      let dialogs = 0;
+      const concurrentContext = { ...context, ui: { ...context.ui, askDialog: () => {
+        dialogs++;
+        return dialogs === 1 ? pending.promise : Promise.resolve(undefined);
+      } } };
+      const first = ask.execute(`pending-${outcome}`, { questions: [question] }, undefined, undefined, concurrentContext);
+      const completion = outcome === "error" ? assert.rejects(() => first, /Native decision aborted/) : first;
+      await assert.rejects(() => ask.execute("overlapping-question", { questions: [question] },
+        undefined, undefined, concurrentContext), /owner decision dialog is already pending/);
+      assert.equal(dialogs, 1, "Overlapping calls must not replace the active native dialog");
+      if (outcome === "error") pending.reject(new Error("Native decision aborted"));
+      else pending.resolve(undefined);
+      await completion;
+      assert.deepEqual(await execute(undefined), { id, status: "cancelled" },
+        "Native completion and rejection both release the active-dialog guard");
+    }
+  }
   if (role === "head") {
     // The native extension loader adapts legacy TypeBox to callable omptype
     // schemas. Exercise the same argument validator and wire-schema lowering
     // that OMP uses, rather than applying TypeBox to its native representation.
-    const check = (name: string, input: Record<string, unknown>, valid: boolean) => {
-      const tool = runner.getRegisteredTool(name)!.definition;
-      const validate = () => validateToolArguments(tool, { type: "toolCall", id: "schema-check", name, arguments: input });
-      if (valid) assert.doesNotThrow(validate, `${name} schema validation`);
-      else assert.throws(validate, /Validation failed for tool/, `${name} schema validation: ${JSON.stringify(input)}`);
-    };
     const destination = { platform: "slack", accountId: "T:B", authorityId: "U", guildId: "T", channelId: "C", threadId: "1.2" };
+    check("decision_list", {}, true);
+    check("decision_list", { state: "all", laneId: "lane" }, true);
+    check("decision_list", { state: "closed" }, false);
+    check("decision_inspect", { id: "d-123" }, true);
+    check("decision_inspect", {}, false);
+    check("decision_withdraw", { id: "d-123", sourceId: "source", reason: "Owner cancelled the question" }, true);
+    for (const input of [{ id: "d-123", reason: "Missing source" }, { id: "d-123", sourceId: "source", reason: " " }])
+      check("decision_withdraw", input, false);
+    assert.deepEqual(validateToolArguments(runner.getRegisteredTool("decision_withdraw")!.definition, {
+      type: "toolCall", id: "foreign-decision-route", name: "decision_withdraw",
+      arguments: { id: "d-123", sourceId: "source", reason: "Owner withdrew", route: destination },
+    }), { id: "d-123", sourceId: "source", reason: "Owner withdrew" });
+    for (const name of ["decision_list", "decision_inspect", "decision_withdraw"]) {
+      assert.equal(runner.getRegisteredTool(name)!.definition.approval, name === "decision_withdraw" ? "exec" : "read");
+      const blocked = await runner.emitToolCall({ type: "tool_call", toolName: name, toolCallId: `child-${name}`, input: {} },
+        undefined, askChild.agent);
+      assert.equal(blocked?.block, true);
+      assert.match(blocked?.reason ?? "", /restricted to the main superagent head/);
+    }
     const modelChoice = { model: { provider: "fixture", id: "chat" }, modelReason: "Known task requirements" };
     const kickoff = "I will inspect the workspace and verify the requested changes in this topic.";
     for (const platform of ["discord", "telegram", "slack"]) {
@@ -380,7 +487,7 @@ try {
       assert(!session.getEnabledToolNames().includes("lane_message"));
     }
   } else {
-    assert.deepEqual(Object.keys(schemas), ["lane_report"]);
+    assert.deepEqual(Object.keys(schemas), ["lane_report", "decision_ask"]);
     const definition = runner.getRegisteredTool("lane_report")!.definition;
     assert.equal(definition.loadMode, "essential");
     assert.equal(definition.approval, "read");

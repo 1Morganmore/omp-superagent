@@ -7,6 +7,7 @@ import {
 } from "discord.js";
 import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type DiscordContext, type DiscordPurposeNote, type DiscordPurposeRequest, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort, type ThreadInfo, type ThreadUpdate } from "./contracts.ts";
 import { changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "./discord-context";
+import { validateDecisionAnswer, validateDecisionResponse } from "./decisions";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
@@ -558,6 +559,7 @@ export class DiscordMessenger implements Messenger {
   }
 
   private async finish(pending: Pending, response: DialogResponse, interaction: { deferUpdate(): Promise<unknown> }): Promise<void> {
+    validateDecisionResponse(pending.approval, response);
     // The handler's receipt is the durable admission boundary. Until it resolves,
     // leave the original control and draft actionable, without acknowledging it.
     await this.handlers!.answer(pending.approval.id, response, pending.approval.route);
@@ -690,6 +692,7 @@ export class DiscordMessenger implements Messenger {
           if (!question.multi && pending.customInput) pending.selected = [];
         } else if (interaction.isButton() && action === `next-${pending.question}`) {
           const answer: Answer = { id: question.id, selectedOptions: [...pending.selected], ...(pending.customInput ? { customInput: pending.customInput } : {}) };
+          if (pending.approval.decision) validateDecisionAnswer(question, answer);
           if (pending.question + 1 === dialog.questions.length) {
             await this.finish(pending, { answers: [...pending.answers, answer] }, interaction); return;
           }

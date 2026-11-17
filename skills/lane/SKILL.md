@@ -144,7 +144,10 @@ load unrelated playbooks into every turn.
   `/superagent-*` Socket Mode commands without inventing a message timestamp. An admitted topic
   control edit cannot rewrite its boundary. Ordinary edits are new input revisions,
   not rollback of previous external effects.
-- Use native `ask` for necessary user decisions. Native approvals and replies must
+- Use `decision_ask` for necessary tracked owner choices; it uses the native question
+  dialog and preserves the original card in the head's decision ledger. Ordinary
+  native `ask` remains available. Do not repeat a pending question or treat a
+  recommendation, silence, or ordinary chat as its answer. Native approvals and replies must
   match the exact original card, platform/account/conversation, native request/session,
   and generation; a topic switch or chat text cannot authorize another request.
   Never self-approve or collect secrets in chat. Unsupported/secret dialogs need the

@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ApplicationCommandOptionType, Attachment as DiscordAttachment, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, type Client, type Message, type MessageCreateOptions } from "discord.js";
 import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "../src/discord.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import { parseDialog } from "../src/dialog.ts";
 import { Store } from "../src/store";
+import { GatewayStore } from "../src/gateway-store";
+import { decisionId, decisionViews } from "../src/decisions";
 import { type Approval, type Attachment, type DialogResponse, type Inbound, type OutputRecord, type Route } from "../src/contracts.ts";
 
 const owner = "owner";
@@ -1067,6 +1072,61 @@ describe("Discord message activity", () => {
 });
 
 describe("Discord approval controls", () => {
+  test("empty tracked answers never enter durable Gateway ingress and the original multi-question card remains usable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "decision-ingress-"));
+    const ingress = new GatewayStore(root);
+    const store = new Store(":memory:");
+    const { messenger, channel, gateway, answers, errors } = await fixture({}, async (approvalId, response, route) => {
+      ingress.admit({ kind: "answer", approvalId, response, route });
+    });
+    const id = decisionId("native-session", "tracked-question");
+    const request = approval({ target: "main", decision: { id, sourceId: null, sessionId: "native-session" },
+      request: { method: "ask", questions: [
+        { id: `${id}:0`, question: "Which database?", options: [{ label: "SQLite" }], recommended: 0 },
+        { id: `${id}:1`, question: "Which scope?", options: [{ label: "Local" }] },
+      ] } });
+    try {
+      store.putApproval(request);
+      const remoteId = await messenger.showApproval(request);
+      const remote = channel.remote.get(remoteId)!;
+      const token = parseDiscordControl(remote.components[0]!.components[0]!.customId)!.token;
+      const act = async (action: string, kind: "button" | "select" = "button") => {
+        const click = interaction(remote, `omp:${token}:${action}`, kind);
+        gateway.emit(Events.InteractionCreate, click);
+        await drain();
+        return click;
+      };
+      expect((await act("next-0")).ack).toBe(0);
+      expect(ingress.pending()).toBe(0);
+      expect(answers).toEqual([]);
+      expect(errors).toMatchObject([{ certainty: "rejected" }]);
+      expect((await act("choose-0", "select")).ack).toBe(1);
+      expect((await act("next-0")).ack).toBe(1);
+      expect((await act("next-1")).ack).toBe(0);
+      expect(ingress.pending()).toBe(0);
+      expect(errors).toHaveLength(2);
+      expect(remote.components.length).toBeGreaterThan(0);
+      expect((await act("choose-1", "select")).ack).toBe(1);
+      expect((await act("next-1")).ack).toBe(1);
+      const queued = ingress.next()!;
+      expect(queued.event.kind).toBe("answer");
+      if (queued.event.kind !== "answer") throw new Error("Expected one durable decision answer");
+      expect(queued.event.response.answers).toEqual([
+        { id: `${id}:0`, selectedOptions: ["SQLite"] }, { id: `${id}:1`, selectedOptions: ["Local"] },
+      ]);
+      expect(store.resolveApproval(request.id, request.generation, "answered", { response: queued.event.response })).toBe(true);
+      expect(decisionViews(store)[0]).toMatchObject({ state: "answering", response: queued.event.response });
+      ingress.receipt(queued.sequence, "accepted");
+      expect(ingress.pending()).toBe(0);
+      expect(answers).toHaveLength(1);
+    } finally {
+      await messenger.stop();
+      store.close();
+      ingress.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("strict bounded control IDs cannot inject arbitrary approval identities", () => {
     const token = "a".repeat(24);
     expect(parseDiscordControl(`omp:${token}:next-3`)).toEqual({ token, action: "next-3" });

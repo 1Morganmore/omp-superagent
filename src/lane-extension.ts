@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
 import { type LaneEvidence, type LaneReportEvent, type LaneWaitTarget, parseLaneReportResult } from "./lane-report";
+import { registerDecisionAsk } from "./decision-tool";
 
 const instructions = readFileSync(new URL("../skills/lane/SKILL.md", import.meta.url), "utf8");
 const nonempty = Type.String({ minLength: 1, pattern: "\\S" });
@@ -100,6 +101,7 @@ function toolEvidence(id: string, ctx: ExtensionContext): LaneEvidence {
 /** A worker role entrypoint, never the head's manager or messenger client. */
 export default function laneExtension(pi: ExtensionAPI): void {
   if (process.env.OMP_SUPERAGENT_ROLE !== "lane") return;
+  registerDecisionAsk(pi);
   let approvalSessionId: string | undefined;
   const pendingApprovals = new Set<string>();
   const approvals = (ctx: ExtensionContext) => {

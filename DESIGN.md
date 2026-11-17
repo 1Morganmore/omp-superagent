@@ -763,6 +763,23 @@ bash·eval 상태, 대기 입력, 승인, 비동기 결과가 다른 세션으�
 | `lane_close` | 확인한 evidence와 completed/cancelled 결과를 기록. merge·게시·worktree 삭제 권한을 부여하지 않음 |
 | `thread_inspect` | 원본 사용자 sourceId와 선택적 laneId로 Discord 부모 태그·스레드 상태 조회 |
 | `lane_thread_update` | id/sourceId/changes로 관리 Discord 스레드 제목·태그·보관 상태 변경. 레인 실행 상태와 독립 |
+| `decision_list`, `decision_inspect` | HEAD가 미결/전체 owner 결정 및 원래 질문·선택지·추천·답변·카드·native 신원을 조회. 목록 기본값은 pending/answering |
+| `decision_withdraw` | id/sourceId/reason으로 같은 원래 대화의 미결 질문 철회. 확인되지 않은 답변은 철회·재전송하지 않음 |
+
+HEAD와 레인 root의 `decision_ask`는 공개 native `ctx.ui.askDialog`를 사용한다. stock Host
+시작 때 `set_ask_dialog` capability를 켜며 별도 메시지 전송기나 질문 엔진을 만들지 않는다.
+native 자식은 이 도구를 사용할 수 없다. 일반 HTML `ask`와 tool permission 승인은 유지하며
+의사결정 장부로 자동 분류하지 않는다.
+native session/toolCallId로 만든 decision ID와 실제 native 질문 ID를 연결하고, 카드가 생길 때
+기존 approval과 장부 색인을 같은 SQLite transaction으로 저장한다. 질문·선택지·추천은 원래
+approval에서 읽고 답변·철회 영수증만 추가한다. source/route/session/generation/card를 유지하며
+같은 decision의 새 카드 생성을 거절한다. 답변은 기존 인증 콜백에서 원래 질문·선택지를 검증한
+뒤 전송 전에 저장한다. 빈 단일 선택 등 확정적으로 잘못된 답변은 각 어댑터에서 질문 진행·
+Gateway 접수 전에 거절하며, HEAD의 최종 검증도 이를 불확실한 효과로 분류하지 않는다.
+보고·진척의 source는 handoff/activity 연결을 따라 실제 원래 사용자 입력으로 해석한다.
+전송 시도만 확인된 `answering`과 원래 native 요청 소멸이 확인된
+`answered`는 다르며, 재시작·재연결은 답변을 재전송하지 않는다. 취소·철회는 `withdrawn`이다.
+추천·침묵·일반 채팅을 승인으로 만들거나 레인을 자동 재개하지 않는다.
 
 `lane_start`는 실행 완료나 빈 슬롯을 기다리지 않고 레인 ID와 접수 상태를 반환한다.
 중복된 원본 요청이나 재전달이 같은 레인을 중복 생성하지 않게 한다.

@@ -118,6 +118,7 @@ requireSuccess(await native.request({ type: "negotiate_protocol", protocolVersio
 // Stock commands queue behind session_start; completion proves our native
 // extension finished materialization and opened its private control endpoint.
 requireSuccess(await native.request({ type: "get_state" }));
+requireSuccess(await native.request({ type: "set_ask_dialog", enabled: true }));
 const socket = net.createConnection(nativeSocket);
 control = new HostChannel(socket, socket, true);
 control.encoder.setProtocolVersion(2);

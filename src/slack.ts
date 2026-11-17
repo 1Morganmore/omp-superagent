@@ -3,6 +3,7 @@ import { LogLevel, WebClient, type WebClientOptions } from "@slack/web-api";
 import { SocketModeClient } from "@slack/socket-mode";
 import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type Route } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
+import { validateDecisionAnswer, validateDecisionResponse } from "./decisions";
 import { DeliveryError } from "./delivery.ts";
 import { compareMessageIds } from "./message-order.ts";
 import { parseSlackCommand } from "./slack-commands.ts";
@@ -502,6 +503,7 @@ export class SlackMessenger implements Messenger {
   }
 
   private async finish(pending: Pending, response: DialogResponse): Promise<void> {
+    validateDecisionResponse(pending.approval, response);
     // Claim locally before persistence/host I/O. An ambiguous callback cannot
     // unlock the card for another answer; runtime remains native authority.
     pending.active = false;
@@ -642,7 +644,9 @@ export class SlackMessenger implements Messenger {
           pending.modal = undefined;
           if (!question.multi && pending.customInput !== undefined) pending.selected = [];
         } else if (!modal && actionName === `next-${pending.question}`) {
-          pending.answers.push({ id: question.id, selectedOptions: [...pending.selected], ...(pending.customInput !== undefined ? { customInput: pending.customInput } : {}) });
+          const answer = { id: question.id, selectedOptions: [...pending.selected], ...(pending.customInput !== undefined ? { customInput: pending.customInput } : {}) };
+          if (pending.approval.decision) validateDecisionAnswer(question, answer);
+          pending.answers.push(answer);
           if (pending.question + 1 === dialog.questions.length) { await this.finish(pending, { answers: pending.answers }); await envelope.ack(); return; }
           pending.question++;
           pending.selected = [];

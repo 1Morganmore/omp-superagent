@@ -6,6 +6,7 @@ import { DeliveryError } from "../src/delivery.ts";
 import type { Approval, DialogResponse, Inbound, Messenger, OutputRecord, Route } from "../src/contracts.ts";
 import { MESSENGER_COMMANDS } from "../src/messenger-commands.ts";
 import { Store } from "../src/store.ts";
+import { decisionId } from "../src/decisions";
 
 type Data = Record<string, any>;
 type Handlers = Parameters<Messenger["start"]>[0];
@@ -843,6 +844,38 @@ describe("Slack native approval controls", () => {
       expect(f.answers).toHaveLength(1);
       await f.messenger.stop();
     }
+  });
+
+  test("empty tracked choices leave Slack questions usable without final admission", async () => {
+    const f = await fixture();
+    const decision = decisionId("native-session", "slack-question");
+    try {
+      const id = await f.messenger.showApproval(approval({
+        decision: { id: decision, sourceId: null, sessionId: "native-session" },
+        request: { method: "ask", questions: [
+          { id: `${decision}:0`, question: "Which scope?", options: [{ label: "Local" }], recommended: 0 },
+          { id: `${decision}:1`, question: "Which check?", options: [{ label: "Native" }] },
+        ] },
+      }));
+      const remote = f.http.remote.get(`CALLOWED:${id}`)!;
+      f.socket.emit("slack_event", click(remote, "next-0")); await drain();
+      expect(f.answers).toEqual([]);
+      expect(f.errors).toHaveLength(1);
+      for (const action of ["choose-0", "next-0"]) {
+        const event = action.startsWith("choose") ? selection(remote, action, ["0"]) : click(remote, action);
+        f.socket.emit("slack_event", event); await event.done; await drain();
+      }
+      f.socket.emit("slack_event", click(remote, "next-1")); await drain();
+      expect(f.answers).toEqual([]);
+      expect(f.errors).toHaveLength(2);
+      for (const action of ["choose-1", "next-1"]) {
+        const event = action.startsWith("choose") ? selection(remote, action, ["0"]) : click(remote, action);
+        f.socket.emit("slack_event", event); await event.done; await drain();
+      }
+      expect(f.answers.map(answer => answer.response)).toEqual([{ answers: [
+        { id: `${decision}:0`, selectedOptions: ["Local"] }, { id: `${decision}:1`, selectedOptions: ["Native"] },
+      ] }]);
+    } finally { await f.messenger.stop(); }
   });
 
   test("ask supports multiple questions, exact choices, free text, optional selection, and stale question rejection", async () => {

@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { registerDecisionAsk } from "../../src/decision-tool";
 
 const RECORD_TYPE = "omp-superagent-native-test";
 
@@ -11,9 +12,26 @@ export const nativeDisabledProviders = [...new Set([
 
 /** Offline native RPC fixture; all provider responses and network attempts are observable. */
 export default function nativeFixture(pi: ExtensionAPI): void {
+  registerDecisionAsk(pi);
   let serviceRequested = false;
   const mock = createMockModel({ provider: "socket-host-smoke", id: "local",
     handler: context => {
+      const lastUser = context.messages.findLast(message => message.role === "user");
+      const input = JSON.stringify(lastUser?.content);
+      const decision = input?.includes("[native-decision-submit]") ? "submit"
+        : input?.includes("[native-decision-cancel]") ? "cancel" : undefined;
+      if (decision) {
+        const id = `native-decision-${decision}`;
+        if (!context.messages.some(message => message.role === "toolResult" && message.toolCallId === id)) {
+          return { content: [{ type: "toolCall", id, name: "decision_ask", arguments: { questions: [
+            { question: "Which release route?", header: "Release",
+              options: [{ label: "Local", description: "Keep changes local", preview: "No deployment" },
+                { label: "Review", description: "Prepare review" }], recommended: 1 },
+            { question: "Which checks?", options: [{ label: "Types" }, { label: "Tests" }], multi: true },
+          ] } }] };
+        }
+        return { content: ["Native decision tool finished"] };
+      }
       const service = context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("[native-service-proof]"));
       if (service && !serviceRequested) {
         serviceRequested = true;

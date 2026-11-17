@@ -5,6 +5,7 @@ import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
 import { startHost, HostConnection, type HostFrame, type HostOptions } from "../src/host";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { serviceCompletionRecorded } from "../src/host-protocol";
+import { decisionId } from "../src/decisions";
 import { nativeTestCommand } from "./fixtures/native-command";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
@@ -59,7 +60,7 @@ async function checkpoint(connection: HostConnection, token: string, id: string)
   } finally { event.cancel(); completion.cancel(); }
 }
 
-nativeTest("actual OMP keeps one persistent host across controller detach, pending approval, and graceful shutdown", async () => {
+nativeTest("actual OMP preserves approvals and structured owner decisions across one persistent host", async () => {
   const command = await nativeTestCommand();
   const nativesDirectory = process.env.OMP_TEST_NATIVES_DIR;
   if (nativesDirectory && !path.isAbsolute(nativesDirectory)) {
@@ -81,6 +82,7 @@ nativeTest("actual OMP keeps one persistent host across controller detach, pendi
     env: {
       PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home,
       PI_CODING_AGENT_DIR: agentDirectory, PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1",
+      OMP_SUPERAGENT_ROLE: "lane",
       ...(nativesDirectory ? { PI_NATIVES_DIR: nativesDirectory } : {}),
       XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
       XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state"),
@@ -136,6 +138,49 @@ nativeTest("actual OMP keeps one persistent host across controller detach, pendi
     expect(after.answers).toHaveLength(1);
     expect(after.answers?.[0]).toMatchObject({ token: "original-approval-token", confirmed: true });
     expect(after).toMatchObject({ agentStarts: 0, networkAttempts: 0 });
+    const decisionProof: { request: HostFrame; result: unknown }[] = [];
+    for (const action of ["submit", "cancel"] as const) {
+      const id = decisionId(initial.sessionId, `native-decision-${action}`);
+      const ui = observe(second, frame => frame.type === "extension_ui_request" && frame.method === "ask");
+      const result = observe(second, frame => frame.type === "message_end"
+        && (frame.message as { role?: string; toolCallId?: string } | undefined)?.role === "toolResult"
+        && (frame.message as { toolCallId?: string }).toolCallId === `native-decision-${action}`);
+      const settled = observe(second, frame => frame.type === "prompt_result" && frame.id === `native-owner-${action}`);
+      try {
+        expect(await second.request({ type: "prompt", message: `[native-decision-${action}] Ask a structured owner question.` },
+          `native-owner-${action}`)).toMatchObject({ success: true });
+        const request = await ui.promise;
+        expect(request.questions).toEqual([
+          { id: `${id}:0`, question: "Which release route?", header: "Release",
+            options: [{ label: "Local", description: "Keep changes local", preview: "No deployment" },
+              { label: "Review", description: "Prepare review" }], recommended: 1 },
+          { id: `${id}:1`, question: "Which checks?", options: [{ label: "Types" }, { label: "Tests" }], multi: true },
+        ]);
+        expect(request.timeout).toBeUndefined();
+        expect(typeof request.id).toBe("string");
+        const answers = [
+          { id: `${id}:0`, selectedOptions: ["Local"] },
+          { id: `${id}:1`, selectedOptions: ["Types", "Tests"], customInput: "Also inspect native RPC" },
+        ];
+        second.uiResponse(request.id as string, action === "submit" ? { answers } : { cancelled: true });
+        const message = (await result.promise).message as { content: unknown; details: unknown; isError?: boolean };
+        const expected = action === "submit" ? {
+          id, status: "submitted", answers: [
+            { id: `${id}:0`, question: "Which release route?", options: ["Local", "Review"], multi: false, selectedOptions: ["Local"] },
+            { id: `${id}:1`, question: "Which checks?", options: ["Types", "Tests"], multi: true,
+              selectedOptions: ["Types", "Tests"], customInput: "Also inspect native RPC" },
+          ],
+        } : { id, status: "cancelled" };
+        expect(message.isError).not.toBe(true);
+        expect(message.details).toEqual(expected);
+        expect(message.content).toEqual([{ type: "text", text: JSON.stringify(expected, null, 2) }]);
+        decisionProof.push({ request, result: message });
+        expect(await settled.promise).toMatchObject({ status: "completed", agentInvoked: true });
+        await second.client.waitForSettled(30_000);
+      } finally { ui.cancel(); result.cancel(); settled.cancel(); }
+    }
+    expect(decisionProof).toHaveLength(2);
+    await fs.writeFile(path.join(root, "native-decision-proof.json"), JSON.stringify(decisionProof, null, 2));
     const service = observe(second, frame => frame.type === "message_end"
       && (frame.message as { customType?: string } | undefined)?.customType === "launch-completion");
     const serviceResult = observe(second, frame => frame.type === "prompt_result" && frame.id === "native-service-proof");
@@ -168,6 +213,11 @@ nativeTest("actual OMP keeps one persistent host across controller detach, pendi
     expect(records.every(record => record.sessionId === initial.sessionId && record.pid === child!.pid && record.networkAttempts === 0)).toBe(true);
     expect(records.filter(record => record.phase !== "shutdown").every(record => record.agentStarts === 0)).toBe(true);
     expect(records.find(record => record.phase === "shutdown")!.agentStarts).toBeGreaterThan(0);
+    const decisionResults = entries.filter(entry => entry.type === "message" && entry.message.role === "toolResult"
+      && entry.message.toolName === "decision_ask").map(entry => entry.type === "message" ? entry.message : undefined);
+    expect(decisionResults).toHaveLength(2);
+    expect(decisionResults.map(message => message?.role === "toolResult" ? message.details : undefined))
+      .toEqual(decisionProof.map(proof => (proof.result as { details: unknown }).details));
     const completion = entries.find(entry => entry.type === "custom_message" && entry.customType === "launch-completion");
     expect(completion?.type).toBe("custom_message");
     const daemon = completion?.type === "custom_message"

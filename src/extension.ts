@@ -13,6 +13,7 @@ import { NativePresetManager } from "./native-presets";
 import { publishNativeSession } from "./native-sessions";
 import { MODEL_PRESET_NAMES, WORKFLOW_NAMES } from "./contracts";
 import type { PrWatchCommand } from "./pr-watch";
+import { registerDecisionAsk } from "./decision-tool";
 
 function readHeadReferences(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
@@ -38,6 +39,7 @@ const managerTools: Record<string, true> = {
   thread_inspect: true, lane_thread_update: true,
   discord_context: true, discord_purpose_list: true, discord_purpose_set: true, discord_purpose_clear: true,
   pr_watch: true, pr_watch_list: true,
+  decision_list: true, decision_inspect: true, decision_withdraw: true,
 };
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
@@ -58,6 +60,7 @@ const threadChangeFields = {
 export default function superagentExtension(pi: ExtensionAPI): void {
   const role = process.env.OMP_SUPERAGENT_ROLE;
   if (role !== "head") return;
+  registerDecisionAsk(pi);
   // Subagents inherit environment but must not acquire the head's controller.
   let runtime: Superagent | undefined;
   let loading: Promise<void> | undefined;
@@ -102,6 +105,8 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   pi.on("tool_call", (event, ctx) => {
     if (event.toolName === "head_recovery" && ctx.agent.kind !== "main")
       return { block: true, reason: "HEAD recovery is restricted to the original main head" };
+    if (["decision_list", "decision_inspect", "decision_withdraw"].includes(event.toolName) && ctx.agent.kind !== "main")
+      return { block: true, reason: "Lane management is restricted to the main superagent head" };
     if (!runtime?.headRecoveryActive()) return;
     if (ctx.agent.kind !== "main" || event.toolName !== "head_recovery") {
       runtime.blockHeadRecoveryTool();
@@ -113,6 +118,36 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     // tool_call: native abort can release an awaiting hook without its result.
     // Native prompt bounds remain authoritative; no watchdog or turn budget.
     if (ctx.agent.kind === "main" && runtime?.headRecoveryActive()) ctx.abort();
+  });
+  pi.registerTool({
+    name: "decision_list", label: "List owner decisions", approval: "read",
+    description: "Inspect durable owner decisions, open by default. Optional laneId selects a managed lane; state=all includes settled history. Observation only, never acceptance or a resume instruction.",
+    parameters: Type.Object({
+      state: Type.Optional(Type.Union([Type.Literal("open"), Type.Literal("all")])),
+      laneId: Type.Optional(Type.String({ minLength: 1 })),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(requireRuntime(ctx).listDecisions(params.state, params.laneId));
+    },
+  });
+  pi.registerTool({
+    name: "decision_inspect", label: "Inspect an owner decision", approval: "read",
+    description: "Read one durable decision by its stable id, including question, source, state and submitted answer evidence. Does not create an answer or resume work.",
+    parameters: Type.Object({ id: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(requireRuntime(ctx).inspectDecision(params.id));
+    },
+  });
+  pi.registerTool({
+    name: "decision_withdraw", label: "Withdraw an owner decision", approval: "exec",
+    description: "Explicitly withdraw an open decision under an existing durable authorized owner sourceId, with the owner's reason. No route override, implicit answer, acceptance, or automatic work resume.",
+    parameters: Type.Object({
+      id: Type.String({ minLength: 1 }), sourceId: Type.String({ minLength: 1 }),
+      reason: Type.String({ minLength: 1, pattern: "\\S" }),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(await requireRuntime(ctx).withdrawDecision(params.id, params.sourceId, params.reason));
+    },
   });
   pi.registerTool({
     name: "head_recovery", label: "Decide isolated HEAD recovery", approval: "write", loadMode: "essential",

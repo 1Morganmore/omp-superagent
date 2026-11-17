@@ -260,9 +260,15 @@ does not establish execution, delivery to the lane, or successful effects.
   First-deployment native preset initialization is a separate deliberate operation;
   do not rerun it as recovery or use it to bypass a model hold.
 - Keep technical correction with the current lane. For an actual operator choice,
-  use native `ask` with the advertised schema in the appropriate conversation,
-  presenting the relevant evidence and consequence. Avoid duplicate questions if an
-  original native question/approval is already pending.
+  inspect `decision_list` first and use `decision_ask` in the appropriate conversation
+  to track the question, choices, recommendation and original native card. This uses
+  native askDialog, not a separate message. Ordinary native `ask` stays available.
+  Avoid duplicate questions if the original question/approval is already pending.
+  `decision_inspect` reads the exact record; `answering` is an unresolved submission,
+  not permission to resend or assume acceptance. Only the authenticated original card
+  supplies an answer; never map ordinary chat A/B, silence, or a recommendation to consent.
+  `decision_withdraw` requires the decision ID, an actual owner source from that same
+  conversation, and a reason. Withdrawal is not approval or automatic lane resume.
 - Approvals remain with the operator and their exact original native request/card,
   session/generation, platform/account, and physical conversation. A topic switch,
   worker recommendation, ordinary chat reply, or another card is not an answer.
