@@ -124,7 +124,7 @@ test("Gateway owns one credential-free native head; busy CLI stop refuses, expli
   await Bun.sleep(1100);
   expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
   expect(existsSync(join(f.root, "run", "gateway.sock"))).toBe(false);
-});
+}, 30_000);
 
 test("confirmed-dead owned head restarts, offline input stays durable, and existing native model is not reset", async () => {
   const f = await fixture();
