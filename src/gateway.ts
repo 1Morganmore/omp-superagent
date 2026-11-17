@@ -36,6 +36,8 @@ export interface GatewayOptions {
 interface HeadIdentity { pid: number; ownerPid: number; sessionId: string; sessionFile: string; dev: number; ino: number }
 interface SocketIdentity { pid: number; ownerPid?: number; dev: number; ino: number }
 
+const HEAD_EXIT_TIMEOUT_MS = 15_000;
+
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) {
@@ -44,16 +46,30 @@ function alive(pid: number): boolean {
   }
 }
 async function removeDeadSocket(socketPath: string, identity: SocketIdentity | null, kind: "gateway" | "host"): Promise<void> {
-  let stat;
-  try { stat = await lstat(socketPath); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-  if (!identity || alive(identity.pid) ||
-      kind === "host" && (typeof identity.ownerPid !== "number" || !Number.isSafeInteger(identity.ownerPid) ||
-        identity.ownerPid < 1 || alive(identity.ownerPid))
-      || !stat.isSocket() || stat.uid !== process.getuid?.() ||
-      stat.dev !== identity.dev || stat.ino !== identity.ino)
-    throw new Error("Existing endpoint ownership is unresolved; no socket was removed or second host started");
-  await unlink(socketPath);
+  const deadline = Date.now() + HEAD_EXIT_TIMEOUT_MS;
+  while (true) {
+    let stat;
+    try { stat = await lstat(socketPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (kind === "host" && identity && alive(identity.pid) ||
+        stat && (!identity || alive(identity.pid) || !stat.isSocket() || stat.uid !== process.getuid?.() ||
+          stat.dev !== identity.dev || stat.ino !== identity.ino))
+      throw new Error("Existing endpoint ownership is unresolved; no socket was removed or second host started");
+    if (kind === "host" && identity) {
+      const ownerPid = identity.ownerPid;
+      if (typeof ownerPid !== "number" || !Number.isSafeInteger(ownerPid) || ownerPid < 1)
+        throw new Error("Existing adapter ownership is unresolved; no socket was removed or second host started");
+      if (alive(ownerPid)) {
+        if (Date.now() >= deadline)
+          throw new Error("Owned adapter exit is pending; no socket was removed or second host started");
+        // Native death precedes the pipe owner's durable receipt and socket cleanup.
+        await Bun.sleep(25);
+        continue;
+      }
+    }
+    if (stat) await unlink(socketPath);
+    return;
+  }
 }
 
 /** Owns adapters and exactly one native head; never reads or connects lane sockets. */
@@ -293,7 +309,7 @@ export class GatewayService {
         // An ambiguous shutdown is not a license to restart or kill the host.
         throw error;
       } finally { await connection.close(); }
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + HEAD_EXIT_TIMEOUT_MS;
       while ((alive(head.pid) || existsSync(hostPaths(this.config, "main").socketPath)) && Date.now() < deadline) await Bun.sleep(25);
       if (alive(head.pid) || existsSync(hostPaths(this.config, "main").socketPath))
         throw new Error("Native head exit/persistence is pending; Gateway supervision remains stopped");

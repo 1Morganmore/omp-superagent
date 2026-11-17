@@ -1,14 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
+import { createServer } from "node:net";
 import { Database } from "bun:sqlite";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { appendFile, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostPaths, loadConfig } from "../src/config";
 import type { GatewayRestartRecord, GatewayRestartRequest, Inbound, Messenger, Route } from "../src/contracts";
 import { launchGateway, startGateway, stopGateway, type GatewayOptions, type GatewayService } from "../src/gateway";
-import { gatewayStatus } from "../src/gateway-protocol";
+import { gatewayPaths, gatewayStatus } from "../src/gateway-protocol";
 import { processAlive, runGatewayRestart } from "../src/gateway-restart";
 import { connect } from "../src/host";
 import { main } from "../src/cli";
@@ -56,8 +57,9 @@ async function fixture(updateManagedUlw?: () => Promise<ManagedUlwStatus>, optio
   };
   const saved = process.env.GATEWAY_TEST_BOT_TOKEN;
   process.env.GATEWAY_TEST_BOT_TOKEN = "isolated-test-secret";
+  const errors: unknown[] = [];
   let service: GatewayService;
-  try { service = await startGateway(config, { messenger, onError: () => {},
+  try { service = await startGateway(config, { messenger, onError: error => errors.push(error),
     managedUlwPath: fileURLToPath(new URL("./fixtures/managed-ulw", import.meta.url)), updateManagedUlw, ...options }); }
   finally {
     if (saved === undefined) delete process.env.GATEWAY_TEST_BOT_TOKEN;
@@ -76,7 +78,7 @@ async function fixture(updateManagedUlw?: () => Promise<ManagedUlwStatus>, optio
   });
   await until(() => service.status().head.ready);
   expect(service.status().head.initialization).toMatchObject({ sessionId: fixtureSessionId(root), state: "complete" });
-  return { root, config, service, get stopped() { return stopped; },
+  return { root, config, service, messenger, errors, get stopped() { return stopped; },
     async emit(id: string) {
       const input: Inbound = { id, route, messageId: id, text: id, receivedAt: Date.now(), attachments: [] };
       await handlers!.ready;
@@ -153,6 +155,61 @@ test("confirmed-dead owned head restarts, offline input stays durable, and exist
   });
   const messages = (await readFile(join(f.root, "received.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
   expect(messages.map(message => message.id)).toEqual(["offline-original-source"]);
+  expect(f.errors).toEqual([]);
+}, 30_000);
+
+test("Gateway waits for the recorded adapter owner after native death and socket removal before replacing the head", async () => {
+  const f = await fixture();
+  const connection = await connect(hostPaths(f.config, "main").socketPath);
+  const previous = await connection.client.getState();
+  await connection.close();
+  await f.service.stop();
+  const socketPath = hostPaths(f.config, "main").socketPath;
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  await chmod(socketPath, 0o600);
+  const stat = await lstat(socketPath);
+  const owner = Bun.spawn([process.execPath, "--no-env-file", "-e",
+    "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));"], {
+    stdin: "pipe", stdout: "ignore", stderr: "ignore",
+  });
+  const saved = new Store(join(f.root, "coordination.sqlite"));
+  saved.setMeta("gateway:head", JSON.stringify({ pid: previous.hostPid, ownerPid: owner.pid,
+    sessionId: previous.sessionId, sessionFile: previous.sessionFile, dev: stat.dev, ino: stat.ino }));
+  saved.close();
+  const errors: unknown[] = [];
+  const starting = startGateway(f.config, { messenger: f.messenger, onError: error => errors.push(error),
+    managedUlwPath: fileURLToPath(new URL("./fixtures/managed-ulw", import.meta.url)) })
+    .then(service => ({ service }), (error: unknown) => { errors.push(error); return { error }; });
+  try {
+    await until(() => {
+      if (errors.length) throw errors[0];
+      return existsSync(gatewayPaths(f.config).socketPath);
+    });
+    expect((await gatewayStatus(f.config))?.head).toMatchObject({ pid: previous.hostPid, ready: false });
+    expect((await lstat(socketPath)).ino).toBe(stat.ino);
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    expect((await gatewayStatus(f.config))?.head).toMatchObject({ pid: previous.hostPid, ready: false });
+    expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
+    owner.stdin.end();
+    await owner.exited;
+    const result = await starting;
+    if ("error" in result) throw result.error;
+    const replacement = result.service;
+    await until(() => replacement.status().head.ready);
+    expect(replacement.status().head.pid).not.toBe(previous.hostPid);
+    expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(2);
+    expect(errors).toEqual([]);
+  } finally {
+    if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    if (owner.exitCode === null) owner.stdin.end();
+    await owner.exited;
+    const result = await starting;
+    if ("service" in result) await result.service.stop();
+  }
 }, 30_000);
 
 function seedRestart(root: string, pid: number, id = crypto.randomUUID()): GatewayRestartRequest {

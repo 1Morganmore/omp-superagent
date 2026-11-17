@@ -281,8 +281,10 @@ pending 순서를 보존하고 최대 30초의 capped reconnect backoff로 복�
 가능한 경우에만 한다. 재기동은 저장 PID의 실제 종료를 확인한 뒤에만 허용하며 stale socket도
 저장된 owned inode와 정확히 일치할 때만 제거한다. 알 수 없거나 교체된 socket, 살아 있는 PID의
 잘못된/관측 불가 identity, launch 뒤 durable ownership 기록 전 crash는 **운영자 조정이 필요한
-보류 상태**다. 모든 crash를 자동 복구한다고 주장하지 않는다. 기존 transcript가 있는 head의
-재시작에는 `config.model`을 다시 전달해 native 저장 모델을 덮지 않는다. status의 `head.ready`는
+보류 상태**다. 모든 crash를 자동 복구한다고 주장하지 않는다.
+native PID가 종료됐어도 pipe owner가 살아 있으면 기존 15초 종료 한도 안에서 정리를 기다리며,
+소켓이 먼저 사라져도 owner 종료 전에는 새 head를 띄우지 않는다. 한도 초과나 inode 변경은 오류로 보류한다.
+기존 transcript가 있는 head의 재시작에는 `config.model`을 다시 전달해 native 저장 모델을 덮지 않는다. status의 `head.ready`는
 controller-ready이며 native PID 생존·정확한 identity·Gateway adapter-ready와 각각 다른 사실이다.
 
 ### 명시적 메신저 재시작
