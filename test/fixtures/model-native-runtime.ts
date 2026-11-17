@@ -846,12 +846,15 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     for (const [id, host] of owned) {
       const connection = await HostConnection.connect(host.socketPath);
       connections.add(connection);
-      expect(await connection.client.getState()).toMatchObject({ sessionFile: host.sessionFile, sessionId: id === "main" ? headState.sessionId : firstLane.sessionId,
+      const closingState = await connection.client.getState();
+      expect(closingState).toMatchObject({ sessionFile: host.sessionFile, sessionId: id === "main" ? headState.sessionId : firstLane.sessionId,
         model: modelSelection ? id === "main" ? modelFixtureModels.changedDefault : modelFixtureModels.changedLane : id === "main" ? mainModel : laneModel,
         hostPid: host.pid, isSettled: true, settingsScope: "session", pendingUiRequests: [], hasOwnedRunningWork: false });
       expect(await connection.request({ type: "shutdown_host" }, `native-runtime-shutdown-${id}`)).toMatchObject({ command: "shutdown_host", success: true });
       await within(connection.exited, 10_000, `Native ${id} did not close after shutdown`);
       await processExited(host.pid);
+      // The detached pipe owner removes its socket after the native child exits.
+      await processExited(closingState.adapterOwnerPid);
       await expect(fs.lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
     }
     expect(JSON.parse(await fs.readFile(`${mainPaths.socketPath}.exit.json`, "utf8"))).toMatchObject({
@@ -869,7 +872,8 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       owned.set("main", { ...mainPaths, pid: restarted.pid });
       const resumed = await HostConnection.connect(mainPaths.socketPath);
       connections.add(resumed);
-      expect(await resumed.client.getState()).toMatchObject({
+      const resumedState = await resumed.client.getState();
+      expect(resumedState).toMatchObject({
         hostPid: restarted.pid, sessionId: headState.sessionId, sessionFile: mainPaths.sessionFile,
         model: modelFixtureModels.changedDefault, thinkingLevel: Effort.Minimal,
         modelSettings: confirmedHeadSettings, settingsScope: "session", isSettled: true,
@@ -880,6 +884,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       expect(await resumed.request({ type: "shutdown_host" })).toMatchObject({ success: true });
       await within(resumed.exited, 10_000, "Restored native head did not close after shutdown");
       await processExited(restarted.pid);
+      await processExited(resumedState.adapterOwnerPid);
     }
     const headEntries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
     const laneEntries = parseSessionEntries(await fs.readFile(firstLane.sessionFile, "utf8"));
