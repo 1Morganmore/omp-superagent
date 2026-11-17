@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { chmodSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { DialogResponse, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, Route } from "./contracts";
+import type { DialogResponse, DiscordPurposeRequest, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, Route } from "./contracts";
 import { routeKey } from "./contracts";
+import { authorizeDiscordPurpose } from "./discord-context";
 import { DeliveryError } from "./delivery";
 
 export type GatewayEvent =
@@ -17,7 +18,7 @@ export interface QueuedEvent { sequence: number; event: GatewayEvent; reconcilia
 
 function identity(event: GatewayEvent): unknown {
   if (event.kind !== "message") return event;
-  const { receivedAt: _, reply: _reply, ...input } = event.input;
+  const { receivedAt: _, reply: _reply, discordContext: _context, ...input } = event.input;
   return { ...event, input: { ...input, attachments: input.attachments.map(file => {
     let location = file.url;
     try {
@@ -90,6 +91,19 @@ export class GatewayStore {
   }
   setMeta(key: string, value: string): void {
     this.db.query("INSERT INTO metadata VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+  }
+
+  validateDiscordPurpose(request: DiscordPurposeRequest): void {
+    if (this.getMeta(`user-source:${request.sourceId}`) !== "true")
+      throw new DeliveryError("Discord purpose requires an original received owner source", "rejected");
+    const row = this.db.query("SELECT data,state FROM inputs WHERE id=?").get(request.sourceId) as {
+      data: string; state: string;
+    } | null;
+    if (!row || row.state === "cancelled")
+      throw new DeliveryError("Discord purpose requires an original received owner source", "rejected");
+    const source: Inbound = JSON.parse(row.data);
+    if (source.id !== request.sourceId) throw new DeliveryError("Discord purpose source identity mismatch", "rejected");
+    authorizeDiscordPurpose(source.route, request.route);
   }
 
   getRestart(requestId?: string): GatewayRestartRecord | null {

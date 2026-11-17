@@ -23,7 +23,8 @@ const agentDir = process.env.PI_CODING_AGENT_DIR!;
 const packageRoot = path.resolve(import.meta.dir, "../..");
 const extensionPath = path.join(packageRoot, role === "head" ? "src/extension.ts" : "src/lane-extension.ts");
 const customDirectory = path.join(root, "operator-custom-skills");
-const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update"];
+const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update",
+  "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear"];
 const skillSettings = {
   customDirectories: [customDirectory],
   ignoredSkills: ["ignored-*"],
@@ -291,6 +292,33 @@ try {
     check("thread_inspect", { sourceId: "source" }, true);
     check("thread_inspect", { sourceId: "source", laneId: "lane" }, true);
     check("thread_inspect", { laneId: "lane" }, false);
+    for (const name of ["discord_context", "discord_purpose_list", "discord_purpose_clear"]) {
+      check(name, { sourceId: "source" }, true);
+      check(name, {}, false);
+      // Native OMP repairs unknown root keys. A caller-supplied route must
+      // disappear, leaving only the original authorized source selector.
+      assert.deepEqual(validateToolArguments(runner.getRegisteredTool(name)!.definition, {
+        type: "toolCall", id: "foreign-route", name, arguments: { sourceId: "source", route: destination },
+      }), { sourceId: "source" });
+    }
+    check("discord_purpose_clear", { sourceId: "source", scope: "channel" }, true);
+    check("discord_purpose_clear", { sourceId: "source", scope: "thread" }, true);
+    check("discord_purpose_set", { sourceId: "source", purpose: "Owner note" }, true);
+    check("discord_purpose_set", { sourceId: "source", purpose: "Owner note", scope: "channel" }, true);
+    check("discord_purpose_set", { sourceId: "source", purpose: "Owner note", scope: "thread" }, true);
+    for (const invalid of [
+      { purpose: "Missing source" }, { sourceId: "source" }, { sourceId: "source", purpose: " " },
+      { sourceId: "source", purpose: "x".repeat(4001) }, { sourceId: "source", purpose: "note", scope: "sibling" },
+    ]) check("discord_purpose_set", invalid, false);
+    assert.deepEqual(validateToolArguments(runner.getRegisteredTool("discord_purpose_set")!.definition, {
+      type: "toolCall", id: "foreign-purpose-route", name: "discord_purpose_set",
+      arguments: { sourceId: "source", purpose: "note", route: destination },
+    }), { sourceId: "source", purpose: "note" });
+    for (const name of ["discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear"]) {
+      const tool = runner.getRegisteredTool(name);
+      assert(tool);
+      assert.equal(tool.definition.approval, name === "discord_context" || name === "discord_purpose_list" ? "read" : "exec");
+    }
     for (const changes of [{ title: "Renamed" }, { appliedTags: [] }, { appliedTags: ["101"], archived: true }, { archived: false }])
       check("lane_thread_update", { id: "lane", sourceId: "source", changes }, true);
     const threadUpdate = runner.getRegisteredTool("lane_thread_update")!.definition;

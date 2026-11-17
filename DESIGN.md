@@ -653,6 +653,22 @@ progress receipt를 통해 헤드에 전달한다. `lane_inspect`와 연결 주�
 보고 도구를 제외하고 실행 시에도 차단한다. 타이머·polling·자동 독촉·재개·종료·새 상태 레지스트리나
 감독용 모델 턴은 추가하지 않는다.
 
+### Discord 채널 문맥
+
+`Inbound.discordContext`는 채널 ID/name/topic, 스레드 ID/name/parent와 로컬 owner purpose를
+담은 비신뢰 관측 스냅샷이다. Discord adapter가 이미 확보한 객체만 읽어 자동 수신 경로를
+늘이지 않으며, 메타데이터·용도 저장소 읽기 실패는 원래 입력의 접수를 막지 않는다.
+빠진 필드는 미상, `topic: null`은 관측된 빈 설명이다. HEAD의 요청 envelope와 명시적
+lane handoff에 보존하지만 원본 사용자 텍스트나 native workflow 선택으로 승격하지 않는다.
+Gateway·HEAD 중복 판정에서는 이 스냅샷을 제외하여 이름/설명 변경이나 캐시 차이가 원래
+메시지 신원을 바꾸지 않게 한다. 재전달은 처음 접수된 값을 덮지 않는다.
+
+HEAD의 `discord_context`는 원본 source의 현재 문맥을 조회한다. `discord_purpose_list`,
+`discord_purpose_set`, `discord_purpose_clear`는 원래 channel/thread 또는 정확한 부모만
+대상으로 하며, Gateway가 저장한 실제 사용자 입력·취소 여부·물리 route를 다시 대조한다.
+용도와 source/target별 mutation receipt는 Gateway가 소유한 기존 SQLite metadata의
+한 번의 쓰기로 갱신한다. 기록은 채널 설명 수정·자동 repository 선택·dispatch 권한이 아니다.
+
 중간 진척과 별개인 같은 요청의 마지막 비어 있지 않은 assistant 답변은 native 정착까지 보존한다. TODO 알림
 등으로 이어진 빈 응답·공백·thinking-only 메시지는 그 답변을 지우지 않으며 새 답변이 있으면
 교체한다. 실패·중단은 이전 답변을 폐기하고, 새 요청에는 이전 요청의 답변을 넘기지 않는다.

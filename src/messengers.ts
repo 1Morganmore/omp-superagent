@@ -1,6 +1,6 @@
 import type { Config } from "./config";
 import { requireMessengerCredentials } from "./config";
-import type { Approval, Attachment, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Platform, Route, StorePort, ThreadInfo, ThreadUpdate } from "./contracts";
+import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Platform, Route, StorePort, ThreadInfo, ThreadUpdate } from "./contracts";
 import { physicalRouteKey } from "./contracts";
 import { DeliveryError } from "./delivery";
 import { DiscordMessenger } from "./discord";
@@ -94,6 +94,16 @@ export class MessengerHub implements Messenger {
     if (!adapter.updateThread) throw new DeliveryError("Thread management is unsupported on this transport", "rejected");
     return adapter.updateThread(route, update);
   }
+  inspectDiscordContext(route: Route): Promise<DiscordContext> {
+    const adapter = this.adapter(route);
+    if (!adapter.inspectDiscordContext) throw new DeliveryError("Discord context inspection is unsupported", "rejected");
+    return adapter.inspectDiscordContext(route);
+  }
+  discordPurpose(request: DiscordPurposeRequest): Promise<readonly DiscordPurposeNote[]> {
+    const adapter = this.adapter(request.route);
+    if (!adapter.discordPurpose) throw new DeliveryError("Discord purpose notes are unsupported", "rejected");
+    return adapter.discordPurpose(request);
+  }
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null> {
     return this.adapter(route).fetchAfter(route, messageId);
   }
@@ -113,7 +123,7 @@ export function createMessenger(config: Config, store: Pick<StorePort, "getMeta"
   requireMessengerCredentials(config);
   const adapters: Partial<Record<Platform, Messenger>> = {};
   if (config.discord) adapters.discord = new DiscordMessenger({
-    ...config.discord, token: process.env[config.discord.tokenEnv]!, onError,
+    ...config.discord, token: process.env[config.discord.tokenEnv]!, store, onError,
   });
   if (config.telegram) adapters.telegram = new TelegramMessenger({
     ...config.telegram, token: process.env[config.telegram.tokenEnv]!, store, onError,

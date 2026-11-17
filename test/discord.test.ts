@@ -4,6 +4,7 @@ import { ApplicationCommandOptionType, Attachment as DiscordAttachment, ChannelT
 import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "../src/discord.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import { parseDialog } from "../src/dialog.ts";
+import { Store } from "../src/store";
 import { type Approval, type Attachment, type DialogResponse, type Inbound, type OutputRecord, type Route } from "../src/contracts.ts";
 
 const owner = "owner";
@@ -38,6 +39,9 @@ class Channel {
   references = new Collection<string, Message>();
   failure: unknown;
   recipientId = owner;
+  name?: string;
+  topic?: string | null;
+  parent?: Channel;
   constructor(readonly id = "parent", readonly guildId: string | null = "guild", readonly parentId: string | null = null) {}
   get type() { return this.parentId ? ChannelType.PublicThread : this.guildId ? ChannelType.GuildText : ChannelType.DM; }
   isThread() { return this.parentId !== null; }
@@ -101,7 +105,7 @@ function inbound(channel: Channel, patch: Record<string, unknown> = {}): Message
   } as unknown as Message;
 }
 
-async function fixture(options: Pick<DiscordMessengerOptions, "fetch"> = {}, admit?: (id: string, response: DialogResponse, route: Route) => Promise<void>) {
+async function fixture(options: Pick<DiscordMessengerOptions, "fetch" | "store"> = {}, admit?: (id: string, response: DialogResponse, route: Route) => Promise<void>) {
   const gateway = new Gateway();
   const channel = new Channel();
   gateway.channelMap.set(channel.id, channel);
@@ -189,6 +193,82 @@ describe("shared native dialog normalization", () => {
 });
 
 describe("Discord routing and parsing", () => {
+  test("authenticated thread intake snapshots cached parent topics and exact channel/thread purpose notes without fetching", async () => {
+    const store = new Store(":memory:");
+    const { messenger, gateway, channel, received } = await fixture({ store });
+    try {
+      channel.name = "Engineering";
+      channel.topic = "Read before changing production";
+      const thread = new Channel("thread", "guild", channel.id);
+      thread.parent = channel;
+      thread.name = "Release investigation";
+      await messenger.discordPurpose({ sourceId: "set-parent", route, action: "set", purpose: "Release coordination" });
+      await messenger.discordPurpose({ sourceId: "set-thread", route: { ...route, threadId: thread.id }, action: "set", purpose: "Investigate only" });
+      gateway.emit(Events.MessageCreate, inbound(thread));
+      await drain();
+      expect(received[0]?.discordContext).toEqual({
+        kind: "guild",
+        channel: { id: "parent", name: "Engineering", topic: "Read before changing production", purpose: "Release coordination" },
+        thread: { id: "thread", parentId: "parent", name: "Release investigation", purpose: "Investigate only" },
+      });
+      channel.topic = "Changed later";
+      thread.name = "Renamed later";
+      expect(received[0]?.discordContext?.channel.topic).toBe("Read before changing production");
+      expect(received[0]?.discordContext?.thread?.name).toBe("Release investigation");
+      expect(gateway.lookups).toEqual([]);
+      expect(thread.fetched).toEqual([]);
+    } finally { await messenger.stop(); store.close(); }
+  });
+
+  test("DM context and missing thread parents do not invent unavailable names or topics", async () => {
+    const { messenger, gateway, received } = await fixture();
+    try {
+      gateway.emit(Events.MessageCreate, inbound(new Channel("dm", null)));
+      gateway.emit(Events.MessageCreate, inbound(new Channel("thread", "guild", "parent"), { id: "101" }));
+      await drain();
+      expect(received.map(value => value.discordContext)).toEqual([
+        { kind: "dm", channel: { id: "dm" } },
+        { kind: "guild", channel: { id: "parent" }, thread: { id: "thread", parentId: "parent" } },
+      ]);
+      expect(gateway.lookups).toEqual([]);
+    } finally { await messenger.stop(); }
+  });
+
+  test("failing metadata getters and note storage never discard or delay authenticated intake", async () => {
+    const { messenger, gateway, channel, received, errors } = await fixture({
+      store: { getMeta: () => { throw new Error("Storage temporarily unreadable"); }, setMeta: () => {} },
+    });
+    try {
+      Object.defineProperty(channel, "topic", { get() { throw new Error("Metadata unavailable"); } });
+      gateway.emit(Events.MessageCreate, inbound(channel));
+      await drain();
+      expect(received.map(value => [value.id, value.text, value.discordContext])).toEqual([
+        ["discord:bot:100:original", "hello", { kind: "guild", channel: { id: "parent" } }],
+      ]);
+      expect(errors).toHaveLength(2);
+      expect(gateway.lookups).toEqual([]);
+    } finally { await messenger.stop(); }
+  });
+
+  test("channel rename/topic/purpose changes never create an owner edit revision", async () => {
+    const store = new Store(":memory:");
+    const { messenger, channel } = await fixture({ store });
+    try {
+      channel.name = "Original";
+      channel.topic = null;
+      const original = messenger.normalize(inbound(channel, { editedTimestamp: 2000 }));
+      await messenger.discordPurpose({ sourceId: "set-purpose", route, action: "set", purpose: "New purpose" });
+      channel.name = "Renamed";
+      channel.topic = "New topic";
+      const changed = messenger.normalize(inbound(channel, { editedTimestamp: 2000 }));
+      expect(changed?.id).toBe(original?.id);
+      expect(changed?.discordContext).toEqual({ kind: "guild", channel: {
+        id: "parent", name: "Renamed", topic: "New topic", purpose: "New purpose",
+      } });
+      expect(original?.discordContext).toEqual({ kind: "guild", channel: { id: "parent", name: "Original", topic: null } });
+    } finally { await messenger.stop(); store.close(); }
+  });
+
   test("empty creates and contentless edits cannot become tasks, but supported attachment-only messages can", async () => {
     const { messenger, gateway, channel, received } = await fixture();
     const supported = new Collection([["200", { id: "200", name: "empty.txt", size: 0,
@@ -372,6 +452,8 @@ describe("Discord application commands", () => {
       expect(received[index]).toEqual({
         id: `discord:bot:interaction:${200 + index}`, route: entry.target, messageId: null, interactionId: String(200 + index),
         text: entry.expected, receivedAt: 2000, attachments: [],
+        discordContext: { kind: entry.target.guildId ? "guild" : "dm", channel: { id: entry.target.channelId },
+          ...(entry.target.threadId ? { thread: { id: entry.target.threadId, parentId: entry.target.channelId } } : {}) },
       });
       expect(command.replies).toEqual([{
         content: "Superagent accepted this command. Its result will be sent to this conversation.",

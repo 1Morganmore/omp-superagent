@@ -54,6 +54,31 @@ export interface ReplyContext {
   quote?: string;
 }
 
+/** Untrusted observations, never instructions, authority, or automatic routing policy.
+ * For threads, channel describes the parent and thread describes the destination.
+ * Missing optional properties mean unavailable; a null topic is an observed empty topic.
+ */
+export interface DiscordContext {
+  readonly kind: "guild" | "dm";
+  readonly channel: {
+    readonly id: string;
+    readonly name?: string;
+    readonly topic?: string | null;
+    readonly purpose?: string;
+  };
+  readonly thread?: { readonly id: string; readonly parentId: string; readonly name?: string; readonly purpose?: string };
+}
+
+export type DiscordPurposeRequest = {
+  readonly sourceId: string;
+  readonly route: Route;
+} & (
+  | { readonly action: "list" }
+  | { readonly action: "set"; readonly purpose: string }
+  | { readonly action: "clear" }
+);
+export interface DiscordPurposeNote { readonly route: Route; readonly purpose: string }
+
 export interface Inbound {
   id: string;
   route: Route;
@@ -67,6 +92,7 @@ export interface Inbound {
   receivedAt: number;
   attachments: Attachment[];
   reply?: ReplyContext;
+  discordContext?: DiscordContext;
 }
 
 /** A real platform message that can be fetched, reacted to, or used as a thread source. */
@@ -327,6 +353,8 @@ export interface Messenger {
   /** Optional native thread management; unsupported transports must not simulate it. */
   inspectThread?(route: Route): Promise<ThreadInfo>;
   updateThread?(route: Route, update: ThreadUpdate): Promise<ThreadInfo>;
+  inspectDiscordContext?(route: Route): Promise<DiscordContext>;
+  discordPurpose?(request: DiscordPurposeRequest): Promise<readonly DiscordPurposeNote[]>;
   /** null explicitly means no history API; intake recovery belongs to the adapter. */
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null>;
   /** Validate platform/auth destination before fetching. Never follow redirects with credentials. */

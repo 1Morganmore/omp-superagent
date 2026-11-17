@@ -6,6 +6,8 @@ import { join } from "node:path";
 import type { Config } from "../src/config";
 import type { Approval, Attachment, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../src/contracts";
 import { DeliveryError } from "../src/delivery";
+import { changeDiscordPurpose } from "../src/discord-context";
+import { MessengerHub } from "../src/messengers";
 import { createGatewayMessenger } from "../src/gateway-client";
 import { gatewayCall, gatewayPaths, gatewayRequest, readGatewayJson, type GatewayResult } from "../src/gateway-protocol";
 import { GatewayServer, type GatewayStatus } from "../src/gateway-server";
@@ -35,6 +37,8 @@ class FakeMessenger implements Messenger {
   stopped = false;
   sendFailure?: DeliveryError;
   download?: (signal: AbortSignal) => Response;
+  discordPurpose?: Messenger["discordPurpose"];
+  inspectDiscordContext?: Messenger["inspectDiscordContext"];
   async start(handlers: Parameters<Messenger["start"]>[0]) { this.handlers = handlers; }
   async send(output: OutputRecord) {
     this.sends.push(output);
@@ -208,6 +212,72 @@ test("Gateway preserves the first reply snapshot and voice metadata across detac
   await replacement.start({ message: async message => { received.push(message); }, answer: async () => {} });
   await eventually(() => received.length === 1 && f.store.pending() === 0);
   expect(received).toEqual([original]);
+});
+
+test("Gateway keeps the original Discord channel snapshot through detached replay and changed metadata redelivery", async () => {
+  const f = await fixture();
+  const first = f.client();
+  await first.start({ message: async () => {}, answer: async () => {} });
+  await f.server.initialReady.promise;
+  await first.stop();
+  const original: Inbound = { ...input("discord-snapshot"),
+    route: { platform: "discord", accountId: "bot", authorityId: "owner", guildId: "guild", channelId: "parent", threadId: "thread" },
+    discordContext: { kind: "guild", channel: { id: "parent", name: "Original parent", topic: "Original topic", purpose: "Original purpose" },
+      thread: { id: "thread", parentId: "parent", name: "Original thread" } },
+  };
+  await f.messenger.emit(original);
+  await f.messenger.emit({ ...original, discordContext: { kind: "guild", channel: {
+    id: "parent", name: "Renamed parent", topic: "Changed topic", purpose: "Changed purpose",
+  }, thread: { id: "thread", parentId: "parent", name: "Renamed thread" } } });
+  expect(f.store.pending()).toBe(1);
+  const received: Inbound[] = [];
+  const replacement = f.client();
+  await replacement.start({ message: async message => { received.push(message); }, answer: async () => {} });
+  await eventually(() => received.length === 1 && f.store.pending() === 0);
+  expect(received).toEqual([original]);
+});
+
+test("Discord purpose Gateway effects require original owner sources and cannot target unrelated allowed routes", async () => {
+  const f = await fixture();
+  const headStore = new Store(join(f.config.stateDir, "coordination.sqlite"));
+  cleanups.push(async () => headStore.close());
+  const destination: Route = { platform: "discord", accountId: "bot", authorityId: "owner", guildId: "guild", channelId: "parent", threadId: "thread" };
+  for (const id of ["set", "clear", "later", "inspect", "cancelled"])
+    headStore.receive({ ...input(id), route: destination }, "main", { [`user-source:${id}`]: "true" });
+  headStore.receive({ ...input("report"), route: destination }, "main");
+  headStore.settle("cancelled", "cancelled");
+  const adapter = new FakeMessenger();
+  adapter.discordPurpose = async request => changeDiscordPurpose(f.store, request);
+  adapter.inspectDiscordContext = async route => ({ kind: "guild", channel: { id: route.channelId, name: "Observed parent" },
+    ...(route.threadId ? { thread: { id: route.threadId, parentId: route.channelId, name: "Observed thread" } } : {}) });
+  const hub = new MessengerHub({ discord: adapter });
+  f.messenger.discordPurpose = request => hub.discordPurpose(request);
+  f.messenger.inspectDiscordContext = route => hub.inspectDiscordContext(route);
+  const client = f.client();
+  await client.start({ message: async () => {}, answer: async () => {} });
+  await f.server.initialReady.promise;
+  const purpose = client.discordPurpose?.bind(client);
+  const inspect = client.inspectDiscordContext?.bind(client);
+  if (!purpose || !inspect) throw new Error("Gateway Discord context API unavailable");
+  const set = { sourceId: "set", route: destination, action: "set" as const, purpose: "Owner purpose" };
+  expect(await purpose(set)).toEqual([{ route: destination, purpose: "Owner purpose" }]);
+  expect(await inspect(destination)).toEqual({ kind: "guild",
+    channel: { id: "parent", name: "Observed parent" },
+    thread: { id: "thread", parentId: "parent", name: "Observed thread" } });
+  expect(await purpose({ sourceId: "clear", route: destination, action: "clear" })).toEqual([]);
+  await purpose({ sourceId: "later", route: destination, action: "set", purpose: "Later purpose" });
+  expect(await purpose(set)).toEqual([{ route: destination, purpose: "Owner purpose" }]);
+  expect(await purpose({ sourceId: "inspect", route: destination, action: "list" }))
+    .toEqual([{ route: destination, purpose: "Later purpose" }]);
+  for (const sourceId of ["missing", "report", "cancelled"])
+    await expect(purpose({ sourceId, route: destination, action: "clear" })).rejects.toMatchObject({ certainty: "rejected" });
+  for (const route of [
+    { ...destination, channelId: "another-allowed-channel" }, { ...destination, threadId: "sibling" },
+    { ...destination, accountId: "another-bot" }, { ...destination, authorityId: "another-owner" },
+  ]) await expect(purpose({ sourceId: "inspect", route, action: "clear" })).rejects.toMatchObject({ certainty: "rejected" });
+  await expect(purpose({ ...set, purpose: "Conflict" })).rejects.toMatchObject({ certainty: "rejected" });
+  expect(await purpose({ sourceId: "inspect", route: destination, action: "list" }))
+    .toEqual([{ route: destination, purpose: "Later purpose" }]);
 });
 
 test("initial native approval readiness gates admission, while head detach preserves durable intake and dedup", async () => {

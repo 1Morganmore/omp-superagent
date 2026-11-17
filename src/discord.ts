@@ -5,7 +5,8 @@ import {
   Routes, TextInputBuilder, TextInputStyle,
   type ChatInputCommandInteraction, type ForumChannel, type Interaction, type MediaChannel, type Message, type MessageCreateOptions, type PartialMessage, type PermissionsBitField,
 } from "discord.js";
-import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type ThreadInfo, type ThreadUpdate } from "./contracts.ts";
+import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type DiscordContext, type DiscordPurposeNote, type DiscordPurposeRequest, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort, type ThreadInfo, type ThreadUpdate } from "./contracts.ts";
+import { changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "./discord-context";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
@@ -42,6 +43,7 @@ export interface DiscordMessengerOptions {
   client?: Client;
   /** Attachment HTTP boundary; Discord credentials are never sent to the CDN. */
   fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  store?: Pick<StorePort, "getMeta" | "setMeta">;
   onError?: (error: unknown) => void;
 }
 
@@ -203,7 +205,7 @@ export class DiscordMessenger implements Messenger {
     }).catch(this.report);
   }
 
-  /** Pure normalization of an already fetched Discord message; no attachment downloads. */
+  /** Normalize an already fetched Discord message with cached context; no attachment downloads. */
   normalize(message: Message): Inbound | null {
     if (message.author.bot || message.author.id !== this.options.ownerId || message.webhookId) return null;
     const route = this.route(message.channel);
@@ -230,7 +232,65 @@ export class DiscordMessenger implements Messenger {
       id: `discord:${route.accountId}:${message.id}:${revision}`, route, messageId: message.id,
       text: message.content, receivedAt: message.editedTimestamp ?? message.createdTimestamp, attachments,
       ...(reply ? { reply } : {}),
+      discordContext: this.context(route, message.channel),
     };
+  }
+
+  /** Cached objects only: optional metadata must never delay or discard intake. */
+  private context(route: Route, channel?: unknown): DiscordContext {
+    const context: DiscordContext = {
+      kind: route.guildId ? "guild" : "dm", channel: { id: route.channelId },
+      ...(route.threadId ? { thread: { id: route.threadId, parentId: route.channelId } } : {}),
+    };
+    let observed = context;
+    try {
+      if (object(channel) && channel.id === (route.threadId ?? route.channelId)) {
+        const parent = route.threadId ? channel.parent : channel;
+        const metadata = object(parent) && parent.id === route.channelId &&
+          (parent.guildId ?? null) === route.guildId ? parent : undefined;
+        observed = {
+          ...context,
+          channel: { ...context.channel,
+            ...(metadata && typeof metadata.name === "string" ? { name: metadata.name } : {}),
+            ...(metadata && (metadata.topic === null || typeof metadata.topic === "string") ? { topic: metadata.topic } : {}),
+          },
+          ...(context.thread ? { thread: { ...context.thread,
+            ...(typeof channel.name === "string" ? { name: channel.name } : {}),
+          } } : {}),
+        };
+      }
+    } catch {
+      this.report(new Error("Discord channel metadata unavailable; owner intake preserved"));
+    }
+    try {
+      const notes = this.options.store ? discordPurposeNotes(this.options.store, route) : [];
+      const parent = notes.find(note => note.route.threadId === null);
+      const thread = notes.find(note => note.route.threadId === route.threadId && route.threadId !== null);
+      return { ...observed, channel: { ...observed.channel, ...(parent ? { purpose: parent.purpose } : {}) },
+        ...(observed.thread ? { thread: { ...observed.thread, ...(thread ? { purpose: thread.purpose } : {}) } } : {}) };
+    } catch {
+      this.report(new Error("Discord purpose metadata unavailable; owner intake preserved"));
+      return observed;
+    }
+  }
+
+  async inspectDiscordContext(route: Route): Promise<DiscordContext> {
+    this.assertRoute(route);
+    try { return this.context(route, await this.channel(route)); }
+    catch (error) {
+      if (error instanceof DeliveryError && error.certainty === "rejected") throw error;
+      this.report(new Error("Discord channel inspection unavailable"));
+      return this.context(route);
+    }
+  }
+
+  async discordPurpose(input: DiscordPurposeRequest): Promise<readonly DiscordPurposeNote[]> {
+    const request = discordPurposeRequest(input);
+    this.assertRoute(request.route);
+    if (!this.options.store) throw new DeliveryError("Discord purpose storage is unavailable", "rejected");
+    // A DM route needs live recipient verification; guild routes use the configured exact allowlist.
+    if (!request.route.guildId) await this.channel(request.route);
+    return changeDiscordPurpose(this.options.store, request);
   }
 
   private replyPointer(message: Message): ReplyContext | undefined {
@@ -530,6 +590,7 @@ export class DiscordMessenger implements Messenger {
       await deny("This conversation is not authorized for Superagent commands."); return;
     }
     let route: Route | null;
+    let discordContext: DiscordContext | undefined;
     try {
       // This resolves a channel, never a command's interaction ID as a message.
       const channel = interaction.channel ?? await this.client.channels.fetch(interaction.channelId);
@@ -538,6 +599,7 @@ export class DiscordMessenger implements Messenger {
         !channel.isSendable() || (!route.guildId && (channel.type !== ChannelType.DM || channel.recipientId !== this.options.ownerId))) {
         await deny("This conversation is not authorized for Superagent commands."); return;
       }
+      discordContext = this.context(route, channel);
     } catch {
       this.report(new Error("Discord command destination verification failed; nothing was admitted"));
       await deny("Superagent could not verify this conversation; nothing was admitted."); return;
@@ -551,6 +613,7 @@ export class DiscordMessenger implements Messenger {
       await handlers.message({
         id: `discord:${route.accountId}:interaction:${interaction.id}`, route, messageId: null,
         interactionId: interaction.id, text, receivedAt: interaction.createdTimestamp, attachments: [],
+        ...(discordContext ? { discordContext } : {}),
       });
     } catch {
       this.report(new Error("Discord command durable admission could not be confirmed; admission was not retried"));

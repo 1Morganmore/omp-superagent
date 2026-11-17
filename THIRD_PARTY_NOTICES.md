@@ -124,6 +124,15 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
 - Management is limited to registered Discord guild threads. It does not import
   Dori's alternate intake, command launcher, transcription, or automatic cleanup.
 
+### Discord channel context
+
+- Conceptual reference: [Dori #69](https://github.com/vntrevx/omp-dori/pull/69)
+  at `2c1cbd66e9410885b053006c21aedad60293dcab`.
+- Independently implemented with existing SQLite admission, managed HEAD tools,
+  and discord.js channel metadata. No Dori source, tests, prompt text, JSONL
+  registry, or monitor framework was copied.
+- Channel metadata is context, never instruction or authorization.
+
 ## Telegram transport: grammY
 
 - API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553),

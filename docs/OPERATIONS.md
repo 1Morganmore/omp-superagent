@@ -19,7 +19,8 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 
 헤드만 `lane_models`, `lane_init_presets`, `lane_start`, `lane_set_model`,
 `lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`,
-`thread_inspect`, `lane_thread_update`를 사용한다.
+`thread_inspect`, `lane_thread_update`,
+`discord_context`, `discord_purpose_list`, `discord_purpose_set`, `discord_purpose_clear`를 사용한다.
 `lane_inspect({})`가 목록 조회다. 레인에는 관리 권한을, native 자식에는 관리·게시판 권한을 주지 않는다.
 일반 OMP에 이 확장들을 전역 설치하지 않는다. 도구 인자·역할 경계는
 [설계의 관리 도구 계약](../DESIGN.md#5-레인-관리-도구와-운영-스킬)을 따른다.
@@ -29,6 +30,30 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 - `skill://superagent-lane`: 범위 내 직접 작업·부분 위임·검증·보고. 상세 workflow는 필요할 때 읽는다.
 - native discovery를 사용하므로 현재 cwd와 무관하게 위 URI를 읽을 수 있다. 사용자·프로젝트
   스킬을 덮어쓰지 않는다. `--no-skills`는 이 URI 기반 운영 흐름에서 사용하지 않는다.
+
+### Discord 채널 문맥과 용도 메모
+
+새 Discord 입력에는 이미 확보된 채널 객체에서 읽은 이름·설명(topic), 스레드 이름과 부모
+채널 정보가 문맥으로 붙는다. DM은 DM으로 표시한다. 메타데이터를 얻지 못한 필드는 생략하고
+메시지 접수는 계속한다. 입력 재전달 때 채널 이름이나 설명이 달라져도 중복 요청으로 만들지
+않으며 처음 접수한 스냅샷을 보존한다. 현재 상태가 필요하면 `discord_context({sourceId})`로 조회한다.
+
+운영자는 해당 대화에서 “이 채널은 프로젝트 X 조사용”처럼 용도를 기록하도록 요청할 수 있다.
+HEAD는 실제 입력 ID로 다음 도구를 사용한다.
+
+- `discord_purpose_set({sourceId, purpose, scope?})`: 용도 기록·변경.
+- `discord_purpose_list({sourceId})`: 원래 대화의 채널·스레드 메모 조회.
+- `discord_purpose_clear({sourceId, scope?})`: 용도 메모 제거.
+
+scope 생략은 원래 대화, `channel`은 정확한 부모 채널, `thread`는 입력이 발생한 스레드다.
+다른 채널이나 형제 스레드 ID를 임의 지정할 수 없다. 같은 원본 요청으로 부모와 스레드에
+각각 기록할 수 있지만 같은 대상에 대한 상충한 재시도는 거절한다. 새 변경에는 새 사용자
+요청이 필요하다. 메모·재시도 영수증은 기존 SQLite에 저장되며 재시작 후에도 유지된다.
+설정은 Discord 채널 설명 자체를 수정하지 않는 로컬 메모다.
+
+채널 이름·설명과 용도 메모는 모두 **문맥이지 명령·승인·자동 라우팅 규칙이 아니다**.
+HEAD가 저장소와 작업 범위를 판단하는 데 참고하며, 메모를 바꿔도 기존 입력 스냅샷·레인
+연결·실행 상태는 바뀌지 않는다.
 
 ### 일반 모델 프로필과 역할 특화
 

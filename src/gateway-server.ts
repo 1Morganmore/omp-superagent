@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageReference, Messenger, OutputRecord, Route, ThreadUpdate } from "./contracts";
 import { DeliveryError } from "./delivery";
+import { discordPurposeRequest } from "./discord-context";
 import { MAX_GATEWAY_ATTACHMENT, readGatewayJson, type GatewayResult } from "./gateway-protocol";
 import { GatewayStore } from "./gateway-store";
 import type { ManagedUlwStatus } from "./managed-ulw";
@@ -320,7 +321,8 @@ export class GatewayServer {
     if (typeof id !== "string" || !/^[a-f0-9-]{36}$/.test(id) || typeof operation !== "string" || !Array.isArray(args))
       throw new DeliveryError("Invalid Gateway effect", "rejected");
     const operations: Record<string, number[]> = { send: [1], setActivity: [2], showApproval: [1], dismissApproval: [1],
-      canCreateThread: [1, 2], createThread: [2, 3, 4], inspectThread: [1], updateThread: [2], fetchAfter: [2] };
+      canCreateThread: [1, 2], createThread: [2, 3, 4], inspectThread: [1], updateThread: [2],
+      inspectDiscordContext: [1], discordPurpose: [1], fetchAfter: [2] };
     if (!Object.hasOwn(operations, operation) || !operations[operation]!.includes(args.length))
       throw new DeliveryError("Unknown Gateway effect", "rejected");
     const previous = this.options.store.beginEffect(id, operation, args);
@@ -334,6 +336,13 @@ export class GatewayServer {
         throw new DeliveryError("Message activity requires a real message ID", "rejected");
       if (operation === "inspectThread" && !messenger.inspectThread || operation === "updateThread" && !messenger.updateThread)
         throw new DeliveryError("Thread management is unsupported on this transport", "rejected");
+      const purpose = operation === "discordPurpose" ? discordPurposeRequest(args[0]) : undefined;
+      if (purpose) {
+        this.options.store.validateDiscordPurpose(purpose);
+        if (!messenger.discordPurpose) throw new DeliveryError("Discord purpose notes are unsupported", "rejected");
+      }
+      if (operation === "inspectDiscordContext" && !messenger.inspectDiscordContext)
+        throw new DeliveryError("Discord context inspection is unsupported", "rejected");
       const value = operation === "send" ? await messenger.send(args[0] as OutputRecord)
         : operation === "setActivity" ? await messenger.setActivity?.(args[0] as MessageReference, args[1] as "received" | "thinking" | "idle")
         : operation === "showApproval" ? await messenger.showApproval(args[0] as Approval)
@@ -343,6 +352,8 @@ export class GatewayServer {
           args[2] == null ? undefined : args[2] as string, args.length === 4 ? threadTags(args[3]) : undefined)
         : operation === "inspectThread" ? await messenger.inspectThread?.(args[0] as Route)
         : operation === "updateThread" ? await messenger.updateThread?.(args[0] as Route, threadUpdate(args[1]))
+        : operation === "inspectDiscordContext" ? await messenger.inspectDiscordContext?.(args[0] as Route)
+        : purpose ? await messenger.discordPurpose?.(purpose)
         : await messenger.fetchAfter(args[0] as Route, args[1] as string);
       result = { ok: true, value };
     } catch (error) { result = failure(error); }

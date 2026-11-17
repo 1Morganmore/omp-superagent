@@ -106,12 +106,13 @@ const inboundData = (input: Inbound): Inbound => ({
   ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
   ...(input.invocationId === undefined ? {} : { invocationId: input.invocationId }),
   ...(input.reply === undefined ? {} : { reply: input.reply }),
+  ...(input.discordContext === undefined ? {} : { discordContext: input.discordContext }),
   receivedAt: input.receivedAt, attachments: input.attachments,
 });
 function inboundIdentity(input: Inbound) {
   // Referenced messages can be edited/deleted independently. A redelivery never
   // replaces the contextual snapshot admitted with the owner's original event.
-  const { reply: _reply, ...data } = inboundData(input);
+  const { reply: _reply, discordContext: _context, ...data } = inboundData(input);
   return {
     ...data,
     // Slack supplies no command timestamp. A transport redelivery has a fresh

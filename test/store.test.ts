@@ -279,6 +279,27 @@ describe("durable coordination store", () => {
     expect(() => reopened.receive({ ...original, text: "Changed owner instruction" }, "main")).toThrow("identity conflict");
   });
 
+  test("Discord context snapshots survive reopen and metadata redelivery while each owner revision retains its own snapshot", () => {
+    const { store, path } = fixture();
+    const original: Inbound = { ...inbound("discord-context"),
+      discordContext: { kind: "guild", channel: { id: "channel", name: "Original", topic: null, purpose: "Original purpose" },
+        thread: { id: "thread", parentId: "channel", name: "Original thread" } },
+    };
+    store.receive(original, "main");
+    const edited: Inbound = { ...original, id: "discord-context:edit", text: "Edited owner instruction",
+      discordContext: { kind: "guild", channel: { id: "channel", name: "Later", topic: "New topic" },
+        thread: { id: "thread", parentId: "channel", name: "Renamed thread", purpose: "Later purpose" } },
+    };
+    store.receive(edited, "main");
+    store.close();
+    const reopened = open(path);
+    expect(reopened.receive({ ...original, discordContext: edited.discordContext }, "main")).toBe(false);
+    expect(reopened.input(original.id)?.discordContext).toEqual(original.discordContext);
+    expect(reopened.input(edited.id)?.discordContext).toEqual(edited.discordContext);
+    expect(reopened.receive({ ...edited, discordContext: undefined }, "main")).toBe(false);
+    expect(reopened.input(edited.id)?.discordContext).toEqual(edited.discordContext);
+  });
+
   test("nonterminal lane progress coalesces durable receipts without settling or externally delivering lane work", () => {
     const { store, path } = fixture();
     const managed = admitLane(store);

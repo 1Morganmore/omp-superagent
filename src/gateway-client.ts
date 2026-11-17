@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { Readable, Transform } from "node:stream";
 import type { Config } from "./config";
-import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "./contracts";
+import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "./contracts";
 import { DeliveryError } from "./delivery";
 import { gatewayCall, gatewayPaths, gatewayRequest, MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_FRAME, readGatewayJson, type GatewayResult } from "./gateway-protocol";
 import type { GatewayReceipt, QueuedEvent } from "./gateway-store";
@@ -152,6 +152,8 @@ class GatewayMessenger implements GatewayHeadMessenger {
   }
   inspectThread(route: Route): Promise<ThreadInfo> { return this.effect("inspectThread", [route]); }
   updateThread(route: Route, update: ThreadUpdate): Promise<ThreadInfo> { return this.effect("updateThread", [route, update]); }
+  inspectDiscordContext(route: Route): Promise<DiscordContext> { return this.effect("inspectDiscordContext", [route]); }
+  discordPurpose(request: DiscordPurposeRequest): Promise<readonly DiscordPurposeNote[]> { return this.effect("discordPurpose", [request]); }
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null> { return this.effect("fetchAfter", [route, messageId]); }
 
   async openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response> {
