@@ -379,8 +379,18 @@ export class DiscordMessenger implements Messenger {
 
   async send(output: OutputRecord): Promise<string> {
     try {
+      if (output.replyTo !== undefined && (!object(output.replyTo) || !object(output.replyTo.route)
+        || typeof output.replyTo.messageId !== "string" || !/^[0-9]{1,20}$/.test(output.replyTo.messageId)
+        || physicalRouteKey(output.replyTo.route) !== physicalRouteKey(output.route))) {
+        throw new DeliveryError("Discord reply requires a real message in the exact destination conversation", "rejected");
+      }
       const channel = await this.destination(output.route);
-      const message = await channel.send(this.payload(output.text, discordNonce(output.id, output.route)));
+      const message = await channel.send({
+        ...this.payload(output.text, discordNonce(output.id, output.route)),
+        // Discord may omit a deleted reference in this same send. Never retry
+        // without a reference: an ambiguous first attempt may already exist.
+        ...(output.replyTo ? { reply: { messageReference: output.replyTo.messageId, failIfNotExists: false } } : {}),
+      });
       return message.id;
     } catch (error) { throw deliveryError(error); }
   }

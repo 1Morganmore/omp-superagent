@@ -1317,6 +1317,12 @@ route와 원래 source를 보존하고 동일 결과를 lane/head 양쪽에서 �
   저장된 출력 원문과 나머지 markdown·기존 fence 내용은 그대로 둔다. Slack은 upload URL 발급 → 바이트 업로드 →
   `files.completeUploadExternal`로 원래 목적지에 게시한다. Telegram·Slack SDK의 mutation 자동 재시도는 끄며
   전송 결과가 불확실하면 성공이나 안전한 재실행으로 가정하지 않는다.
+- Discord 출력은 원래 사용자 source의 실제 메시지와 같은 물리 대화에 전송할 때 native
+  reply reference를 붙인다. handoff/report도 durable source 연결을 따르며 새 스레드로
+  보낸 출력·interaction 전용 입력에는 다른 채널의 message ID나 interaction ID를 넣지 않는다.
+  reply reference는 outbox의 불변 신원이며 이전 queued 출력에는 소급 생성하지 않는다.
+  원문 삭제는 Discord의 `failIfNotExists: false`로 처리하고 다시 전송하지 않는다. 원문 작성자
+  mention은 비활성화하며 긴 출력의 단일 첨부 정책은 유지한다.
 
 `prompt_result`와 `session_settled`는 요청의 산출물 검증을 대신하지 않는다.
 직접 작업과 위임 작업 모두 완료 조건에 맞는 근거를 확인한다.

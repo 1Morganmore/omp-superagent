@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-  physicalRouteKey, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
+  physicalRoute, physicalRouteKey, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
   type OutputRecord, type Route, type StorePort, type WorkflowActivation,
   type HeadRecoveryAttempt, type HeadRecoveryEffect,
 } from "./contracts.ts";
@@ -54,7 +54,7 @@ const SCHEMA = `
     source_id TEXT NOT NULL, route TEXT NOT NULL, text TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending'
       CHECK(state IN ('pending','sending','sent','uncertain','failed')),
-    remote_id TEXT, error TEXT
+    remote_id TEXT, error TEXT, reply_to TEXT
   );
   CREATE INDEX IF NOT EXISTS outputs_queue ON outputs(state, sequence);
   CREATE TABLE IF NOT EXISTS approvals (
@@ -77,6 +77,7 @@ interface OutputRow {
   id: string;
   source_id: string;
   route: string;
+  reply_to: string | null;
   text: string;
   state: OutputRecord["state"];
   remote_id: string | null;
@@ -91,6 +92,7 @@ const toInput = (row: InputRow): InputRecord => {
 };
 const toOutput = (row: OutputRow): OutputRecord => ({
   id: row.id, sourceId: row.source_id, route: JSON.parse(row.route) as Route,
+  ...(row.reply_to === null ? {} : { replyTo: JSON.parse(row.reply_to) as NonNullable<OutputRecord["replyTo"]> }),
   text: row.text, state: row.state, remoteId: row.remote_id, error: row.error,
 });
 const toApproval = (row: ApprovalRow): Approval => ({
@@ -168,6 +170,8 @@ export class Store implements StorePort {
       db.run("PRAGMA synchronous = FULL");
       db.run("PRAGMA foreign_keys = ON");
       db.run(SCHEMA);
+      const outputColumns = db.query("PRAGMA table_info(outputs)").all() as Array<{ name: string }>;
+      if (!outputColumns.some(column => column.name === "reply_to")) db.run("ALTER TABLE outputs ADD COLUMN reply_to TEXT");
       this.db = db;
       this.writerLock = lock;
     } catch (error) {
@@ -231,6 +235,15 @@ export class Store implements StorePort {
   input(id: string): InputRecord | null {
     const row = this.db.query("SELECT * FROM inputs WHERE id = ?").get(id) as InputRow | null;
     return row ? toInput(row) : null;
+  }
+
+  ownerSource(id: string): InputRecord | null {
+    let source = this.input(id);
+    while (source && this.getMeta(`user-source:${source.id}`) !== "true") {
+      const linked = this.getMeta(`handoff-source:${source.id}`) ?? this.getMeta(`activity-source:${source.id}`);
+      source = linked ? this.input(linked) : null;
+    }
+    return source;
   }
 
   inputs(target?: string): InputRecord[] {
@@ -550,15 +563,29 @@ export class Store implements StorePort {
       const existing = this.output(output.id);
       if (existing) {
         if (existing.sourceId !== output.sourceId || routeKey(existing.route) !== routeKey(output.route)
-          || existing.text !== output.text) throw new Error(`Output identity conflict: ${output.id}`);
+          || existing.text !== output.text || output.replyTo !== undefined && (!existing.replyTo
+            || existing.replyTo.messageId !== output.replyTo.messageId
+            || physicalRouteKey(existing.replyTo.route) !== physicalRouteKey(output.replyTo.route))) {
+          throw new Error(`Output identity conflict: ${output.id}`);
+        }
         return false;
       }
       const source = this.input(output.sourceId);
       if (source && routeKey(source.route) !== routeKey(output.route)) {
         throw new Error(`Output route differs from its source: ${output.id}`);
       }
-      return this.db.query("INSERT INTO outputs(id, source_id, route, text) VALUES (?, ?, ?, ?)")
-        .run(output.id, output.sourceId, JSON.stringify(output.route), output.text).changes === 1;
+      // Synthetic handoffs/reports can carry a copied messageId on a different
+      // route. Follow only durable source links, never that copy or ReplyContext.
+      const original = this.ownerSource(output.sourceId);
+      const replyTo = original?.route.platform === "discord" && original.messageId
+        && physicalRouteKey(original.route) === physicalRouteKey(output.route)
+        ? { route: physicalRoute(original.route), messageId: original.messageId } : undefined;
+      if (output.replyTo !== undefined && (!replyTo || output.replyTo.messageId !== replyTo.messageId
+        || physicalRouteKey(output.replyTo.route) !== physicalRouteKey(replyTo.route))) {
+        throw new Error(`Output reply differs from its source: ${output.id}`);
+      }
+      return this.db.query("INSERT INTO outputs(id, source_id, route, text, reply_to) VALUES (?, ?, ?, ?, ?)")
+        .run(output.id, output.sourceId, JSON.stringify(output.route), output.text, replyTo ? JSON.stringify(replyTo) : null).changes === 1;
     }).immediate();
   }
 

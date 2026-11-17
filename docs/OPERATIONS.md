@@ -917,6 +917,11 @@ Telegram은 인증한 승인 카드의 account·실제 chat/thread·메시지 ID
 새 작업으로 접수되지 않게 한다. 닫힌 dialog의 별도 진행 메타데이터에서는 부분 ask 선택·자유
 입력 답안을 제거한다. 이는 원래 native 세션이나 이미 접수된 기록 전체를 삭제한다는 뜻은 아니다.
 
+Discord의 일반 출력은 원래 사용자 메시지와 같은 물리 대화일 때 그 메시지에 답장한다.
+새 스레드로 보낸 결과나 실제 메시지가 없는 slash interaction에는 reply reference를 넣지 않는다.
+삭제된 원문은 Discord의 단일 전송 요청에서 허용하며 실패 뒤 중복 전송하지 않는다.
+작성자 mention은 끄고 긴 출력은 기존처럼 단일 텍스트 첨부로 보낸다.
+
 ```sh
 bun --no-env-file src/cli.ts stop LANE_ID --config config.local.json
 bun --no-env-file src/cli.ts stop main --config config.local.json

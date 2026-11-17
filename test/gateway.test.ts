@@ -710,6 +710,25 @@ test("legacy generic error receipts recover inboxes while all pre-migration pend
   expect(recovered.hasPendingAnswer("legacy-pending", route)).toBe(true);
 });
 
+test("Gateway forwards same-physical-route replies and rejects foreign references before adapter delivery", async () => {
+  const f = await fixture();
+  const client = f.client();
+  await client.start({ message: async () => {}, answer: async () => {} });
+  const destination: Route = { ...route, platform: "discord", guildId: "guild", channelId: "parent", threadId: "thread" };
+  const output: OutputRecord = { id: "linked-output", sourceId: "source", route: destination,
+    replyTo: { route: destination, messageId: "101" }, text: "answer", state: "sending", remoteId: null, error: null };
+  await client.send(output);
+  expect(f.messenger.sends).toEqual([output]);
+  for (const patch of [
+    { platform: "slack" as const }, { accountId: "foreign" }, { authorityId: "foreign" },
+    { guildId: "foreign" }, { channelId: "foreign" }, { threadId: null },
+  ]) {
+    await expect(client.send({ ...output, replyTo: { route: { ...destination, ...patch }, messageId: "101" } }))
+      .rejects.toMatchObject({ certainty: "rejected" });
+  }
+  expect(f.messenger.sends).toHaveLength(1);
+});
+
 test("mutations retain certainty/retry-after and duplicate request ids never repeat an external effect", async () => {
   const f = await fixture();
   const client = f.client();

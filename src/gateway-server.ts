@@ -330,6 +330,18 @@ export class GatewayServer {
     let result: GatewayResult;
     try {
       const messenger = this.options.messenger;
+      if (operation === "send") {
+        const output = record(args[0]);
+        if (output.replyTo !== undefined) {
+          const reply = record(output.replyTo);
+          const source = record(reply.route);
+          const destination = record(output.route);
+          if (destination.platform !== "discord" || typeof reply.messageId !== "string" || !/^[0-9]{1,20}$/.test(reply.messageId)
+            || ["platform", "accountId", "authorityId", "guildId", "channelId", "threadId"].some(key => source[key] !== destination[key])) {
+            throw new DeliveryError("Discord reply requires a real message in the exact destination conversation", "rejected");
+          }
+        }
+      }
       if (operation === "setActivity" && args[1] !== "received" && args[1] !== "thinking" && args[1] !== "idle")
         throw new DeliveryError("Invalid message activity", "rejected");
       if (operation === "setActivity" && (typeof record(args[0]).messageId !== "string" || !record(args[0]).messageId))

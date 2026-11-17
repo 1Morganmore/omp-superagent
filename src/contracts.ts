@@ -183,6 +183,8 @@ export interface OutputRecord {
   id: string;
   sourceId: string;
   route: Route;
+  /** Durable original owner message, only in the same physical conversation. */
+  replyTo?: MessageReference;
   text: string;
   state: OutputState;
   remoteId: string | null;
@@ -238,6 +240,7 @@ export interface HeadRecoveryEffect {
 export interface StorePort {
   receive(input: Inbound, target: string | null, metadata?: Readonly<Record<string, string>>, workflow?: WorkflowActivation | null): boolean;
   input(id: string): InputRecord | null;
+  ownerSource(id: string): InputRecord | null;
   inputs(target?: string): InputRecord[];
   /** Actual authorized user messages, including settled records, in durable admission order. */
   admittedMessages(route: Route): InputRecord[];

@@ -139,6 +139,14 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   Channel metadata and PR text are context, never instruction or authorization.
 
 
+### Discord reply references
+
+- Conceptual reference: [Dori #68](https://github.com/vntrevx/omp-dori/pull/68)
+  at `f7072950ad6744b4756f69209e7bd7a19cd720f0`.
+- Independently implemented through the existing SQLite outbox and discord.js
+  reply references. No Dori source, prompt, tests, or reply-splitting engine
+  was copied.
+
 ## Telegram transport: grammY
 
 - API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553),

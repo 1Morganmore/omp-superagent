@@ -18,6 +18,7 @@ const output = (text: string, destination = route): OutputRecord => ({ id: "outp
 
 class RemoteMessage {
   author = { id: bot, bot: true };
+  reference: string | null = null;
   components: { components: { customId: string }[] }[] = [];
   edits: unknown[] = [];
   editFailure: unknown;
@@ -33,6 +34,7 @@ class RemoteMessage {
 
 class Channel {
   sent: MessageCreateOptions[] = [];
+  deletedMessages = new Set<string>();
   remote = new Map<string, RemoteMessage>();
   fetched: unknown[] = [];
   history = new Collection<string, Message>();
@@ -49,7 +51,12 @@ class Channel {
   async send(payload: MessageCreateOptions) {
     this.sent.push(payload);
     if (this.failure) throw this.failure;
+    const reference = typeof payload.reply?.messageReference === "string" ? payload.reply.messageReference : null;
+    if (reference && this.deletedMessages.has(reference) && payload.reply?.failIfNotExists !== false) {
+      throw Object.assign(new Error("Unknown message"), { code: 10008, status: 404 });
+    }
     const message = new RemoteMessage(`remote-${this.sent.length}`, this.id, this.guildId, payload);
+    message.reference = reference && !this.deletedMessages.has(reference) ? reference : null;
     this.remote.set(message.id, message);
     return message;
   }
@@ -430,6 +437,23 @@ describe("Discord routing and parsing", () => {
 });
 
 describe("Discord application commands", () => {
+  test("application command results use ordinary unlinked output, never the interaction snowflake", async () => {
+    const { messenger, gateway, channel, received } = await fixture();
+    const store = new Store(":memory:");
+    try {
+      gateway.emit(Events.InteractionCreate, commandInteraction(channel, { id: "201" }));
+      await drain();
+      const source = received[0]!;
+      store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+      store.settle(source.id, "done", { id: "command-answer", text: "status" });
+      await messenger.send(store.outputs()[0]!);
+      expect(channel.sent).toHaveLength(1);
+      expect(channel.sent[0]?.content).toBe("status");
+      expect(channel.sent[0]?.reply).toBeUndefined();
+      expect(channel.remote.get("remote-1")?.reference).toBeNull();
+    } finally { store.close(); await messenger.stop(); }
+  });
+
   test("normalizes supported options and preserves the original channel, thread, or owner DM route", async () => {
     const { messenger, gateway, channel, received } = await fixture();
     const thread = new Channel("thread", "guild", "parent");
@@ -774,17 +798,80 @@ describe("Discord attachment credential boundary", () => {
 });
 
 describe("Discord output delivery", () => {
+  test("ordinary HEAD output replies to its stored original message, never quoted context or latest intake", async () => {
+    const { messenger, channel } = await fixture();
+    const store = new Store(":memory:");
+    try {
+      const source = messenger.normalize(inbound(channel, { id: "101" }))!;
+      source.reply = { messageId: "999", authorId: "stranger", text: "quoted instructions" };
+      store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+      const newer = messenger.normalize(inbound(channel, { id: "102" }))!;
+      store.receive(newer, "main", { [`user-source:${newer.id}`]: "true" });
+      store.settle(source.id, "done", { id: "ordinary-answer", text: "Answer @everyone" });
+      await messenger.send(store.outputs()[0]!);
+      expect(channel.remote.get("remote-1")?.reference).toBe("101");
+      expect(channel.sent[0]?.reply).toEqual({ messageReference: "101", failIfNotExists: false });
+      expect(channel.sent[0]?.allowedMentions).toEqual({ parse: [], repliedUser: false });
+      expect(channel.sent[0]?.nonce).toBe(discordNonce("ordinary-answer", route));
+      expect(channel.sent[0]?.enforceNonce).toBe(true);
+    } finally { store.close(); await messenger.stop(); }
+  });
+
+  test("deleted original messages can send unlinked in one native attempt without fetching or retrying", async () => {
+    const { messenger, channel } = await fixture();
+    channel.deletedMessages.add("101");
+    await messenger.send({ ...output("answer"), replyTo: { route, messageId: "101" } });
+    expect(channel.remote.get("remote-1")?.reference).toBeNull();
+    expect(channel.sent).toHaveLength(1);
+    expect(channel.fetched).toEqual([]);
+    expect(channel.sent[0]?.reply).toEqual({ messageReference: "101", failIfNotExists: false });
+    await messenger.stop();
+  });
+
+  test.each([
+    { failure: Object.assign(new Error("Unknown message"), { status: 404, code: 10008 }), certainty: "rejected" },
+    { failure: Object.assign(new Error("lost receipt"), { status: 503 }), certainty: "uncertain" },
+  ])("linked sends preserve $certainty failure certainty without a second unlinked send", async ({ failure, certainty }) => {
+    const { messenger, channel } = await fixture();
+    channel.failure = failure;
+    await expect(messenger.send({ ...output("answer"), replyTo: { route, messageId: "101" } })).rejects.toMatchObject({ certainty });
+    expect(channel.sent).toHaveLength(1);
+    expect(channel.sent[0]?.reply?.messageReference).toBe("101");
+    await messenger.stop();
+  });
+
+  test.each([
+    { platform: "slack" as const }, { accountId: "foreign" }, { authorityId: "foreign" },
+    { guildId: "foreign" }, { channelId: "foreign" }, { threadId: "foreign" },
+  ])("foreign reply route $platform $accountId $authorityId $guildId $channelId $threadId is rejected before transport", async patch => {
+    const { messenger, channel, gateway } = await fixture();
+    await expect(messenger.send({ ...output("answer"), replyTo: { route: { ...route, ...patch }, messageId: "101" } }))
+      .rejects.toMatchObject({ certainty: "rejected" });
+    expect(channel.sent).toEqual([]);
+    expect(gateway.lookups).toEqual([]);
+    await messenger.stop();
+  });
+
+  test.each(["", "interaction:201", "101:invocation"])("non-message reply identity %s is rejected before transport", async messageId => {
+    const { messenger, channel } = await fixture();
+    await expect(messenger.send({ ...output("answer"), replyTo: { route, messageId } })).rejects.toMatchObject({ certainty: "rejected" });
+    expect(channel.sent).toEqual([]);
+    await messenger.stop();
+  });
+
   test("long output is one attachment with stable scoped nonce and no mentions", async () => {
     const { messenger, channel, gateway } = await fixture();
     const thread = new Channel("thread", "guild", "parent");
     gateway.channelMap.set(thread.id, thread);
     const target = { ...route, threadId: "thread" };
-    const receipt = await messenger.send(output("@everyone " + "x".repeat(2000), target));
+    const receipt = await messenger.send({ ...output("@everyone " + "x".repeat(2000), target),
+      replyTo: { route: target, messageId: "101" } });
     expect(receipt).toBe("remote-1");
     expect(channel.sent).toHaveLength(0);
     expect(thread.sent).toHaveLength(1);
     expect(thread.sent[0]!.allowedMentions).toEqual({ parse: [], repliedUser: false });
     expect(thread.sent[0]!.files).toHaveLength(1);
+    expect(thread.sent[0]!.reply).toEqual({ messageReference: "101", failIfNotExists: false });
     expect(thread.sent[0]!.nonce).toBe(discordNonce("output", target));
     expect(thread.sent[0]!.enforceNonce).toBe(true);
     expect(discordNonce("output", target, 1)).not.toBe(discordNonce("output", target));

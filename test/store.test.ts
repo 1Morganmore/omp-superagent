@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -939,6 +940,103 @@ describe("durable coordination store", () => {
     expect(reopened.outputs().filter(output => output.sourceId === "request")).toHaveLength(1);
     expect(reopened.queueOutput({ id: "request:answer", sourceId: "request", route: route(), text: "answer" })).toBe(false);
     expect(() => reopened.queueOutput({ id: "request:answer", sourceId: "request", route: route(), text: "changed" })).toThrow();
+  });
+
+  test("linked output identity survives reopen and retry and rejects a replacement reply target", () => {
+    const { store, path } = fixture();
+    const source = { ...inbound("reply-source"), messageId: "101" };
+    store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+    store.settle(source.id, "done", { id: "reply-output", text: "answer" });
+    expect(store.claimOutput("reply-output")).toBe(true);
+    store.finishOutput("reply-output", "uncertain");
+    store.close();
+    const recovered = open(path);
+    recovered.finishOutput("reply-output", "pending");
+    expect(recovered.outputs()[0]?.replyTo).toEqual({ route: source.route, messageId: "101" });
+    const retry = { id: "reply-output", sourceId: source.id, route: source.route, text: "answer" };
+    expect(recovered.queueOutput(retry)).toBe(false);
+    expect(recovered.queueOutput({ ...retry, replyTo: { route: source.route, messageId: "101" } })).toBe(false);
+    expect(() => recovered.queueOutput({ ...retry, replyTo: { route: source.route, messageId: "102" } })).toThrow("identity conflict");
+    expect(() => recovered.queueOutput({ ...retry, replyTo: { route: route({ channelId: "other" }), messageId: "101" } })).toThrow("identity conflict");
+    expect(() => recovered.queueOutput({ ...retry, id: "forged-new", replyTo: { route: source.route, messageId: "102" } })).toThrow("reply differs from its source");
+  });
+
+  test.each(["interaction", "invocation", "unlinked-synthetic"] as const)("outputs do not turn %s identity into a source message", kind => {
+    const { store } = fixture();
+    const source: Inbound = {
+      ...inbound("not-a-message", kind === "invocation" ? route({ platform: "slack" }) : route()),
+      messageId: kind === "unlinked-synthetic" ? "copied-message" : null,
+      ...(kind === "interaction" ? { interactionId: "201" } : {}),
+      ...(kind === "invocation" ? { invocationId: createHash("sha256").update("slack-invocation").digest("hex") } : {}),
+      reply: { messageId: "999", authorId: "owner", text: "untrusted quote" },
+    };
+    store.receive(source, "main", kind === "unlinked-synthetic" ? {} : { [`user-source:${source.id}`]: "true" });
+    store.settle(source.id, "done", { id: "unlinked-answer", text: "answer" });
+    expect(store.outputs()[0]?.replyTo).toBeUndefined();
+  });
+
+  test("logical Discord DM topics retain a reply to the same physical owner conversation", () => {
+    const { store } = fixture();
+    const destination = route({ guildId: null, channelId: "owner-dm", threadId: null, topicId: "work-topic" });
+    const source = { ...inbound("dm-source", destination), messageId: "101" };
+    store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+    store.settle(source.id, "done", { id: "dm-answer", text: "answer" });
+    expect(store.output("dm-answer")?.replyTo).toEqual({
+      route: route({ guildId: null, channelId: "owner-dm", threadId: null }), messageId: "101",
+    });
+    expect(store.output("dm-answer")?.route).toEqual(destination);
+  });
+
+  test.each([false, true])("source-linked reports only reply when delivered to the original physical conversation (new thread: %s)", newThread => {
+    const { store, path } = fixture();
+    const source = { ...inbound("original", route({ threadId: null })), messageId: "101" };
+    store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+    const handoff = { ...source, id: `handoff:${source.id}:lane`, route: route({ threadId: "selected" }) };
+    store.receive(handoff, null, { [`handoff-source:${handoff.id}`]: source.id });
+    const managed = store.createLane(lane("report-lane", handoff.route), handoff.id);
+    if (newThread) store.setMeta(`head-delivery:${source.id}`, JSON.stringify({
+      source: source.route, destination: managed.route, laneId: managed.id,
+    }));
+    store.submit(handoff.id, "lane-native", 0);
+    store.settle(handoff.id, "done", { id: "lane-result", text: "Completed lane observation" });
+    store.close();
+    const recovered = open(path);
+    const report = recovered.input(`report:${handoff.id}`)!;
+    expect(report.messageId).toBe("101"); // Copied identity must not authorize a cross-channel reply.
+    recovered.settle(report.id, "done", { id: "report-answer", text: "HEAD synthesis" });
+    expect(recovered.output("report-answer")?.replyTo).toEqual(newThread ? undefined : { route: source.route, messageId: "101" });
+    expect(recovered.output("report-answer")?.route).toEqual(newThread ? managed.route : source.route);
+  });
+
+  test("old SQLite queued outputs migrate without acquiring a new reply identity on replay", () => {
+    const directory = mkdtempSync(join(tmpdir(), "omp-superagent-legacy-output-"));
+    directories.push(directory);
+    const path = join(directory, "coordination.sqlite");
+    const legacy = new Database(path);
+    legacy.run(`CREATE TABLE outputs (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+      source_id TEXT NOT NULL, route TEXT NOT NULL, text TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending', remote_id TEXT, error TEXT
+    )`);
+    legacy.query("INSERT INTO outputs(id,source_id,route,text) VALUES (?,?,?,?)")
+      .run("legacy-answer", "original", JSON.stringify(route()), "answer");
+    legacy.close();
+    const store = open(path);
+    const source = { ...inbound("original"), messageId: "101" };
+    store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+    expect(store.outputs()).toEqual([{
+      id: "legacy-answer", sourceId: source.id, route: source.route, text: "answer",
+      state: "pending", remoteId: null, error: null,
+    }]);
+    expect(store.queueOutput({ id: "legacy-answer", sourceId: source.id, route: source.route, text: "answer" })).toBe(false);
+    expect(() => store.queueOutput({
+      id: "legacy-answer", sourceId: source.id, route: source.route, text: "answer",
+      replyTo: { route: source.route, messageId: "101" },
+    })).toThrow("identity conflict");
+    store.claimOutput("legacy-answer");
+    store.finishOutput("legacy-answer", "failed");
+    store.finishOutput("legacy-answer", "pending");
+    expect(store.output("legacy-answer")?.replyTo).toBeUndefined();
   });
 
   test("lane settlement and its full head report commit atomically without an external output", () => {
