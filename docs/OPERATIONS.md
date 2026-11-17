@@ -19,7 +19,7 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 
 헤드만 `lane_models`, `lane_init_presets`, `lane_start`, `lane_set_model`,
 `lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`,
-`thread_inspect`, `lane_thread_update`,
+`thread_inspect`, `lane_thread_update`, `pr_watch`, `pr_watch_list`,
 `discord_context`, `discord_purpose_list`, `discord_purpose_set`, `discord_purpose_clear`를 사용한다.
 `lane_inspect({})`가 목록 조회다. 레인에는 관리 권한을, native 자식에는 관리·게시판 권한을 주지 않는다.
 일반 OMP에 이 확장들을 전역 설치하지 않는다. 도구 인자·역할 경계는
@@ -30,6 +30,33 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 - `skill://superagent-lane`: 범위 내 직접 작업·부분 위임·검증·보고. 상세 workflow는 필요할 때 읽는다.
 - native discovery를 사용하므로 현재 cwd와 무관하게 위 URI를 읽을 수 있다. 사용자·프로젝트
   스킬을 덮어쓰지 않는다. `--no-skills`는 이 URI 기반 운영 흐름에서 사용하지 않는다.
+
+### PR 후속 추적
+
+헤드에 PR URL과 관찰 주기를 알려 추적을 요청한다. `pr_watch`는 `action: "track"`,
+`ref`(GitHub PR URL 또는 `owner/repo#번호`), 실제 원본 `sourceId`,
+`intervalSeconds`를 받는다. 선택적인 `laneId`는 기존 레인과의 정보상 연결이며,
+`ignoreAuthors`는 알림에서 제외할 GitHub login 목록이다. 예를 들어 300초마다
+리뷰·CI 변경을 확인하도록 요청할 수 있다. 자동 등록이나 기본 관찰 주기는 없다.
+
+`pr_watch_list({})`로 등록·기준 head/state·다음 확인 시각·오류·보류를 조회하고,
+`pr_watch({action: "untrack", ref, sourceId})`로 추적을 끝낸다. 이들은 HEAD의 native
+도구이지 메신저 slash command나 셸 명령이 아니다.
+
+- 별도 설치된 `gh`가 HEAD 환경의 PATH에 있어야 하고 `github.com` 읽기 인증이 필요하다.
+  기존 `gh` 인증을 쓰며 자체 토큰 저장이나 로그인은 하지 않는다. Enterprise 호스트는 지원하지 않는다.
+- 첫 성공 조회는 기준점만 저장한다. 이후 새 리뷰·댓글, 리뷰 상태 변경, 현재 head의 CI 실패·재실패,
+  외부/불명 head 변경, PR 종료·재개·병합을 원래 등록 대화의 HEAD 입력으로 전달한다.
+  본인 댓글·본인만의 push와 이미 관측한 항목은 반복 알리지 않는다.
+- 레인이 완료·비상주가 되어도 HEAD runtime의 일반 코드가 조회한다. 변화가 없으면 모델 턴을
+  만들지 않는다. HEAD/Gateway가 꺼져 있는 동안에는 조회하지 않으며 다시 시작하면 저장한
+  기준점과 비교한다. GitHub가 조회 사이 삭제한 정보까지 복원하는 이벤트 보관 서비스는 아니다.
+- 변경 알림과 cursor는 같은 SQLite 트랜잭션으로 기록한다. 조회 실패는 기준점을 바꾸지 않고
+  동일 오류의 반복 알림을 억제한다. 병합된 PR은 조회를 끝내며, 미병합 종료는 재개를 관찰한다.
+- `/stop head`는 기존 추적의 자동 깨우기도 보류한다. 이후 별도 사용자 요청으로 다시 등록해야
+  기준점을 새로 잡는다. 추적 해제·등록 변경과 경합한 이전 조회는 결과를 반영하지 않는다.
+- 관측은 승인이나 작업 재개가 아니다. HEAD가 의미를 판단하며 레인 자동 재개, 댓글, push,
+  merge는 하지 않는다. 기존 pause·승인·불확실성 보류를 유지한다.
 
 ### Discord 채널 문맥과 용도 메모
 

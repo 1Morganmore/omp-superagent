@@ -371,7 +371,7 @@ function delegated(store: Store, sourceId: string) {
   return store.input(`handoff:${sourceId}:${lane.id}`);
 }
 
-function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], presetAdapters: Pick<RuntimeAdapters, "inspectPresets" | "resolvePreset" | "requestRestart"> = {}) {
+function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], presetAdapters: Pick<RuntimeAdapters, "inspectPresets" | "resolvePreset" | "requestRestart" | "readPrSnapshot"> = {}) {
   const directory = realpathSync(mkdtempSync("/tmp/sa-runtime-"));
   const config: Config = {
     path: join(directory, "config.json"), stateDir: directory, headCwd: directory,
@@ -435,6 +435,74 @@ function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], pre
   fixtures.push({ runtime, directory });
   return { runtime, config, directory, store, messenger, main, hosts, launched, errors, launchBehavior, nativePresets, persistedPresets, presetPersistence };
 }
+
+test("PR feedback after lane closure reaches only HEAD and its registered conversation", async () => {
+  let reads = 0;
+  const { runtime, store, main, messenger, launched, directory, hosts } = fixture(3, undefined, {
+    readPrSnapshot: async () => {
+      reads++;
+      return { head: "a".repeat(40), state: "open", mergedSha: null, self: "owner", headChange: "unknown", failures: [],
+        feedback: reads === 1 ? [] : [{ key: "review:1", actor: "reviewer", kind: "review",
+          url: "https://github.com/example/project/pull/7#review", text: "Please correct the parsing boundary." }] };
+    },
+  });
+  await runtime.start();
+  const original = message("pr-owner", route());
+  store.receive(original, "main", { "user-source:pr-owner": "true" });
+  store.settle(original.id, "done");
+  const lane = await runtime.startLane({ ...selection, sourceId: original.id, title: "PR work",
+    kickoff: "Implement and verify the requested change.", cwd: directory });
+  await runtime.kick();
+  const laneHost = hosts.get(lane.socketPath);
+  if (!laneHost) throw new Error("Expected managed lane host");
+  await laneHost.whenPrompts(1);
+  laneHost.complete("PR prepared");
+  await main.whenPrompts(1);
+  laneHost.shutdownDisconnect = true;
+  await runtime.closeLane(lane.id, "completed", "Change checked and PR opened.");
+  // Existing lane-report delivery is independent of the new PR observation.
+  const beforeResult = messenger.sent.length;
+  main.complete("Lane result received");
+  await messenger.whenSent(beforeResult + 1);
+  await runtime.kick();
+  const initialPrompts = main.prompts.length;
+  const initialLaunches = launched.length;
+  const initialMessages = messenger.sent.length;
+  const delivered = main.whenPrompts(initialPrompts + 1);
+  runtime.watchPr({ action: "track", ref: "example/project#7", sourceId: original.id, laneId: lane.id, intervalSeconds: 1 });
+  await delivered;
+  const prompt = main.prompts.at(-1)?.command;
+  expect(String(prompt?.message)).toContain("PR_FEEDBACK");
+  expect(String(prompt?.message)).toContain("Please correct the parsing boundary.");
+  expect(prompt?.streamingBehavior).toBeUndefined();
+  expect(launched).toHaveLength(initialLaunches);
+  expect(store.lane(lane.id)?.workState).toBe("completed");
+  expect(messenger.sent).toHaveLength(initialMessages);
+  main.complete("A reviewer requested a parsing correction.");
+  await messenger.whenSent(initialMessages + 1);
+  expect(messenger.sent.at(-1)?.route).toEqual(original.route);
+}, 10_000);
+
+test("runtime shutdown aborts and joins an in-flight PR read without a late observation", async () => {
+  const started = Promise.withResolvers<void>();
+  let aborted = false;
+  const { runtime, store, main } = fixture(3, undefined, {
+    readPrSnapshot: async (_ref, { signal }) => {
+      started.resolve();
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => { aborted = true; reject(new Error("Read aborted")); }, { once: true });
+      });
+    },
+  });
+  await runtime.start();
+  store.receive(message("pr-stop"), "main", { "user-source:pr-stop": "true" });
+  store.settle("pr-stop", "done");
+  runtime.watchPr({ action: "track", ref: "example/project#7", sourceId: "pr-stop", intervalSeconds: 1 });
+  await started.promise;
+  await runtime.stop();
+  expect(aborted).toBe(true);
+  expect(main.prompts).toHaveLength(0);
+}, 10_000);
 
 describe("source-bound Discord topic management", () => {
   test("selected forum tags reach capability and creation and conflicting source retries never create again", async () => {

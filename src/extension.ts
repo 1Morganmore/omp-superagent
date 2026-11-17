@@ -12,6 +12,7 @@ import { sameLaneModel } from "./lane-models";
 import { NativePresetManager } from "./native-presets";
 import { publishNativeSession } from "./native-sessions";
 import { MODEL_PRESET_NAMES, WORKFLOW_NAMES } from "./contracts";
+import type { PrWatchCommand } from "./pr-watch";
 
 function readHeadReferences(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
@@ -36,6 +37,7 @@ const managerTools: Record<string, true> = {
   lane_pause: true, lane_resume: true, lane_close: true,
   thread_inspect: true, lane_thread_update: true,
   discord_context: true, discord_purpose_list: true, discord_purpose_set: true, discord_purpose_clear: true,
+  pr_watch: true, pr_watch_list: true,
 };
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
@@ -191,6 +193,37 @@ export default function superagentExtension(pi: ExtensionAPI): void {
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) { return result(await requireRuntime(ctx).startLane(params)); },
+  });
+  pi.registerTool({
+    name: "pr_watch_list", label: "Inspect tracked pull requests", approval: "read",
+    description: "List explicitly tracked GitHub PRs, original source/lane, cadence, last baseline, errors and stop holds. Read-only status, not proof of current GitHub state. No tracking or network read is started.",
+    parameters: Type.Object({}, { additionalProperties: false }),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      return result(requireRuntime(ctx).listPrWatches());
+    },
+  });
+  pi.registerTool({
+    name: "pr_watch", label: "Track pull request changes", approval: "exec",
+    description: "Explicit original-user-source registration or removal of GitHub.com PR follow-up. track requires ref (PR URL or owner/repo#N), sourceId and an explicit intervalSeconds; optional laneId is informational and ignoreAuthors excludes logins. First successful read is a quiet baseline. Ordinary code observes reviews/comments, current-head CI failures, external head movement and state changes, durably reporting to HEAD on the original registration conversation even after lane completion. No automatic lane resume, comments, pushes or merges. Uses installed gh authentication. /stop head holds existing watches until a new source-bound registration. Replaying an old mutation returns its historical receipt, not renewed tracking.",
+    // Keep all keys in the object grammar: native argument repair otherwise
+    // drops branch-local unknowns before enforcing the action's constraints.
+    parameters: Type.Unsafe<PrWatchCommand>({
+      type: "object",
+      properties: {
+        action: Type.Union([Type.Literal("track"), Type.Literal("untrack")]),
+        ref: Type.String({ minLength: 1 }), sourceId: Type.String({ minLength: 1 }),
+        intervalSeconds: Type.Integer({ minimum: 1, maximum: Math.floor(Number.MAX_SAFE_INTEGER / 1000) }),
+        laneId: Type.String({ minLength: 1 }),
+        ignoreAuthors: Type.Array(Type.String({ pattern: "^[a-zA-Z0-9_\\[\\]-]+$", minLength: 1, maxLength: 100 })),
+      },
+      required: ["action", "ref", "sourceId"], additionalProperties: false,
+      if: { properties: { action: { const: "track" } } },
+      then: { required: ["intervalSeconds"] },
+      else: { not: { anyOf: ["intervalSeconds", "laneId", "ignoreAuthors"].map(name => ({ required: [name] })) } },
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(requireRuntime(ctx).watchPr(params));
+    },
   });
   pi.registerTool({
     name: "thread_inspect", label: "Inspect Discord forum or thread", approval: "read",

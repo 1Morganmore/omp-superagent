@@ -18,6 +18,8 @@ import { repositoryRoot } from "./repository";
 import { parseLaneReportResult } from "./lane-report";
 import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "./contracts";
 import { headRecoveryEvidence } from "./head-recovery";
+import { PrWatcher, type PrWatchCommand } from "./pr-watch";
+import type { readPrSnapshot } from "./pr-github";
 
 const key = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 24);
 const dialogs = new Set(["select", "confirm", "input", "editor", "ask"]);
@@ -64,6 +66,7 @@ export interface RuntimeAdapters {
   inspectPresets?: () => Promise<NativePresetInspection>;
   persistPreset?: (selection: ResolvedLanePreset) => Promise<LanePresetSnapshot>;
   requestRestart?: (request: GatewayRestartRequest) => Promise<GatewayRestartRecord>;
+  readPrSnapshot?: typeof readPrSnapshot;
 }
 interface Live {
   id: string;
@@ -241,6 +244,9 @@ export class Superagent {
   private ready = false;
   private readonly intakeReady = Promise.withResolvers<void>();
   private timer?: NodeJS.Timeout;
+  private readonly prWatcher: PrWatcher;
+  private readonly prAbort = new AbortController();
+  private prObservation?: Promise<void>;
 
   constructor(
     readonly config: Config,
@@ -251,6 +257,7 @@ export class Superagent {
     adapters: Partial<RuntimeAdapters> = {},
   ) {
     this.adapters = { connect, startHost, ...adapters };
+    this.prWatcher = new PrWatcher(store, config, adapters.readPrSnapshot);
     // Adapters that do not consume the optional gate must not cause an unhandled
     // rejection when startup fails before there is any queued intake.
     void this.intakeReady.promise.catch(() => {});
@@ -343,9 +350,13 @@ export class Superagent {
       await this.flushOutputs();
       await this.reconcileHeadRecovery();
       for (const live of this.live.values()) if (live.input) await this.finish(live);
-      this.timer = setInterval(() => void this.kick().catch(this.report), 1000);
+      this.timer = setInterval(() => {
+        void this.kick().catch(this.report);
+        this.observePrs();
+      }, 1000);
       this.timer.unref?.();
       await this.kick();
+      this.observePrs();
     } catch (error) {
       await this.stop();
       throw error;
@@ -1743,6 +1754,28 @@ export class Superagent {
     const lane = this.store.lane(id);
     if (!lane) throw new Error(`Unknown lane: ${id}`);
     return lane;
+  }
+
+  watchPr(command: PrWatchCommand) {
+    this.assertRestartOpen();
+    if (this.stopped) throw new Error("Controller is stopped");
+    const result = this.prWatcher.change(command);
+    this.observePrs();
+    return result;
+  }
+
+  listPrWatches() {
+    if (this.stopped) throw new Error("Controller is stopped");
+    return this.prWatcher.list();
+  }
+
+  private observePrs(): void {
+    if (!this.ready || this.stopped || this.prObservation || this.restartFence()
+      || this.initializationHoldsHead() || this.headStopping > 0) return;
+    // Slow read-only GitHub I/O cannot hold messenger intake or native dispatch.
+    this.prObservation = this.prWatcher.poll(Date.now(), this.prAbort.signal)
+      .then(() => this.kick()).catch(this.report)
+      .finally(() => { this.prObservation = undefined; });
   }
 
   async inspectThread(sourceId: string, laneId?: string): Promise<ThreadInfo> {
@@ -3962,10 +3995,11 @@ export class Superagent {
     this.ready = false;
     this.intakeReady.reject(new Error("Controller stopped before intake readiness"));
     if (this.timer) clearInterval(this.timer);
+    this.prAbort.abort();
     for (const live of this.live.values()) {
       for (const { input } of live.admitted.values()) this.activity(input, false);
     }
-    await Promise.allSettled([this.pumping, this.outbound, this.catchupTask, ...this.tasks, ...this.operations.values()]);
+    await Promise.allSettled([this.prObservation, this.pumping, this.outbound, this.catchupTask, ...this.tasks, ...this.operations.values()]);
     await this.messenger.stop();
     await Promise.allSettled([...this.live.values()].map(async live => { live.unsubscribe(); await live.connection.close(); }));
     this.live.clear();

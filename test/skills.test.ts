@@ -66,10 +66,11 @@ test.each(cases)("native packaged skills, scoped tools, and preserved selections
       if (kind === "sub" || selection === "narrow") expect(proof.active).not.toContain("lane_report");
       else expect(proof.active).toContain("lane_report");
     } else {
-      expect(Object.keys(proof.schemas).sort()).toEqual(["discord_context", "discord_purpose_clear", "discord_purpose_list", "discord_purpose_set", "head_recovery", "lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start", "lane_thread_update", "thread_inspect"]);
+      expect(Object.keys(proof.schemas).sort()).toEqual(["discord_context", "discord_purpose_clear", "discord_purpose_list", "discord_purpose_set", "head_recovery", "lane_close", "lane_init_presets", "lane_inspect", "lane_message", "lane_models", "lane_pause", "lane_resume", "lane_set_model", "lane_start", "lane_thread_update", "pr_watch", "pr_watch_list", "thread_inspect"]);
       if (kind === "sub") expect(proof.active).not.toContain("head_recovery");
       if (kind === "sub") expect(proof.active).not.toContain("thread_inspect");
       if (kind === "sub") expect(proof.active.some(name => name.startsWith("discord_"))).toBe(false);
+      if (kind === "sub") expect(proof.active.some(name => name.startsWith("pr_watch"))).toBe(false);
       if (kind === "sub") expect(proof.active.some(name => name.startsWith("lane_"))).toBe(false);
       else if (selection === "narrow") expect(proof.active).not.toContain("lane_message");
       else expect(proof.active).toContain("lane_message");

@@ -653,6 +653,29 @@ progress receipt를 통해 헤드에 전달한다. `lane_inspect`와 연결 주�
 보고 도구를 제외하고 실행 시에도 차단한다. 타이머·polling·자동 독촉·재개·종료·새 상태 레지스트리나
 감독용 모델 턴은 추가하지 않는다.
 
+### PR 후속 관측
+
+`src/pr-github.ts`는 설치된 GitHub CLI의 공개 `gh api` GET과 기존 인증을 사용해
+GitHub.com PR·댓글·리뷰·현재 head의 checks/statuses를 페이지 끝까지 읽는다.
+`src/pr-watch.ts`는 HEAD runtime이 소유하는 일반 코드이며 레인 Host나 메신저에
+직접 접근하지 않는다. `pr_watch`로 명시적으로 등록한 PR만 요청한 주기로 관측하고
+`pr_watch_list`로 상태를 조회한다. 일반 레인 완료나 PR 링크를 출력한 것만으로 등록하지 않는다.
+
+기존 `coordination.sqlite` metadata에 원본 user source, 선택적 레인 ID, 등록 세대,
+주기, head/state 기준점, 이미 본 항목 ID와 오류 상태를 보존한다. 외부 본문 전체를 별도
+transcript로 누적하지 않는다. 첫 성공은 조용한 기준점이고, 이후 달라진 정보만 기존
+`Store.receive`로 main에 영속 접수한다. 관측 입력과 cursor 갱신은 같은 트랜잭션이다.
+원래 route·실제 메시지/interaction/invocation 신원을 유지하고 `user-source`를 만들지 않는다.
+GitHub 본문은 안전한 native context 경계 안의 비신뢰 데이터다.
+
+감시는 레인 수명과 분리되지만 HEAD runtime이 없으면 실행되지 않는다. 복구 후 저장한
+기준점과 비교하며 조회 사이의 모든 이벤트를 보존한다고 주장하지 않는다. 일반 maintenance
+주기를 재사용하고 조회를 모델 턴이나 goal로 구현하지 않는다. HEAD 종료 시 진행 중인 읽기를
+취소하고 종료를 기다린다. `/stop head`의 영속 경계가 바뀌면 기존 등록을 보류하며 새 사용자
+요청의 재등록만 다시 허용한다. 조회 중 해제·재등록·원본 취소·권한 변경은 결과를 무효화한다.
+병합은 관찰 종료, 미병합 close는 reopen 관찰로 구분한다. API 실패나 head 경합은 cursor를
+진행시키지 않는다. 내부 관측은 레인 배정·재개·외부 효과의 새로운 권한이 아니다.
+
 ### Discord 채널 문맥
 
 `Inbound.discordContext`는 채널 ID/name/topic, 스레드 ID/name/parent와 로컬 owner purpose를

@@ -24,7 +24,7 @@ const packageRoot = path.resolve(import.meta.dir, "../..");
 const extensionPath = path.join(packageRoot, role === "head" ? "src/extension.ts" : "src/lane-extension.ts");
 const customDirectory = path.join(root, "operator-custom-skills");
 const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update",
-  "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear"];
+  "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear", "pr_watch", "pr_watch_list"];
 const skillSettings = {
   customDirectories: [customDirectory],
   ignoredSkills: ["ignored-*"],
@@ -95,7 +95,9 @@ const { session, extensionsResult } = await createAgentSession({
   modelRegistry: new ModelRegistry(authStorage, path.join(root, "models.yml"), { settings }),
   settings, sessionManager,
   ...(ulwPath ? { model: compositionModel } : {}),
-  additionalExtensionPaths: extensionPaths,
+  additionalExtensionPaths: [...extensionPaths,
+    ...(role === "head" && kind === "main" && selection === "default"
+      ? [path.join(packageRoot, "test/fixtures/pr-native-data.ts")] : [])],
   disableExtensionDiscovery: true,
   contextFiles: [], rules: [], promptTemplates: [], slashCommands: [],
   preloadedCustomToolPaths: [],
@@ -292,6 +294,16 @@ try {
     check("thread_inspect", { sourceId: "source" }, true);
     check("thread_inspect", { sourceId: "source", laneId: "lane" }, true);
     check("thread_inspect", { laneId: "lane" }, false);
+    check("pr_watch_list", {}, true);
+    check("pr_watch", { action: "track", ref: "owner/repo#1", sourceId: "source", intervalSeconds: 300 }, true);
+    check("pr_watch", { action: "track", ref: "owner/repo#1", sourceId: "source", intervalSeconds: 300, laneId: "lane", ignoreAuthors: ["ci[bot]"] }, true);
+    check("pr_watch", { action: "untrack", ref: "owner/repo#1", sourceId: "source" }, true);
+    for (const input of [
+      { action: "track", ref: "owner/repo#1", sourceId: "source" },
+      { action: "track", ref: "owner/repo#1", sourceId: "source", intervalSeconds: 0 },
+      { action: "track", ref: "owner/repo#1", intervalSeconds: 300 },
+      { action: "untrack", ref: "owner/repo#1", sourceId: "source", intervalSeconds: 300 },
+    ]) check("pr_watch", input, false);
     for (const name of ["discord_context", "discord_purpose_list", "discord_purpose_clear"]) {
       check(name, { sourceId: "source" }, true);
       check(name, {}, false);
