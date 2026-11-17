@@ -289,6 +289,21 @@ export interface GatewayRestartNotice {
   reason: string;
 }
 
+export interface ThreadInfo {
+  readonly route: Route;
+  readonly title: string;
+  readonly archived: boolean | null;
+  readonly requiresTag: boolean;
+  readonly availableTags: readonly { readonly id: string; readonly name: string; readonly moderated: boolean }[];
+  readonly appliedTags: readonly string[];
+}
+
+export interface ThreadUpdate {
+  readonly title?: string;
+  readonly appliedTags?: readonly string[];
+  readonly archived?: boolean;
+}
+
 export interface Messenger {
   start(handlers: {
     /** Authenticate first; do not consume inbound events until native approvals are reconciled. */
@@ -307,8 +322,11 @@ export interface Messenger {
   showApproval(approval: Approval): Promise<string>;
   dismissApproval(approval: Approval): Promise<void>;
   /** Read-only authenticated capability probe; false is unsupported, not a failed creation. */
-  canCreateThread?(route: Route): Promise<boolean>;
-  createThread(route: Route, title: string, sourceMessageId?: string): Promise<Route>;
+  canCreateThread?(route: Route, appliedTags?: readonly string[]): Promise<boolean>;
+  createThread(route: Route, title: string, sourceMessageId?: string, appliedTags?: readonly string[]): Promise<Route>;
+  /** Optional native thread management; unsupported transports must not simulate it. */
+  inspectThread?(route: Route): Promise<ThreadInfo>;
+  updateThread?(route: Route, update: ThreadUpdate): Promise<ThreadInfo>;
   /** null explicitly means no history API; intake recovery belongs to the adapter. */
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null>;
   /** Validate platform/auth destination before fetching. Never follow redirects with credentials. */

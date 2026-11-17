@@ -3,7 +3,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { Approval, DialogResponse, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, InputRecord, Lane, LaneModel, LaneModelChoice, LanePresetSnapshot, ResolvedLanePreset, ModelPreset, Messenger, Route, StorePort, WorkflowChoice } from "./contracts";
+import type { Approval, DialogResponse, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, InputRecord, Lane, LaneModel, LaneModelChoice, LanePresetSnapshot, ResolvedLanePreset, ModelPreset, Messenger, Route, StorePort, ThreadInfo, ThreadUpdate, WorkflowChoice } from "./contracts";
 import { physicalRoute, physicalRouteKey, routeKey } from "./contracts";
 import { authorizeRoute, credentialEnvNames, type Config, hostPaths, privateDirectory } from "./config";
 import { DeliveryError } from "./delivery";
@@ -142,6 +142,7 @@ export interface LaneStart extends LaneModelChoice {
   brief?: string;
   acceptance?: string[];
   destination?: Route;
+  appliedTags?: readonly string[];
   workflow?: WorkflowChoice;
 }
 interface ResolvedLaneStart extends Omit<LaneStart, "model" | "preset"> {
@@ -1514,6 +1515,11 @@ export class Superagent {
 
   async startLane(input: LaneStart): Promise<Lane> {
     this.assertRestartOpen();
+    if (input.appliedTags !== undefined && (!Array.isArray(input.appliedTags) || input.appliedTags.length > 5
+      || input.appliedTags.some(tag => typeof tag !== "string" || !/^\d{1,20}$/.test(tag))
+      || new Set(input.appliedTags).size !== input.appliedTags.length)) {
+      throw new Error("appliedTags must contain at most five unique Discord tag IDs");
+    }
     if (typeof input.modelReason !== "string" || !input.modelReason.trim()) {
       throw new Error("lane_start requires a nonempty modelReason");
     }
@@ -1542,6 +1548,9 @@ export class Superagent {
         throw new Error("Concurrent workflow selection conflicts with the source's existing handoff");
       }
       if (this.store.output(`${input.sourceId}:kickoff`)?.text !== input.kickoff) throw new Error("Concurrent kickoff identity conflict");
+      const savedIntent = this.store.getMeta(`handoff-intent:${input.sourceId}`);
+      if (savedIntent && !isDeepStrictEqual(JSON.parse(savedIntent).appliedTags, input.appliedTags))
+        throw new Error("Concurrent forum tag selection conflicts with the source's existing handoff");
       return lane;
     }
     const operation = this.createLane(selected);
@@ -1558,6 +1567,8 @@ export class Superagent {
     const original = this.store.input(input.sourceId);
     if (!original) throw new Error("Unknown source request");
     this.authorized(original.route);
+    if (input.appliedTags !== undefined && (input.destination ?? original.route).platform !== "discord")
+      throw new Error("Forum tags are only supported on Discord");
     const workflow = headWorkflow(original.id, this.requestText(original), input.workflow);
     if (workflow && this.store.getMeta(`user-source:${original.id}`) !== "true") {
       throw new Error("Workflow selection requires an original authorized user source, not internal data");
@@ -1571,7 +1582,8 @@ export class Superagent {
     const destinationKey = `handoff-route:${original.id}`;
     const intentKey = `handoff-intent:${original.id}`;
     const nativeKey = `handoff-native:${original.id}`;
-    const intent = JSON.stringify({ destination: input.destination ?? null });
+    const intent = JSON.stringify({ destination: input.destination ?? null,
+      ...(input.appliedTags === undefined ? {} : { appliedTags: input.appliedTags }) });
     const previousIntent = this.store.getMeta(intentKey);
     const requestedParent = input.destination && !input.destination.threadId && !input.destination.topicId ? input.destination : null;
     if (input.destination) this.authorized(input.destination);
@@ -1580,8 +1592,14 @@ export class Superagent {
     }
     const reconciling = this.store.getMeta(destinationKey) === "uncertain" && input.destination?.threadId
       && this.sameConversation(original.route, input.destination);
-    if (previousIntent && previousIntent !== intent && !reconciling) throw new Error("Lane handoff destination intent conflict");
-    if (!previousIntent) this.store.setMeta(intentKey, intent);
+    // A read-only capability rejection has created nothing. Let the head select
+    // valid tags after inspection, but never change a submitted creation.
+    const correctingTags = previousIntent !== null && !this.store.getMeta(destinationKey)
+      && !this.store.input(`handoff:${original.id}:lane`)
+      && isDeepStrictEqual(JSON.parse(previousIntent).destination, input.destination ?? null);
+    if (previousIntent && previousIntent !== intent && !reconciling && !correctingTags)
+      throw new Error("Lane handoff destination intent conflict");
+    if (!previousIntent || correctingTags) this.store.setMeta(intentKey, intent);
     if (original.target === "main" || input.destination || workflow) {
       const handoffId = `handoff:${original.id}:lane`;
       const existing = this.store.input(handoffId);
@@ -1598,20 +1616,24 @@ export class Superagent {
           destination = stored === "uncertain" ? input.destination! : JSON.parse(stored) as Route;
         } else {
           const existingBinding = !input.destination ? this.boundLane(original.route) : null;
+          if (input.appliedTags !== undefined && (input.destination && !requestedParent
+            || existingBinding || !requestedParent && original.route.threadId)) {
+            throw new Error("appliedTags selects tags for a new forum topic; use lane_thread_update for an existing thread");
+          }
           if (input.destination && !requestedParent) destination = input.destination;
           else if (existingBinding) destination = existingBinding.route;
           else if (!requestedParent && original.route.threadId) destination = original.route;
           else {
             const parent = physicalRoute(requestedParent ?? original.route);
-            const supported = this.messenger.canCreateThread ? await this.messenger.canCreateThread(parent) : !this.isDm(parent);
+            const supported = this.messenger.canCreateThread ? await this.messenger.canCreateThread(parent, input.appliedTags) : !this.isDm(parent);
             this.assertRestartOpen();
             if (this.store.input(original.id)?.state === "cancelled") throw new Error("A cancelled main request cannot create new delegated work");
             if (supported) {
               this.store.setMeta(destinationKey, "uncertain"); // Persist before the first remote effect; never replay ambiguity.
               this.store.setMeta(nativeKey, "true");
-              const sourceMessageId = original.route.threadId === null && physicalRouteKey(parent) === physicalRouteKey(original.route)
+              const sourceMessageId = input.appliedTags === undefined && original.route.threadId === null && physicalRouteKey(parent) === physicalRouteKey(original.route)
                 ? original.messageId ?? undefined : undefined;
-              destination = await this.messenger.createThread(parent, input.title, sourceMessageId);
+              destination = await this.messenger.createThread(parent, input.title, sourceMessageId, input.appliedTags);
               this.store.setMeta(`handoff-route-result:${original.id}`, JSON.stringify(destination));
               if (!this.sameConversation(parent, destination) || !destination.threadId || destination.topicId) {
                 throw new Error("Created thread did not return the exact authorized native conversation identity; reconcile the uncertain creation");
@@ -1719,6 +1741,58 @@ export class Superagent {
     const lane = this.store.lane(id);
     if (!lane) throw new Error(`Unknown lane: ${id}`);
     return lane;
+  }
+
+  async inspectThread(sourceId: string, laneId?: string): Promise<ThreadInfo> {
+    const source = this.store.input(sourceId);
+    if (!source || this.store.getMeta(`user-source:${sourceId}`) !== "true")
+      throw new Error("Thread inspection requires an original received user source");
+    this.authorized(source.route);
+    const route = physicalRoute(laneId ? this.requireLane(laneId).route : source.route);
+    this.authorized(route);
+    if (route.platform !== "discord" || !route.guildId || !this.messenger.inspectThread)
+      throw new Error("Thread inspection requires a supported Discord guild conversation");
+    return this.messenger.inspectThread(route);
+  }
+
+  async updateLaneThread(input: { id: string; sourceId: string; changes: ThreadUpdate }): Promise<ThreadInfo> {
+    this.assertRestartOpen();
+    if (this.stopped) throw new Error("Controller is stopped");
+    const source = this.store.input(input.sourceId);
+    if (!source || this.store.getMeta(`user-source:${input.sourceId}`) !== "true")
+      throw new Error("Thread changes require an original received user source, not a lane report");
+    if (source.state === "cancelled") throw new Error("A cancelled source cannot change a thread");
+    this.authorized(source.route);
+    const lane = this.requireLane(input.id);
+    this.authorized(lane.route);
+    if (lane.route.platform !== "discord" || !lane.route.guildId || !lane.route.threadId || !this.messenger.updateThread)
+      throw new Error("Thread changes require a managed Discord guild thread");
+    const changes = structuredClone(input.changes);
+    const request = { route: physicalRoute(lane.route), changes };
+    const receiptKey = `lane-thread:${lane.id}:${input.sourceId}`;
+    const saved = this.store.getMeta(receiptKey);
+    if (saved) {
+      const receipt: { request: typeof request; result?: ThreadInfo; error?: string; certainty?: "rejected" | "uncertain" } = JSON.parse(saved);
+      if (!isDeepStrictEqual(receipt.request, request)) throw new Error("Thread-change source identity conflict");
+      if (receipt.result) return receipt.result;
+      throw new DeliveryError(receipt.error ?? "Thread change is pending or uncertain; inspect Discord before a new explicit request",
+        receipt.certainty ?? "uncertain");
+    }
+    // Persist intent before IPC. A lost receipt must not repeat a remote edit.
+    this.store.setMeta(receiptKey, JSON.stringify({ request }));
+    this.laneMutations++;
+    try {
+      const result = await this.messenger.updateThread(request.route, changes);
+      if (physicalRouteKey(result.route) !== physicalRouteKey(request.route))
+        throw new DeliveryError("Thread update returned a different destination", "uncertain");
+      this.store.setMeta(receiptKey, JSON.stringify({ request, result }));
+      return result;
+    } catch (error) {
+      const certainty = error instanceof DeliveryError ? error.certainty : "uncertain";
+      const message = error instanceof Error ? error.message : "Thread update failed";
+      this.store.setMeta(receiptKey, JSON.stringify({ request, error: message, certainty }));
+      throw new DeliveryError(message, certainty);
+    } finally { this.laneMutations--; }
   }
 
   async pause(id: string): Promise<void> {

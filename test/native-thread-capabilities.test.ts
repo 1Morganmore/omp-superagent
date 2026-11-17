@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { ChannelFlagsBitField, ChannelType, PermissionFlagsBits, PermissionsBitField, type Client, type MessageCreateOptions } from "discord.js";
+import { ChannelFlagsBitField, ChannelType, PermissionFlagsBits, PermissionsBitField, type Client, type MessageCreateOptions, type ThreadEditOptions } from "discord.js";
 import type { WebClientOptions } from "@slack/web-api";
 import { DiscordMessenger } from "../src/discord.ts";
 import { SlackMessenger, type SlackMessengerOptions } from "../src/slack.ts";
@@ -26,12 +26,21 @@ class DiscordChannel {
   guildId: string | null = "guild";
   parentId: string | null = null;
   recipientId = "owner";
+  name = "Original topic";
+  archived: boolean | null = false;
+  availableTags: Array<{ id: string; name: string; moderated: boolean }> = [];
+  appliedTags: string[] = [];
   flags = new ChannelFlagsBitField();
   permissions = new PermissionsBitField([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages,
     PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.SendMessagesInThreads]);
   memberFailure: unknown;
   threadFailure: unknown;
   threadOptions: unknown[] = [];
+  edits: ThreadEditOptions[] = [];
+  editFailure: unknown;
+  applyEdit = true;
+  afterEdit?: () => void;
+  memberReads: unknown[] = [];
   sent: MessageCreateOptions[] = [];
   source = new Map<string, Data>();
   sourceReads: string[] = [];
@@ -40,6 +49,7 @@ class DiscordChannel {
   isSendable() { return this.type !== ChannelType.GuildForum && this.type !== ChannelType.GuildMedia; }
   permissionsFor() { return this.permissions; }
   guild = { members: { fetchMe: async (_options: unknown) => {
+    this.memberReads.push(_options);
     if (this.memberFailure) throw this.memberFailure;
     return { id: "bot" };
   } } };
@@ -60,6 +70,17 @@ class DiscordChannel {
     if (!message) throw new Error("Missing source");
     return message;
   } };
+  async edit(options: ThreadEditOptions) {
+    this.edits.push(options);
+    if (this.editFailure) throw this.editFailure;
+    if (this.applyEdit) {
+      if (options.name !== undefined) this.name = options.name;
+      if (options.archived !== undefined) this.archived = options.archived;
+      if (options.appliedTags !== undefined) this.appliedTags = [...options.appliedTags];
+    }
+    this.afterEdit?.();
+    return this;
+  }
   async send(payload: MessageCreateOptions) {
     this.sent.push(payload);
     return { id: "123", channelId: this.id, guildId: this.guildId, author: { id: "bot" },
@@ -72,11 +93,12 @@ class DiscordGateway extends EventEmitter {
   rest = { options: { retries: 0, rejectOnRateLimit: null as unknown } };
   lookups: Array<{ id: string; options: unknown }> = [];
   channel = new DiscordChannel();
+  resolved = new Map<string, DiscordChannel>();
   failure: unknown;
   channels = { fetch: async (id: string, options: unknown) => {
     this.lookups.push({ id, options });
     if (this.failure) throw this.failure;
-    return this.channel;
+    return this.resolved.get(id) ?? this.channel;
   } };
   isReady() { return true; }
   async destroy() {}
@@ -88,6 +110,17 @@ async function discord() {
   running.push(messenger);
   await messenger.start(handlers);
   return { messenger, gateway, channel: gateway.channel };
+}
+
+async function discordThread(type = ChannelType.GuildForum) {
+  const f = await discord();
+  f.channel.type = type;
+  f.channel.availableTags = [{ id: "1", name: "Feature", moderated: false }, { id: "2", name: "Approved", moderated: true }];
+  const thread = f.channel.created("thread");
+  thread.appliedTags = type === ChannelType.GuildForum || type === ChannelType.GuildMedia ? ["1"] : [];
+  thread.permissions.add(PermissionFlagsBits.ManageThreads);
+  f.gateway.resolved.set(thread.id, thread);
+  return { ...f, thread, route: { ...discordRoute, threadId: thread.id } };
 }
 
 describe("Discord native topic capability", () => {
@@ -176,6 +209,8 @@ describe("Discord native topic capability", () => {
       f.channel.flags.add(ChannelFlagsBitField.Flags.RequireTag);
       await expect(f.messenger.canCreateThread(discordRoute)).rejects.toThrow("explicitly selected tag");
       await expect(f.messenger.createThread(discordRoute, "No tag selected")).rejects.toThrow("explicitly selected tag");
+      await expect(f.messenger.canCreateThread(discordRoute, [])).rejects.toThrow("explicitly selected tag");
+      await expect(f.messenger.createThread(discordRoute, "No tag selected", undefined, [])).rejects.toThrow("explicitly selected tag");
       expect(f.channel.sent).toEqual([]);
       expect(f.channel.threadOptions).toEqual([]);
       expect(f.channel.sourceReads).toEqual([]);
@@ -246,6 +281,267 @@ describe("Discord native topic capability", () => {
       } }]);
       expect(f.channel.sent).toEqual([]);
       expect(f.channel.sourceReads).toEqual([]);
+    }
+  });
+
+  test("forum/media creation uses only explicitly selected fresh tag IDs, including required and moderated tags", async () => {
+    for (const type of [ChannelType.GuildForum, ChannelType.GuildMedia]) {
+      const f = await discord();
+      f.channel.type = type;
+      f.channel.flags.add(ChannelFlagsBitField.Flags.RequireTag);
+      f.channel.availableTags = [{ id: "1", name: "Feature", moderated: false }, { id: "2", name: "Approved", moderated: true }];
+      expect(await f.messenger.canCreateThread(discordRoute, ["1"])).toBe(true);
+      expect(await f.messenger.createThread(discordRoute, "Tagged topic", undefined, ["1"])).toEqual({ ...discordRoute, threadId: "native-thread" });
+      expect(f.channel.threadOptions).toEqual([{ name: "Tagged topic", appliedTags: ["1"],
+        message: { content: "Tagged topic", allowedMentions: { parse: [], repliedUser: false } } }]);
+      await expect(f.messenger.canCreateThread(discordRoute, ["2"])).rejects.toThrow("ManageThreads");
+      await expect(f.messenger.createThread(discordRoute, "Moderated", undefined, ["2"])).rejects.toThrow("ManageThreads");
+      expect(f.channel.threadOptions).toHaveLength(1);
+      f.channel.permissions.add(PermissionFlagsBits.ManageThreads);
+      expect(await f.messenger.canCreateThread(discordRoute, ["2"])).toBe(true);
+      await f.messenger.createThread(discordRoute, "Moderated", undefined, ["2"]);
+      expect(f.channel.threadOptions[1]).toMatchObject({ appliedTags: ["2"] });
+      f.channel.availableTags = [{ id: "3", name: "Feature", moderated: false }];
+      await expect(f.messenger.createThread(discordRoute, "Stale selection", undefined, ["1"])).rejects.toThrow("not available");
+      expect(f.channel.threadOptions).toHaveLength(2);
+      expect(f.gateway.lookups.every(read => (read.options as Data).force === true)).toBe(true);
+      expect(f.channel.memberReads.every(read => (read as Data).force === true)).toBe(true);
+    }
+  });
+
+  test("forum/media creation rejects names, unknown IDs, duplicate IDs and more than five tags without mutations", async () => {
+    for (const type of [ChannelType.GuildForum, ChannelType.GuildMedia]) {
+      const f = await discord();
+      f.channel.type = type;
+      f.channel.availableTags = Array.from({ length: 6 }, (_, index) => ({ id: String(index + 1), name: `Tag ${index + 1}`, moderated: false }));
+      for (const tags of [["Tag 1"], ["unknown"], ["1", "1"], ["1", "2", "3", "4", "5", "6"]]) {
+        await expect(f.messenger.canCreateThread(discordRoute, tags)).rejects.toMatchObject({ certainty: "rejected" });
+        await expect(f.messenger.createThread(discordRoute, "Invalid tags", undefined, tags)).rejects.toMatchObject({ certainty: "rejected" });
+      }
+      expect(f.channel.threadOptions).toEqual([]);
+      expect(f.channel.sent).toEqual([]);
+      for (const tags of [null, "1", [1]]) {
+        await expect(Reflect.apply(f.messenger.canCreateThread, f.messenger, [discordRoute, tags])).rejects.toMatchObject({ certainty: "rejected" });
+        await expect(Reflect.apply(f.messenger.createThread, f.messenger, [discordRoute, "Malformed tags", undefined, tags])).rejects.toMatchObject({ certainty: "rejected" });
+      }
+      expect(f.channel.threadOptions).toEqual([]);
+      expect(await f.messenger.canCreateThread(discordRoute, ["1", "2", "3", "4", "5"])).toBe(true);
+      await f.messenger.createThread(discordRoute, "Five tags", undefined, ["1", "2", "3", "4", "5"]);
+      expect(f.channel.threadOptions[0]).toMatchObject({ appliedTags: ["1", "2", "3", "4", "5"] });
+      await f.messenger.createThread(discordRoute, "Explicitly untagged", undefined, []);
+      expect(f.channel.threadOptions[1]).toMatchObject({ appliedTags: [] });
+    }
+  });
+
+  test("nonforum creation rejects even an explicitly empty tag selection", async () => {
+    for (const type of [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice]) {
+      const f = await discord();
+      f.channel.type = type;
+      for (const tags of [[], ["1"]]) {
+        await expect(f.messenger.canCreateThread(discordRoute, tags)).rejects.toMatchObject({ certainty: "rejected" });
+        await expect(f.messenger.createThread(discordRoute, "Not a forum", undefined, tags)).rejects.toMatchObject({ certainty: "rejected" });
+      }
+      expect(f.channel.threadOptions).toEqual([]);
+      expect(f.channel.sent).toEqual([]);
+    }
+  });
+
+  test("inspection and update preflight propagate fresh channel and member read failures without mutation", async () => {
+    for (const failure of [new Error("Network failure"), Object.assign(new Error("Forbidden"), { status: 403 })]) {
+      for (const target of ["channel", "member"] as const) {
+        const f = await discordThread();
+        if (target === "channel") f.gateway.failure = failure;
+        else f.channel.memberFailure = failure;
+        await expect(f.messenger.inspectThread(f.route)).rejects.toBeInstanceOf(DeliveryError);
+        await expect(f.messenger.updateThread(f.route, { archived: true })).rejects.toBeInstanceOf(DeliveryError);
+        expect(f.thread.edits).toEqual([]);
+        expect(f.channel.sent).toEqual([]);
+      }
+    }
+  });
+
+  test("inspection returns authorized parent metadata and exact current thread state without mutation", async () => {
+    for (const type of [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia]) {
+      const f = await discordThread(type);
+      const forum = type === ChannelType.GuildForum || type === ChannelType.GuildMedia;
+      f.channel.flags.add(ChannelFlagsBitField.Flags.RequireTag);
+      f.channel.name = "Parent";
+      f.thread.name = "Current title";
+      f.thread.archived = true;
+      f.thread.permissions.remove(PermissionFlagsBits.ManageThreads);
+      expect(await f.messenger.inspectThread({ ...discordRoute, topicId: "logical" })).toEqual({
+        route: discordRoute, title: "Parent", archived: null, requiresTag: forum,
+        availableTags: forum ? f.channel.availableTags : [], appliedTags: [],
+      });
+      expect(await f.messenger.inspectThread(f.route)).toEqual({
+        route: f.route, title: "Current title", archived: true, requiresTag: forum,
+        availableTags: forum ? f.channel.availableTags : [], appliedTags: forum ? ["1"] : [],
+      });
+      expect(f.gateway.lookups).toEqual([
+        { id: "parent", options: { force: true } },
+        { id: "thread", options: { force: true } }, { id: "parent", options: { force: true } },
+      ]);
+      expect(f.thread.edits).toEqual([]);
+      expect(f.channel.threadOptions).toEqual([]);
+      expect(f.channel.sent).toEqual([]);
+    }
+  });
+
+  test("inspection and update require readable parent and thread permissions", async () => {
+    for (const permission of [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]) {
+      for (const target of ["parent", "thread"] as const) {
+        const f = await discordThread();
+        const channel = target === "parent" ? f.channel : f.thread;
+        channel.permissions.remove(permission);
+        await expect(f.messenger.inspectThread(f.route)).rejects.toMatchObject({ certainty: "rejected" });
+        await expect(f.messenger.updateThread(f.route, { title: "Denied" })).rejects.toMatchObject({ certainty: "rejected" });
+        expect(f.thread.edits).toEqual([]);
+      }
+    }
+    const f = await discordThread();
+    f.thread.permissions.remove(PermissionFlagsBits.ManageThreads);
+    expect((await f.messenger.inspectThread(f.route)).title).toBe("Original topic");
+    await expect(f.messenger.updateThread(f.route, { archived: true })).rejects.toThrow("ManageThreads");
+    expect(f.thread.edits).toEqual([]);
+  });
+
+  test("inspection and update reject unauthorized routes before reads and mismatched fetched identities before mutation", async () => {
+    const f = await discordThread();
+    for (const patch of [{ guildId: "foreign" }, { channelId: "other" }, { accountId: "other" }, { authorityId: "other" }]) {
+      await expect(f.messenger.inspectThread({ ...f.route, ...patch })).rejects.toMatchObject({ certainty: "rejected" });
+      await expect(f.messenger.updateThread({ ...f.route, ...patch }, { title: "Denied" })).rejects.toMatchObject({ certainty: "rejected" });
+    }
+    expect(f.gateway.lookups).toEqual([]);
+    const mismatchedIdentities: Partial<Pick<DiscordChannel, "parentId" | "guildId">>[] = [{ parentId: "other" }, { guildId: "foreign" }];
+    for (const patch of mismatchedIdentities) {
+      const other = Object.assign(f.channel.created("thread"), patch);
+      f.gateway.resolved.set("thread", other);
+      await expect(f.messenger.inspectThread(f.route)).rejects.toThrow("identity changed");
+      await expect(f.messenger.updateThread(f.route, { title: "Denied" })).rejects.toThrow("identity changed");
+      expect(other.edits).toEqual([]);
+    }
+    f.gateway.resolved.set("thread", f.channel.created("different-thread"));
+    await expect(f.messenger.inspectThread(f.route)).rejects.toThrow("identity changed");
+    await expect(f.messenger.updateThread(f.route, { title: "Denied" })).rejects.toThrow("identity changed");
+    f.gateway.resolved.set("thread", f.thread);
+    const otherParent = new DiscordChannel("parent");
+    otherParent.guildId = "foreign";
+    f.gateway.resolved.set("parent", otherParent);
+    await expect(f.messenger.inspectThread(f.route)).rejects.toThrow("identity changed");
+    await expect(f.messenger.updateThread(f.route, { title: "Denied" })).rejects.toThrow("identity changed");
+    expect(f.thread.edits).toEqual([]);
+  });
+
+  test("inspection supports only guild text, announcement, forum and media destinations and update only existing threads", async () => {
+    const f = await discord();
+    await expect(f.messenger.inspectThread({ ...discordRoute, guildId: null, channelId: "dm" })).rejects.toMatchObject({ certainty: "rejected" });
+    await expect(f.messenger.updateThread(discordRoute, { title: "Parent" })).rejects.toMatchObject({ certainty: "rejected" });
+    expect(f.gateway.lookups).toEqual([]);
+    f.channel.type = ChannelType.GuildVoice;
+    await expect(f.messenger.inspectThread(discordRoute)).rejects.toMatchObject({ certainty: "rejected" });
+    expect(f.channel.edits).toEqual([]);
+  });
+
+  test("thread updates combine requested fields in one edit and return fresh authoritative state", async () => {
+    for (const type of [ChannelType.GuildForum, ChannelType.GuildMedia]) {
+      const f = await discordThread(type);
+      const authoritative = f.channel.created("thread");
+      authoritative.name = "Updated title";
+      authoritative.archived = true;
+      authoritative.appliedTags = ["2"];
+      // The PATCH result itself is deliberately stale. The adapter must read.
+      f.thread.applyEdit = false;
+      f.thread.afterEdit = () => { f.gateway.resolved.set("thread", authoritative); };
+      const result = await f.messenger.updateThread(f.route, { title: "Updated title", appliedTags: ["2"], archived: true });
+      expect(result).toEqual({ route: f.route, title: "Updated title", archived: true, requiresTag: false,
+        availableTags: f.channel.availableTags, appliedTags: ["2"] });
+      expect(f.thread.edits).toEqual([{ name: "Updated title", appliedTags: ["2"], archived: true }]);
+      expect(f.gateway.lookups.map(read => read.id)).toEqual(["thread", "parent", "thread", "parent"]);
+      expect(f.gateway.lookups.every(read => (read.options as Data).force === true)).toBe(true);
+      expect(f.channel.threadOptions).toEqual([]);
+      expect(f.channel.sent).toEqual([]);
+    }
+  });
+
+  test("omitted tags and archive state are preserved while an explicit empty selection clears optional tags", async () => {
+    const f = await discordThread();
+    f.thread.archived = true;
+    f.channel.flags.add(ChannelFlagsBitField.Flags.RequireTag);
+    expect(await f.messenger.updateThread(f.route, { title: "Renamed" })).toMatchObject({ title: "Renamed", archived: true, appliedTags: ["1"] });
+    expect(f.thread.edits).toEqual([{ name: "Renamed" }]);
+    await expect(f.messenger.updateThread(f.route, { appliedTags: [] })).rejects.toThrow("explicitly selected tag");
+    expect(f.thread.edits).toHaveLength(1);
+    f.channel.flags.remove(ChannelFlagsBitField.Flags.RequireTag);
+    expect(await f.messenger.updateThread(f.route, { appliedTags: [] })).toMatchObject({ title: "Renamed", archived: true, appliedTags: [] });
+    expect(f.thread.edits[1]).toEqual({ appliedTags: [] });
+    f.channel.availableTags = [{ id: "3", name: "Feature", moderated: false }];
+    await expect(f.messenger.updateThread(f.route, { appliedTags: ["1"] })).rejects.toThrow("not available");
+    expect(f.thread.edits).toHaveLength(2);
+  });
+
+  test("archiving and reopening perform only native thread edits without requiring send or creation permissions", async () => {
+    for (const type of [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia]) {
+      const f = await discordThread(type);
+      f.thread.permissions.remove([PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads]);
+      expect((await f.messenger.updateThread(f.route, { archived: true })).archived).toBe(true);
+      expect((await f.messenger.updateThread(f.route, { archived: false })).archived).toBe(false);
+      expect(f.thread.edits).toEqual([{ archived: true }, { archived: false }]);
+      expect(f.channel.sent).toEqual([]);
+      expect(f.channel.threadOptions).toEqual([]);
+      expect(f.thread.sent).toEqual([]);
+    }
+  });
+
+  test("thread update rejects malformed fields and invalid tag selections before editing", async () => {
+    const f = await discordThread();
+    for (const update of [null, [], "title", {}, { title: "" }, { title: " " }, { title: "x".repeat(101) }, { title: undefined },
+      { archived: "true" }, { archived: undefined }, { locked: true }, { title: "Valid", extra: true }, { appliedTags: undefined },
+      { appliedTags: null }, { appliedTags: "1" }, { appliedTags: [1] }, { appliedTags: ["1", "1"] }, { appliedTags: ["Feature"] },
+      { appliedTags: ["unknown"] }, { appliedTags: ["1", "2", "3", "4", "5", "6"] }]) {
+      await expect(Reflect.apply(f.messenger.updateThread, f.messenger, [f.route, update])).rejects.toMatchObject({ certainty: "rejected" });
+    }
+    expect(f.thread.edits).toEqual([]);
+    for (const title of ["x", "x".repeat(100)]) {
+      expect((await f.messenger.updateThread(f.route, { title })).title).toBe(title);
+    }
+    for (const type of [ChannelType.GuildText, ChannelType.GuildAnnouncement]) {
+      const text = await discordThread(type);
+      for (const appliedTags of [[], ["1"]]) {
+        await expect(text.messenger.updateThread(text.route, { appliedTags })).rejects.toThrow("only be updated on forum/media");
+      }
+      expect(text.thread.edits).toEqual([]);
+    }
+  });
+
+  test("native edit errors retain certainty and never retry or change lifecycle fields", async () => {
+    for (const [failure, certainty] of [
+      [new Error("connection lost"), "uncertain"],
+      [Object.assign(new Error("Forbidden"), { status: 403 }), "rejected"],
+    ] as const) {
+      const f = await discordThread();
+      f.thread.editFailure = failure;
+      await expect(f.messenger.updateThread(f.route, { title: "Unconfirmed" })).rejects.toMatchObject({ certainty });
+      expect(f.thread.edits).toEqual([{ name: "Unconfirmed" }]);
+      expect(f.gateway.lookups.map(read => read.id)).toEqual(["thread", "parent"]);
+      expect(f.channel.sent).toEqual([]);
+    }
+  });
+
+  test("successful edits with failed, inaccessible, mismatched or stale readback remain uncertain", async () => {
+    for (const outcome of ["read-error", "permission", "identity", "title", "tags", "archived"] as const) {
+      const f = await discordThread();
+      f.thread.afterEdit = () => {
+        if (outcome === "read-error") f.gateway.failure = Object.assign(new Error("Forbidden"), { status: 403 });
+        if (outcome === "permission") f.thread.permissions.remove(PermissionFlagsBits.ViewChannel);
+        if (outcome === "identity") f.thread.parentId = "other";
+        if (outcome === "title") f.thread.name = "Stale title";
+        if (outcome === "tags") f.thread.appliedTags = ["1"];
+        if (outcome === "archived") f.thread.archived = false;
+      };
+      await expect(f.messenger.updateThread(f.route, { title: "New title", appliedTags: ["2"], archived: true })).rejects.toMatchObject({ certainty: "uncertain" });
+      expect(f.thread.edits).toEqual([{ name: "New title", appliedTags: ["2"], archived: true }]);
+      expect(f.channel.sent).toEqual([]);
+      expect(f.channel.threadOptions).toEqual([]);
     }
   });
 });

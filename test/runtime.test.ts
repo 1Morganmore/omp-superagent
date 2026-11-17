@@ -4,7 +4,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequest, Inbound, Lane, LaneModel, LanePresetSnapshot, ResolvedLanePreset, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../src/contracts";
+import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequest, Inbound, Lane, LaneModel, LanePresetSnapshot, ResolvedLanePreset, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "../src/contracts";
 import { physicalRouteKey, routeKey, WORKFLOW_NAMES } from "../src/contracts";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { type Config, hostPaths } from "../src/config";
@@ -261,7 +261,10 @@ class MessengerTransport implements Messenger {
   readonly backlog = new Map<string, Inbound[] | null>();
   readonly threads: Route[] = [];
   readonly threadSources: Array<string | undefined> = [];
+  readonly threadTags: Array<readonly string[] | undefined> = [];
   canCreateThread?: Messenger["canCreateThread"];
+  inspectThread?: Messenger["inspectThread"];
+  updateThread?: Messenger["updateThread"];
   private sendWaiters: Array<{ count: number; resolve: () => void }> = [];
   private approvalWaiters: Array<() => void> = [];
   threadFails = false;
@@ -300,8 +303,9 @@ class MessengerTransport implements Messenger {
     if (!this.handlers) throw new Error("Messenger must start before dismiss");
     this.dismissed.push(approval.id);
   }
-  async createThread(route: Route, _title: string, sourceMessageId?: string): Promise<Route> {
+  async createThread(route: Route, _title: string, sourceMessageId?: string, appliedTags?: readonly string[]): Promise<Route> {
     this.threadSources.push(sourceMessageId);
+    this.threadTags.push(appliedTags);
     if (this.threadFails) throw new Error("ambiguous remote thread creation");
     const created = { ...route, threadId: String(900 + this.threads.length) };
     this.threads.push(created);
@@ -431,6 +435,124 @@ function fixture(maxHosts = 3, openAttachment?: Messenger["openAttachment"], pre
   fixtures.push({ runtime, directory });
   return { runtime, config, directory, store, messenger, main, hosts, launched, errors, launchBehavior, nativePresets, persistedPresets, presetPersistence };
 }
+
+describe("source-bound Discord topic management", () => {
+  test("selected forum tags reach capability and creation and conflicting source retries never create again", async () => {
+    const { runtime, messenger, directory } = fixture();
+    messenger.canCreateThread = async (_route, tags) => {
+      if (!tags?.includes("101")) throw new DeliveryError("A forum tag is required", "rejected");
+      return true;
+    };
+    await runtime.start();
+    const original = message("tagged-topic", route(null));
+    await admit(runtime, original);
+    const start = { ...selection, sourceId: original.id, title: "Tagged topic", kickoff: "Inspect and verify.", cwd: directory,
+      appliedTags: ["101"] };
+    const { appliedTags: _tags, ...unselected } = start;
+    await expect(runtime.startLane(unselected)).rejects.toThrow("forum tag is required");
+    expect(messenger.threads).toEqual([]);
+    const lane = await runtime.startLane(start);
+    expect(messenger.threadTags).toEqual([["101"]]);
+    expect(messenger.threadSources).toEqual([undefined]);
+    expect((await runtime.startLane(start)).id).toBe(lane.id);
+    await expect(runtime.startLane({ ...start, appliedTags: ["102"] })).rejects.toThrow("intent conflict");
+    expect(messenger.threads).toHaveLength(1);
+  });
+
+  test("forum tags cannot silently retag an existing bound thread", async () => {
+    const { runtime, directory, messenger } = fixture();
+    await runtime.start();
+    const original = message("existing-topic", route("123"));
+    await admit(runtime, original);
+    await expect(runtime.startLane({ ...selection, sourceId: original.id, title: "Existing", kickoff: "Inspect.",
+      cwd: directory, appliedTags: ["101"] })).rejects.toThrow("lane_thread_update");
+    expect(messenger.threads).toEqual([]);
+  });
+
+  function managedThread(instance: ReturnType<typeof fixture>) {
+    const { store, config, messenger } = instance;
+    const lane = savedLane(store, config, "managed-thread", route("123"));
+    let current: ThreadInfo = { route: lane.route, title: "Original", archived: false,
+      requiresTag: false, availableTags: [{ id: "101", name: "Work", moderated: false }], appliedTags: ["101"] };
+    const edits: ThreadUpdate[] = [];
+    messenger.inspectThread = async () => structuredClone(current);
+    messenger.updateThread = async (destination, changes) => {
+      edits.push(changes);
+      current = { ...current, route: destination, ...changes };
+      return structuredClone(current);
+    };
+    const source = (id: string) => store.receive(message(id, lane.route), "main", { [`user-source:${id}`]: "true" });
+    return { lane, source, edits, current: () => current };
+  }
+
+  test("rename, retag, archive and reopen leave lane lifecycle intact and old receipts cannot overwrite newer edits", async () => {
+    const instance = fixture();
+    const { runtime, store } = instance;
+    const f = managedThread(instance);
+    f.source("archive");
+    f.source("reopen");
+    const originalLane = store.lane(f.lane.id);
+    const archive = { id: f.lane.id, sourceId: "archive", changes: { title: "Done", appliedTags: [], archived: true } };
+    expect(await runtime.updateLaneThread(archive)).toMatchObject({ title: "Done", appliedTags: [], archived: true });
+    await runtime.updateLaneThread({ id: f.lane.id, sourceId: "reopen", changes: { archived: false } });
+    expect(f.current()).toMatchObject({ title: "Done", appliedTags: [], archived: false });
+    expect(await runtime.updateLaneThread(archive)).toMatchObject({ archived: true });
+    expect(f.current().archived).toBe(false);
+    expect(f.edits).toHaveLength(2);
+    expect(store.lane(f.lane.id)).toEqual(originalLane);
+    expect(await runtime.inspectThread("reopen", f.lane.id)).toMatchObject({ archived: false });
+    await expect(runtime.updateLaneThread({ ...archive, changes: { title: "Different" } })).rejects.toThrow("identity conflict");
+  });
+
+  test("internal reports, cancelled sources and unauthorized destinations cannot manage threads", async () => {
+    const instance = fixture();
+    const { runtime, store } = instance;
+    const f = managedThread(instance);
+    store.receive(message("report", f.lane.route), "main");
+    f.source("cancelled");
+    store.settle("cancelled", "cancelled");
+    store.receive(message("foreign", route("123", { authorityId: "other" })), "main", { "user-source:foreign": "true" });
+    for (const sourceId of ["missing", "report", "cancelled", "foreign"])
+      await expect(runtime.updateLaneThread({ id: f.lane.id, sourceId, changes: { archived: true } })).rejects.toThrow();
+    await expect(runtime.inspectThread("report", f.lane.id)).rejects.toThrow("original received user");
+    expect(f.edits).toEqual([]);
+  });
+
+  test.each(["rejected", "uncertain", "wrong-route"] as const)("a %s update is retained without replay", async outcome => {
+    const instance = fixture();
+    const { runtime, messenger, store } = instance;
+    const f = managedThread(instance);
+    f.source("edit-failure");
+    let attempts = 0;
+    messenger.updateThread = async () => {
+      attempts++;
+      if (outcome === "wrong-route") return { ...f.current(), route: route("other") };
+      throw new DeliveryError("Update failed", outcome);
+    };
+    const request = { id: f.lane.id, sourceId: "edit-failure", changes: { archived: true } };
+    await expect(runtime.updateLaneThread(request)).rejects.toBeInstanceOf(DeliveryError);
+    await expect(runtime.updateLaneThread(request)).rejects.toBeInstanceOf(DeliveryError);
+    expect(attempts).toBe(1);
+    expect(JSON.parse(store.getMeta(`lane-thread:${f.lane.id}:edit-failure`) ?? "{}").certainty)
+      .toBe(outcome === "rejected" ? "rejected" : "uncertain");
+  });
+
+  test("an in-flight duplicate cannot issue a second remote edit", async () => {
+    const instance = fixture();
+    const { runtime, messenger } = instance;
+    const f = managedThread(instance);
+    f.source("pending-edit");
+    const reply = Promise.withResolvers<ThreadInfo>();
+    let attempts = 0;
+    messenger.updateThread = async () => { attempts++; return reply.promise; };
+    const request = { id: f.lane.id, sourceId: "pending-edit", changes: { archived: true } };
+    const first = runtime.updateLaneThread(request);
+    await expect(runtime.updateLaneThread(request)).rejects.toThrow("pending or uncertain");
+    reply.resolve({ ...f.current(), archived: true });
+    await first;
+    expect(attempts).toBe(1);
+  });
+});
 
 describe("same-HEAD evidence recovery", () => {
   const nativeEntry = (main: HostTransport, id: string, customType: string, extra: Record<string, unknown> = {}) => ({

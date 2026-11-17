@@ -34,6 +34,7 @@ const managerTools: Record<string, true> = {
   lane_models: true, lane_init_presets: true, lane_set_model: true,
   lane_start: true, lane_inspect: true, lane_message: true,
   lane_pause: true, lane_resume: true, lane_close: true,
+  thread_inspect: true, lane_thread_update: true,
 };
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
@@ -43,6 +44,13 @@ const workflowSchema = Type.Optional(Type.Object({
   name: Type.Union(WORKFLOW_NAMES.map(name => Type.Literal(name))),
   reason: Type.String({ minLength: 1 }),
 }, { additionalProperties: false }));
+const threadTagsSchema = Type.Array(Type.String({ pattern: "^[0-9]{1,20}$" }), { maxItems: 5, uniqueItems: true });
+const threadTitleSchema = Type.String({ minLength: 1, maxLength: 100, pattern: "\\S" });
+const threadChangeFields = {
+  title: Type.Optional(threadTitleSchema),
+  appliedTags: Type.Optional(threadTagsSchema),
+  archived: Type.Optional(Type.Boolean()),
+};
 
 export default function superagentExtension(pi: ExtensionAPI): void {
   const role = process.env.OMP_SUPERAGENT_ROLE;
@@ -172,6 +180,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
       modelReason: Type.String({ minLength: 1 }),
       brief: Type.Optional(Type.String()), acceptance: Type.Optional(Type.Array(Type.String())),
       workflow: workflowSchema,
+      appliedTags: Type.Optional(threadTagsSchema),
       destination: Type.Optional(Type.Object({
         platform: Type.Union([Type.Literal("discord"), Type.Literal("telegram"), Type.Literal("slack")]),
         accountId: Type.String(), authorityId: Type.String(),
@@ -181,6 +190,31 @@ export default function superagentExtension(pi: ExtensionAPI): void {
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) { return result(await requireRuntime(ctx).startLane(params)); },
+  });
+  pi.registerTool({
+    name: "thread_inspect", label: "Inspect Discord forum or thread", approval: "read",
+    description: "Read the original user source's Discord guild channel/thread, or an explicitly selected managed lane's thread. Returns available tag IDs, required-tag policy, applied tags, title and archive state. Use before selecting appliedTags for lane_start. This never creates a topic or changes lane state.",
+    parameters: Type.Object({
+      sourceId: Type.String({ minLength: 1 }), laneId: Type.Optional(Type.String({ minLength: 1 })),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(await requireRuntime(ctx).inspectThread(params.sourceId, params.laneId));
+    },
+  });
+  pi.registerTool({
+    name: "lane_thread_update", label: "Manage a lane's Discord thread", approval: "exec",
+    description: "Explicitly rename, retag, archive or reopen a managed lane's Discord thread under an original user sourceId. Requires Discord ManageThreads. appliedTags replaces the full set using observed exact IDs; omit to preserve or [] to clear if allowed. Omitted fields stay unchanged. Archiving never closes/pauses a lane; reopening never resumes it. Source-bound receipts suppress repeated mutations; uncertain edits require inspection and a new explicit user request, never blind retry. A returned replay receipt is historical, not a fresh inspection.",
+    parameters: Type.Object({
+      id: Type.String({ minLength: 1 }), sourceId: Type.String({ minLength: 1 }),
+      changes: Type.Union([
+        Type.Object({ ...threadChangeFields, title: threadTitleSchema }, { additionalProperties: false }),
+        Type.Object({ ...threadChangeFields, appliedTags: threadTagsSchema }, { additionalProperties: false }),
+        Type.Object({ ...threadChangeFields, archived: Type.Boolean() }, { additionalProperties: false }),
+      ]),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(await requireRuntime(ctx).updateLaneThread(params));
+    },
   });
   pi.registerTool({
     name: "lane_set_model", label: "Change an idle lane model", approval: "exec",

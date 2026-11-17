@@ -113,6 +113,17 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   supervisor, separate state registry, or timers were copied; its SUL notices are
   not reinterpreted.
 
+### Discord forum and thread management
+
+- Conceptual reference: [Dori #40](https://github.com/vntrevx/omp-dori/pull/40),
+  feature commit `25197919ea82abcd8601950f67869306a829639f`, inspected at
+  [revision `dba30db8faa3c76c4dad15e239f3a56046027ca4`](https://github.com/vntrevx/omp-dori/tree/dba30db8faa3c76c4dad15e239f3a56046027ca4).
+- Independently implemented exact forum-tag selection and thread rename/retag/
+  archive/reopen using the installed discord.js API and existing head/Gateway
+  authorization and effect receipts. No Dori source, prompts, or tests were copied.
+- Management is limited to registered Discord guild threads. It does not import
+  Dori's alternate intake, command launcher, transcription, or automatic cleanup.
+
 ## Telegram transport: grammY
 
 - API client: [`grammy` 1.46.0](https://github.com/grammyjs/grammY/tree/055a5a440f04d0b9fd5fd75a6d14dac4c2b83553),

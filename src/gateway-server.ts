@@ -2,7 +2,7 @@ import { once } from "node:events";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
-import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageReference, Messenger, OutputRecord, Route } from "./contracts";
+import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageReference, Messenger, OutputRecord, Route, ThreadUpdate } from "./contracts";
 import { DeliveryError } from "./delivery";
 import { MAX_GATEWAY_ATTACHMENT, readGatewayJson, type GatewayResult } from "./gateway-protocol";
 import { GatewayStore } from "./gateway-store";
@@ -48,6 +48,25 @@ function json(response: ServerResponse, value: GatewayResult, status = 200): voi
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DeliveryError("Invalid Gateway request", "rejected");
   return value as Record<string, unknown>;
+}
+
+function threadTags(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some(tag => typeof tag !== "string"))
+    throw new DeliveryError("Invalid thread tags", "rejected");
+  return value;
+}
+
+function threadUpdate(value: unknown): ThreadUpdate {
+  const update = record(value);
+  if (!Object.keys(update).length || Object.keys(update).some(key => !["title", "appliedTags", "archived"].includes(key))
+      || (Object.hasOwn(update, "title") && typeof update.title !== "string")
+      || (Object.hasOwn(update, "archived") && typeof update.archived !== "boolean"))
+    throw new DeliveryError("Invalid thread update", "rejected");
+  return {
+    ...(typeof update.title === "string" ? { title: update.title } : {}),
+    ...(typeof update.archived === "boolean" ? { archived: update.archived } : {}),
+    ...(Object.hasOwn(update, "appliedTags") ? { appliedTags: threadTags(update.appliedTags) } : {}),
+  };
 }
 
 /** Ordinary-code IPC: a fixed Messenger surface, never a native RPC relay. */
@@ -300,7 +319,8 @@ export class GatewayServer {
     const { id, operation, args } = data;
     if (typeof id !== "string" || !/^[a-f0-9-]{36}$/.test(id) || typeof operation !== "string" || !Array.isArray(args))
       throw new DeliveryError("Invalid Gateway effect", "rejected");
-    const operations: Record<string, number[]> = { send: [1], setActivity: [2], showApproval: [1], dismissApproval: [1], canCreateThread: [1], createThread: [2, 3], fetchAfter: [2] };
+    const operations: Record<string, number[]> = { send: [1], setActivity: [2], showApproval: [1], dismissApproval: [1],
+      canCreateThread: [1, 2], createThread: [2, 3, 4], inspectThread: [1], updateThread: [2], fetchAfter: [2] };
     if (!Object.hasOwn(operations, operation) || !operations[operation]!.includes(args.length))
       throw new DeliveryError("Unknown Gateway effect", "rejected");
     const previous = this.options.store.beginEffect(id, operation, args);
@@ -312,12 +332,17 @@ export class GatewayServer {
         throw new DeliveryError("Invalid message activity", "rejected");
       if (operation === "setActivity" && (typeof record(args[0]).messageId !== "string" || !record(args[0]).messageId))
         throw new DeliveryError("Message activity requires a real message ID", "rejected");
+      if (operation === "inspectThread" && !messenger.inspectThread || operation === "updateThread" && !messenger.updateThread)
+        throw new DeliveryError("Thread management is unsupported on this transport", "rejected");
       const value = operation === "send" ? await messenger.send(args[0] as OutputRecord)
         : operation === "setActivity" ? await messenger.setActivity?.(args[0] as MessageReference, args[1] as "received" | "thinking" | "idle")
         : operation === "showApproval" ? await messenger.showApproval(args[0] as Approval)
         : operation === "dismissApproval" ? await messenger.dismissApproval(args[0] as Approval)
-        : operation === "canCreateThread" ? await messenger.canCreateThread?.(args[0] as Route) ?? false
-        : operation === "createThread" ? await messenger.createThread(args[0] as Route, args[1] as string, args[2] as string | undefined)
+        : operation === "canCreateThread" ? await messenger.canCreateThread?.(args[0] as Route, args.length === 2 ? threadTags(args[1]) : undefined) ?? false
+        : operation === "createThread" ? await messenger.createThread(args[0] as Route, args[1] as string,
+          args[2] == null ? undefined : args[2] as string, args.length === 4 ? threadTags(args[3]) : undefined)
+        : operation === "inspectThread" ? await messenger.inspectThread?.(args[0] as Route)
+        : operation === "updateThread" ? await messenger.updateThread?.(args[0] as Route, threadUpdate(args[1]))
         : await messenger.fetchAfter(args[0] as Route, args[1] as string);
       result = { ok: true, value };
     } catch (error) { result = failure(error); }

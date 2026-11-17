@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { Readable, Transform } from "node:stream";
 import type { Config } from "./config";
-import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "./contracts";
+import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "./contracts";
 import { DeliveryError } from "./delivery";
 import { gatewayCall, gatewayPaths, gatewayRequest, MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_FRAME, readGatewayJson, type GatewayResult } from "./gateway-protocol";
 import type { GatewayReceipt, QueuedEvent } from "./gateway-store";
@@ -143,10 +143,15 @@ class GatewayMessenger implements GatewayHeadMessenger {
   }
   showApproval(approval: Approval): Promise<string> { return this.effect("showApproval", [approval]); }
   dismissApproval(approval: Approval): Promise<void> { return this.effect("dismissApproval", [approval]); }
-  canCreateThread(route: Route): Promise<boolean> { return this.effect("canCreateThread", [route]); }
-  createThread(route: Route, title: string, sourceMessageId?: string): Promise<Route> {
-    return this.effect("createThread", [route, title, sourceMessageId]);
+  canCreateThread(route: Route, appliedTags?: readonly string[]): Promise<boolean> {
+    return this.effect("canCreateThread", appliedTags === undefined ? [route] : [route, appliedTags]);
   }
+  createThread(route: Route, title: string, sourceMessageId?: string, appliedTags?: readonly string[]): Promise<Route> {
+    return this.effect("createThread", appliedTags !== undefined ? [route, title, sourceMessageId ?? null, appliedTags]
+      : sourceMessageId !== undefined ? [route, title, sourceMessageId] : [route, title]);
+  }
+  inspectThread(route: Route): Promise<ThreadInfo> { return this.effect("inspectThread", [route]); }
+  updateThread(route: Route, update: ThreadUpdate): Promise<ThreadInfo> { return this.effect("updateThread", [route, update]); }
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null> { return this.effect("fetchAfter", [route, messageId]); }
 
   async openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response> {

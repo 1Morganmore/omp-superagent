@@ -23,7 +23,7 @@ const agentDir = process.env.PI_CODING_AGENT_DIR!;
 const packageRoot = path.resolve(import.meta.dir, "../..");
 const extensionPath = path.join(packageRoot, role === "head" ? "src/extension.ts" : "src/lane-extension.ts");
 const customDirectory = path.join(root, "operator-custom-skills");
-const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close"];
+const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update"];
 const skillSettings = {
   customDirectories: [customDirectory],
   ignoredSkills: ["ignored-*"],
@@ -272,7 +272,7 @@ try {
       const tool = runner.getRegisteredTool(name)!.definition;
       const validate = () => validateToolArguments(tool, { type: "toolCall", id: "schema-check", name, arguments: input });
       if (valid) assert.doesNotThrow(validate, `${name} schema validation`);
-      else assert.throws(validate, /Validation failed for tool/, `${name} schema validation`);
+      else assert.throws(validate, /Validation failed for tool/, `${name} schema validation: ${JSON.stringify(input)}`);
     };
     const destination = { platform: "slack", accountId: "T:B", authorityId: "U", guildId: "T", channelId: "C", threadId: "1.2" };
     const modelChoice = { model: { provider: "fixture", id: "chat" }, modelReason: "Known task requirements" };
@@ -286,6 +286,19 @@ try {
     check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, modelReason: "" }, false);
     check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, preset: "middle", modelReason: "Native preset selected" }, true);
     check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, destination: { ...destination, platform: "unknown" } }, false);
+    check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, appliedTags: ["101"] }, true);
+    check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, appliedTags: ["101", "101"] }, false);
+    check("thread_inspect", { sourceId: "source" }, true);
+    check("thread_inspect", { sourceId: "source", laneId: "lane" }, true);
+    check("thread_inspect", { laneId: "lane" }, false);
+    for (const changes of [{ title: "Renamed" }, { appliedTags: [] }, { appliedTags: ["101"], archived: true }, { archived: false }])
+      check("lane_thread_update", { id: "lane", sourceId: "source", changes }, true);
+    const threadUpdate = runner.getRegisteredTool("lane_thread_update")!.definition;
+    assert.deepEqual(validateToolArguments(threadUpdate, { type: "toolCall", id: "normalized-boolean", name: "lane_thread_update",
+      arguments: { id: "lane", sourceId: "source", changes: { archived: "true" } } }),
+      { id: "lane", sourceId: "source", changes: { archived: true } });
+    for (const changes of [{}, { title: " " }, { archived: "not-a-boolean" }, { appliedTags: ["name"] }, { locked: true }])
+      check("lane_thread_update", { id: "lane", sourceId: "source", changes }, false);
     check("lane_models", {}, true);
     check("lane_models", { selectors: ["@smol", "@slow"] }, true);
     check("lane_models", { selectors: [] }, false);

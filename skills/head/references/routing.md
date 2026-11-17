@@ -29,6 +29,22 @@ tool.
   than asking the user to issue `/new` or create a thread manually. Existing topic
   work retains its lane. A distinct topic inside a bound thread needs a sibling
   destination, not a changed cwd or brief on the old binding.
+- For Discord forum/media work, use `thread_inspect` with the original user
+  `sourceId` to read the parent tags (also returned when inspecting a thread).
+  Pass exact observed IDs in `lane_start.appliedTags` when creating a new post;
+  do not guess names/IDs or select a tag just to bypass a required-tag policy.
+  An existing thread is not retagged by `lane_start`.
+- For an authorized thread-management request, handle it directly with
+  `lane_thread_update({ id, sourceId, changes })`, not by dispatching lane work.
+  `changes` may contain `title`, `appliedTags`, and `archived`. Tags replace the
+  whole set; omit to preserve, or use `[]` to clear only where allowed. The bot
+  needs ManageThreads. Only managed Discord guild threads can be changed.
+  Archive/reopen is independent of lane pause/resume/close: never couple them
+  automatically or treat a lane report as permission to change Discord.
+  Repeated calls for the same source return the original receipt, not current
+  state. Use `thread_inspect({sourceId, laneId})` for current state. A failed or
+  uncertain edit is not blindly replayed; reconcile before a new explicit user
+  request. Do not change thread identity or move the conversation.
 - Ordinary same-route follow-ups steer a running native execution by default.
   Treat the trusted envelope as a new received instruction, retaining its exact
   source ID. Still explicitly call `lane_message` when that instruction belongs

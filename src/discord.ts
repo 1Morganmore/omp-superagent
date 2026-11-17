@@ -3,9 +3,9 @@ import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelFlagsBitField, ChannelType, Client,
   Events, GatewayIntentBits, MessageFlags, ModalBuilder, Partials, PermissionFlagsBits, StringSelectMenuBuilder,
   Routes, TextInputBuilder, TextInputStyle,
-  type ChatInputCommandInteraction, type ForumChannel, type Interaction, type MediaChannel, type Message, type MessageCreateOptions, type PartialMessage,
+  type ChatInputCommandInteraction, type ForumChannel, type Interaction, type MediaChannel, type Message, type MessageCreateOptions, type PartialMessage, type PermissionsBitField,
 } from "discord.js";
-import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route } from "./contracts.ts";
+import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type ThreadInfo, type ThreadUpdate } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
@@ -656,13 +656,28 @@ export class DiscordMessenger implements Messenger {
     return inputs;
   }
 
-  private async forumThreadAllowed(channel: ForumChannel | MediaChannel): Promise<boolean> {
-    if (channel.flags.has(ChannelFlagsBitField.Flags.RequireTag)) {
-      throw new DeliveryError("Discord forum/media topics require an explicitly selected tag in this channel; this interface cannot select tags", "rejected");
+  private forumTags(channel: ForumChannel | MediaChannel, appliedTags: readonly string[] | undefined, permissions: Readonly<PermissionsBitField>): void {
+    if (appliedTags !== undefined && (!Array.isArray(appliedTags) || appliedTags.length > 5 ||
+      new Set(appliedTags).size !== appliedTags.length || appliedTags.some(id => typeof id !== "string"))) {
+      throw new DeliveryError("Discord forum/media tags must be at most five unique tag IDs", "rejected");
     }
+    if (channel.flags.has(ChannelFlagsBitField.Flags.RequireTag) && !appliedTags?.length) {
+      throw new DeliveryError("Discord forum/media topics require an explicitly selected tag in this channel", "rejected");
+    }
+    for (const id of appliedTags ?? []) {
+      const tag = channel.availableTags.find(tag => tag.id === id);
+      if (!tag) throw new DeliveryError("Discord tag ID is not available in this forum/media channel", "rejected");
+      if (tag.moderated && !permissions.has(PermissionFlagsBits.ManageThreads)) {
+        throw new DeliveryError("Discord moderated tags require ManageThreads permission", "rejected");
+      }
+    }
+  }
+
+  private async forumThreadAllowed(channel: ForumChannel | MediaChannel, appliedTags?: readonly string[]): Promise<boolean> {
     const member = await channel.guild.members.fetchMe({ force: true });
     const permissions = channel.permissionsFor(member);
     if (!permissions) throw new DeliveryError("Discord bot channel permissions could not be resolved", "rejected");
+    this.forumTags(channel, appliedTags, permissions);
     // Forum/media posts require SEND_MESSAGES, not CREATE_PUBLIC_THREADS.
     // Reading and replying must also work for the resulting native topic.
     // https://docs.discord.com/developers/topics/threads#creating-threads-in-forum-and-media-channels
@@ -671,12 +686,16 @@ export class DiscordMessenger implements Messenger {
   }
 
   /** Read-only capability checks never enable features or choose forum tags. */
-  async canCreateThread(route: Route): Promise<boolean> {
+  async canCreateThread(route: Route, appliedTags?: readonly string[]): Promise<boolean> {
     this.assertRoute(route);
-    if (!route.guildId || route.threadId !== null) return false;
+    if (!route.guildId || route.threadId !== null) {
+      if (appliedTags !== undefined) throw new DeliveryError("Discord tags can only be selected for forum/media topic creation", "rejected");
+      return false;
+    }
     try {
       const channel = await this.channel(route, true);
-      if (channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia) return await this.forumThreadAllowed(channel);
+      if (channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia) return await this.forumThreadAllowed(channel, appliedTags);
+      if (appliedTags !== undefined) throw new DeliveryError("Discord tags can only be selected for forum/media topic creation", "rejected");
       if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement) return false;
       const member = await channel.guild.members.fetchMe({ force: true });
       const permissions = channel.permissionsFor(member);
@@ -689,20 +708,24 @@ export class DiscordMessenger implements Messenger {
     } catch (error) { throw deliveryError(error); }
   }
 
-  async createThread(route: Route, title: string, sourceMessageId?: string): Promise<Route> {
+  async createThread(route: Route, title: string, sourceMessageId?: string, appliedTags?: readonly string[]): Promise<Route> {
     this.assertRoute(route);
     if (!route.guildId) throw new DeliveryError("Discord DMs cannot create threads; provide an explicit authorized guild target", "rejected");
     if (route.threadId) throw new DeliveryError("Discord cannot nest threads; provide an explicit parent-channel target", "rejected");
-    if (!title.trim() || title.length > 100) throw new DeliveryError("Discord thread title must contain 1–100 characters", "rejected");
+    if (typeof title !== "string" || !title.trim() || title.length > 100) throw new DeliveryError("Discord thread title must contain 1–100 characters", "rejected");
     try {
       // Forum/media roots cannot receive ordinary messages, but can create
       // native starter-message posts within this same authorized destination.
       const channel = await this.channel(route, true);
+      if (appliedTags !== undefined && channel.type !== ChannelType.GuildForum && channel.type !== ChannelType.GuildMedia) {
+        throw new DeliveryError("Discord tags can only be selected for forum/media topic creation", "rejected");
+      }
       let thread;
       if (channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia) {
         if (sourceMessageId !== undefined) throw new DeliveryError("Discord forum/media topics cannot reuse a source message; provide the authorized parent without a source", "rejected");
-        if (!await this.forumThreadAllowed(channel)) throw new DeliveryError("Discord bot lacks permissions to create and use a forum/media topic", "rejected");
-        thread = await channel.threads.create({ name: title, message: { content: title, allowedMentions: NO_MENTIONS } });
+        if (!await this.forumThreadAllowed(channel, appliedTags)) throw new DeliveryError("Discord bot lacks permissions to create and use a forum/media topic", "rejected");
+        thread = await channel.threads.create({ name: title, ...(appliedTags === undefined ? {} : { appliedTags: [...appliedTags] }),
+          message: { content: title, allowedMentions: NO_MENTIONS } });
       } else if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement) {
         throw new DeliveryError("This guild channel cannot create a public conversation thread", "rejected");
       } else if (sourceMessageId) {
@@ -722,6 +745,84 @@ export class DiscordMessenger implements Messenger {
       if (!created || created.threadId === null || created.guildId !== route.guildId || created.channelId !== route.channelId) throw new DeliveryError("Created Discord thread had an unexpected destination", "uncertain");
       return created;
     } catch (error) { throw deliveryError(error); }
+  }
+
+  private async threadContext(route: Route) {
+    this.assertRoute(route);
+    if (!route.guildId) throw new DeliveryError("Discord thread inspection requires an authorized guild destination", "rejected");
+    const channel = await this.channel(route, true);
+    const parent = channel.isThread() ? await this.channel({ ...route, threadId: null }, true) : channel;
+    if (parent.type !== ChannelType.GuildText && parent.type !== ChannelType.GuildAnnouncement &&
+      parent.type !== ChannelType.GuildForum && parent.type !== ChannelType.GuildMedia) {
+      throw new DeliveryError("Discord destination is not a supported thread parent", "rejected");
+    }
+    const member = await parent.guild.members.fetchMe({ force: true });
+    const parentPermissions = parent.permissionsFor(member);
+    const permissions = channel.isThread() ? channel.permissionsFor(member) : parentPermissions;
+    if (!parentPermissions || !permissions) throw new DeliveryError("Discord bot channel permissions could not be resolved", "rejected");
+    if (!parentPermissions.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]) ||
+      !permissions.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory])) {
+      throw new DeliveryError("Discord bot lacks permissions to inspect this thread destination", "rejected");
+    }
+    return { channel, parent, permissions };
+  }
+
+  async inspectThread(route: Route): Promise<ThreadInfo> {
+    try {
+      const { channel, parent } = await this.threadContext(route);
+      const forum = parent.type === ChannelType.GuildForum || parent.type === ChannelType.GuildMedia;
+      return {
+        route: physicalRoute(route),
+        title: channel.isThread() ? channel.name : parent.name,
+        archived: channel.isThread() ? channel.archived : null,
+        requiresTag: forum && parent.flags.has(ChannelFlagsBitField.Flags.RequireTag),
+        availableTags: forum ? parent.availableTags.map(tag => ({ id: tag.id, name: tag.name, moderated: tag.moderated })) : [],
+        appliedTags: channel.isThread() ? [...channel.appliedTags] : [],
+      };
+    } catch (error) { throw deliveryError(error); }
+  }
+
+  async updateThread(route: Route, update: ThreadUpdate): Promise<ThreadInfo> {
+    this.assertRoute(route);
+    if (!route.guildId || !route.threadId) throw new DeliveryError("Discord thread updates require an existing guild thread", "rejected");
+    if (typeof update !== "object" || update === null || Array.isArray(update) || !Object.keys(update).length ||
+      Object.keys(update).some(key => key !== "title" && key !== "appliedTags" && key !== "archived") ||
+      ("title" in update && (typeof update.title !== "string" || !update.title.trim() || update.title.length > 100)) ||
+      ("archived" in update && typeof update.archived !== "boolean") ||
+      ("appliedTags" in update && !Array.isArray(update.appliedTags))) {
+      throw new DeliveryError("Discord thread update requires only a title of 1-100 characters, tag IDs, or a boolean archived value", "rejected");
+    }
+    let edited = false;
+    try {
+      const { channel, parent, permissions } = await this.threadContext(route);
+      if (!channel.isThread()) throw new DeliveryError("Discord thread updates require an existing guild thread", "rejected");
+      if (!permissions.has(PermissionFlagsBits.ManageThreads)) throw new DeliveryError("Discord thread updates require ManageThreads permission", "rejected");
+      if ("appliedTags" in update) {
+        if (parent.type !== ChannelType.GuildForum && parent.type !== ChannelType.GuildMedia) {
+          throw new DeliveryError("Discord tags can only be updated on forum/media threads", "rejected");
+        }
+        this.forumTags(parent, update.appliedTags, permissions);
+      }
+      // discord.js sends these fields together in one PATCH. Omitted fields
+      // stay omitted: never unarchive, lock, or change tags as a side effect.
+      await channel.edit({
+        ...(update.title === undefined ? {} : { name: update.title }),
+        ...(update.appliedTags === undefined ? {} : { appliedTags: [...update.appliedTags] }),
+        ...(update.archived === undefined ? {} : { archived: update.archived }),
+      });
+      edited = true;
+      const result = await this.inspectThread(route);
+      if ((update.title !== undefined && result.title !== update.title) ||
+        (update.archived !== undefined && result.archived !== update.archived) ||
+        (update.appliedTags !== undefined && (result.appliedTags.length !== update.appliedTags.length ||
+          update.appliedTags.some(id => !result.appliedTags.includes(id))))) {
+        throw new DeliveryError("Discord thread update readback did not match the requested state", "uncertain");
+      }
+      return result;
+    } catch (error) {
+      if (edited) throw new DeliveryError("Discord thread update was sent but authoritative readback could not be confirmed", "uncertain", undefined, { cause: error });
+      throw deliveryError(error);
+    }
   }
 
   async stop(): Promise<void> {

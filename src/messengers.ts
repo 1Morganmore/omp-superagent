@@ -1,6 +1,6 @@
 import type { Config } from "./config";
 import { requireMessengerCredentials } from "./config";
-import type { Approval, Attachment, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Platform, Route, StorePort } from "./contracts";
+import type { Approval, Attachment, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Platform, Route, StorePort, ThreadInfo, ThreadUpdate } from "./contracts";
 import { physicalRouteKey } from "./contracts";
 import { DeliveryError } from "./delivery";
 import { DiscordMessenger } from "./discord";
@@ -76,11 +76,23 @@ export class MessengerHub implements Messenger {
   dismissApproval(approval: Approval): Promise<void> {
     return this.adapter(approval.route).dismissApproval(approval);
   }
-  canCreateThread(route: Route): Promise<boolean> {
-    return this.adapter(route).canCreateThread?.(route) ?? Promise.resolve(false);
+  canCreateThread(route: Route, appliedTags?: readonly string[]): Promise<boolean> {
+    if (appliedTags !== undefined && route.platform !== "discord") throw new DeliveryError("Forum tags are only supported on Discord", "rejected");
+    return this.adapter(route).canCreateThread?.(route, appliedTags) ?? Promise.resolve(false);
   }
-  createThread(route: Route, title: string, sourceMessageId?: string): Promise<Route> {
-    return this.adapter(route).createThread(route, title, sourceMessageId);
+  createThread(route: Route, title: string, sourceMessageId?: string, appliedTags?: readonly string[]): Promise<Route> {
+    if (appliedTags !== undefined && route.platform !== "discord") throw new DeliveryError("Forum tags are only supported on Discord", "rejected");
+    return this.adapter(route).createThread(route, title, sourceMessageId, appliedTags);
+  }
+  inspectThread(route: Route): Promise<ThreadInfo> {
+    const adapter = this.adapter(route);
+    if (!adapter.inspectThread) throw new DeliveryError("Thread inspection is unsupported on this transport", "rejected");
+    return adapter.inspectThread(route);
+  }
+  updateThread(route: Route, update: ThreadUpdate): Promise<ThreadInfo> {
+    const adapter = this.adapter(route);
+    if (!adapter.updateThread) throw new DeliveryError("Thread management is unsupported on this transport", "rejected");
+    return adapter.updateThread(route, update);
   }
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null> {
     return this.adapter(route).fetchAfter(route, messageId);

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../src/config";
-import type { Approval, Attachment, Inbound, Messenger, OutputRecord, Route } from "../src/contracts";
+import type { Approval, Attachment, Inbound, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "../src/contracts";
 import { DeliveryError } from "../src/delivery";
 import { createGatewayMessenger } from "../src/gateway-client";
 import { gatewayCall, gatewayPaths } from "../src/gateway-protocol";
@@ -33,7 +33,7 @@ class CapabilityTransport implements Messenger {
   async send(_output: OutputRecord): Promise<string> { this.mutations.push("send"); throw new Error("Unexpected send"); }
   async showApproval(_approval: Approval): Promise<string> { this.mutations.push("showApproval"); throw new Error("Unexpected approval"); }
   async dismissApproval(_approval: Approval): Promise<void> { this.mutations.push("dismissApproval"); throw new Error("Unexpected dismissal"); }
-  async createThread(_destination: Route, _title: string): Promise<Route> { this.mutations.push("createThread"); throw new Error("Unexpected thread creation"); }
+  async createThread(_destination: Route, _title: string, _sourceMessageId?: string, _appliedTags?: readonly string[]): Promise<Route> { this.mutations.push("createThread"); throw new Error("Unexpected thread creation"); }
   async fetchAfter(_destination: Route, _cursor: string): Promise<Inbound[] | null> { throw new Error("Unexpected history read"); }
   async openAttachment(_destination: Route, _attachment: Attachment, _signal: AbortSignal): Promise<Response> { throw new Error("Unexpected attachment read"); }
 }
@@ -135,4 +135,69 @@ test("gateway capability calls retain head authorization, route checks, and a fi
     await expect(gatewayCall(f.socket, "/effect", effect(operation, [route]), owner)).rejects.toThrow("Unknown Gateway effect");
   expect(transport.checked).toEqual([foreign, route]);
   expect(transport.mutations).toEqual([]);
+});
+
+class TopicTransport extends CapabilityTransport {
+  topic: ThreadInfo | undefined;
+  failure: DeliveryError | undefined;
+  constructor() {
+    super();
+  }
+  override async createThread(destination: Route, title: string, sourceMessageId?: string, appliedTags?: readonly string[]): Promise<Route> {
+    if (sourceMessageId !== undefined) throw new DeliveryError("Forum source must be absent", "rejected");
+    if (!appliedTags?.length) throw new DeliveryError("Tag required", "rejected");
+    this.mutations.push("createThread");
+    this.topic = { route: { ...destination, threadId: "101" }, title, archived: false, requiresTag: true,
+      availableTags: [{ id: "201", name: "Work", moderated: false }], appliedTags };
+    return this.topic.route;
+  }
+  async inspectThread(destination: Route): Promise<ThreadInfo> {
+    if (!this.topic || destination.threadId !== this.topic.route.threadId || destination.accountId !== this.topic.route.accountId)
+      throw new DeliveryError("Unknown topic", "rejected");
+    return this.topic;
+  }
+  async updateThread(destination: Route, changes: ThreadUpdate): Promise<ThreadInfo> {
+    const before = await this.inspectThread(destination);
+    this.mutations.push("updateThread");
+    if (this.failure) throw this.failure;
+    this.topic = { ...before, ...changes };
+    return this.topic;
+  }
+}
+
+test("Gateway and hub preserve selected tags, omitted source IDs, partial edits and authoritative thread reads", async () => {
+  const transport = new TopicTransport();
+  const f = await fixture(new MessengerHub({ discord: transport }));
+  await f.client.start({ message: async () => {}, answer: async () => {} });
+  const parent: Route = { ...route, platform: "discord", guildId: "G1", topicId: undefined };
+  const created = await f.client.createThread(parent, "Work", undefined, ["201"]);
+  if (!f.client.updateThread || !f.client.inspectThread) throw new Error("Expected thread management");
+  expect(await f.client.inspectThread(created)).toMatchObject({ title: "Work", appliedTags: ["201"], archived: false });
+  expect(await f.client.updateThread(created, { title: "Finished", archived: true }))
+    .toMatchObject({ route: created, title: "Finished", appliedTags: ["201"], archived: true });
+  expect(await f.client.updateThread(created, { archived: false }))
+    .toMatchObject({ title: "Finished", appliedTags: ["201"], archived: false });
+  await expect(f.client.inspectThread({ ...created, accountId: "other" })).rejects.toThrow("Unknown topic");
+  expect(transport.mutations).toEqual(["createThread", "updateThread", "updateThread"]);
+});
+
+test("Gateway retains uncertain thread edit receipts, rejects conflicting retries and validates mutation fields", async () => {
+  const transport = new TopicTransport();
+  const parent: Route = { ...route, platform: "discord", guildId: "G1" };
+  const created = await transport.createThread(parent, "Work", undefined, ["201"]);
+  const f = await fixture(new MessengerHub({ discord: transport }));
+  const owner = { token: f.store.token(), clientId: crypto.randomUUID() };
+  await gatewayCall(f.socket, "/attach", { pid: process.pid }, owner);
+  transport.failure = new DeliveryError("Lost edit receipt", "uncertain");
+  const edit = { id: crypto.randomUUID(), operation: "updateThread", args: [created, { archived: true }] };
+  await expect(gatewayCall(f.socket, "/effect", edit, owner)).rejects.toThrow("Lost edit receipt");
+  transport.failure = undefined;
+  await expect(gatewayCall(f.socket, "/effect", edit, owner)).rejects.toThrow("Lost edit receipt");
+  await expect(gatewayCall(f.socket, "/effect", { ...edit, args: [created, { archived: false }] }, owner)).rejects.toThrow();
+  for (const changes of [{}, { archived: "true" }, { appliedTags: null }, { title: 1 }, { locked: true }]) {
+    await expect(gatewayCall(f.socket, "/effect", {
+      id: crypto.randomUUID(), operation: "updateThread", args: [created, changes],
+    }, owner)).rejects.toBeInstanceOf(DeliveryError);
+  }
+  expect(transport.mutations).toEqual(["createThread", "updateThread"]);
 });

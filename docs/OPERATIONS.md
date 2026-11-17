@@ -18,7 +18,8 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 ### 레인 관리 도구와 운영 스킬
 
 헤드만 `lane_models`, `lane_init_presets`, `lane_start`, `lane_set_model`,
-`lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`를 사용한다.
+`lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`,
+`thread_inspect`, `lane_thread_update`를 사용한다.
 `lane_inspect({})`가 목록 조회다. 레인에는 관리 권한을, native 자식에는 관리·게시판 권한을 주지 않는다.
 일반 OMP에 이 확장들을 전역 설치하지 않는다. 도구 인자·역할 경계는
 [설계의 관리 도구 계약](../DESIGN.md#5-레인-관리-도구와-운영-스킬)을 따른다.
@@ -360,6 +361,17 @@ export SLACK_BOT_TOKEN SLACK_APP_TOKEN
 레인 실행을 시작하지 않는다. 보고 발송 실패·불확실성은 실행 보류이며 자동 재발송하지 않는다.
 질문·계산·연결 테스트는 기존 대화에서 바로 답하고, 같은 작업의 후속 지시는 기존 주제를 쓴다.
 native topic을 지원하지 않는 private chat은 기존의 논리 주제 제한을 유지한다.
+
+Discord 포럼에서는 “버그 태그로 새 작업 글을 만들어”, 기존 작업에서는 “제목을 바꿔”,
+“이 스레드를 보관해/다시 열어”처럼 요청할 수 있다. 헤드는 `thread_inspect`로 실제 태그 ID와
+현재 상태를 조회하고 새 글은 `lane_start.appliedTags`, 기존 관리 스레드는
+`lane_thread_update`로 처리한다. 태그는 전체 교체이며 생략하면 보존한다.
+필수 태그가 있는 포럼에서 빈 태그를 선택하거나 존재하지 않는 태그를 지정할 수 없다.
+기존 스레드 관리와 moderated 태그 선택에는 봇의 **Manage Threads** 권한이 필요하다.
+서버 권한을 자동 변경하지 않으며 DM·다른 플랫폼·등록되지 않은 스레드의 변경은 지원하지 않는다.
+보관/다시 열기는 레인 중지·완료·재개와 별개다. 진행 중인 레인의 보고 발송에 영향을 줄 수
+있으므로 완료 여부만 보고 자동 보관하지 않는다. 변경 결과가 불확실하면 현재 상태를 조회한 뒤
+새 명시적 요청으로 조정하며, 동일 요청을 자동 재전송하지 않는다.
 
 오래 걸리는 작업에는 착수 뒤에도 같은 작업 스레드로 간결한 **중간 진척 보고**를 보낸다.
 레인이 실제로 확인한 결과·현재/다음 단계·막힘을 중간 assistant 문장으로 보고하면 헤드가

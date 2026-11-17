@@ -103,7 +103,7 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 | `scripts/setup.sh`, `src/setup.ts`, `src/credentials.ts` | controlling-terminal 셋업·토큰 숨김 입력, 기존 config 검증 재사용, owner-only sibling 환경 파일과 start/doctor의 제한된 로딩. 봇 활성화 없음 |
 | `src/gateway*.ts` | detached Gateway 기동·소유권·영속 수신/receipt·헤드 감독·로컬 transport 효과 proxy |
 | `src/gateway-client.ts` | `createGatewayMessenger(config): Messenger`. 헤드 runtime에 기존 Messenger 계약을 제공하며 stop은 client만 detach |
-| `src/extension.ts` | `role=head`인 부모 없는 root에서만 runtime 시작과 9개 관리 도구 등록 |
+| `src/extension.ts` | `role=head`인 부모 없는 root에서만 runtime 시작과 관리 도구 등록 |
 | `src/lane-extension.ts`, `src/lane-report.ts` | root lane의 역할 지침·근거/대기 관측 보고. 헤드 manager·메신저 권한 없음 |
 | `src/board.ts`, `src/board-extension.ts` | 독립 SQLite 정보 게시판과 head/lane 공통 도구·세션별 알림/구독 |
 | `src/messengers.ts` | Gateway 안에서 구성된 실제 어댑터·자격 증명을 hub에 연결, 원래 platform으로 발송·승인·첨부 API dispatch |
@@ -421,13 +421,29 @@ steer로 합류한 입력을 누락하거나 자동 재제출하지 않는다.
 
 | 플랫폼 | 자동 생성 범위 | 미지원/제약 |
 | --- | --- | --- |
-| Discord | 허용된 서버 text/announcement 부모의 public thread, forum/media의 starter-message post | DM은 논리 주제. 필수 태그가 있는 forum/media는 임의 태그 선택 없이 거부 |
+| Discord | 허용된 서버 text/announcement 부모의 public thread, forum/media의 starter-message post | DM은 논리 주제. 필수 태그 forum/media는 조회한 정확한 태그 ID를 명시해야 생성 |
 | Telegram | forum supergroup의 topic 또는 `getMe.has_topics_enabled`인 owner-private topic | supergroup 관리자·`can_manage_topics` 필요. 일반 그룹은 topic 생성 불가 |
 | Slack | 허용 채널·owner-DM의 실제 root `ts`에 붙는 thread | 기존 thread 안에는 중첩하지 않고 별도 root를 생성 |
 
 실제 capability는 인증된 어댑터가 읽고 Gateway가 전달한다. 권한·네트워크 실패를
 “미지원”으로 바꿔 조용히 다른 목적지에 보내지 않는다. 봇 topic 모드·권한을 변경하거나
 채널·서버를 임의로 생성하지 않는다.
+
+Discord의 `thread_inspect(sourceId, laneId?)`는 원본 사용자 입력의 채널/스레드 또는
+지정한 관리 레인의 스레드에서 제목·보관 상태·부모의 availableTags/필수 태그 정책·현재 태그를
+읽는다. `lane_start.appliedTags`는 새 forum/media 글에 적용할 정확한 ID 목록이며
+최대 5개, 중복 없이 선택한다. text/announcement와 기존 thread 연결에는 태그 인자를
+허용하지 않는다. moderated 태그는 ManageThreads 권한이 필요하다. 선택 태그는 생성 의도에
+함께 기록하며 동일 source의 충돌 선택이나 불확실한 생성을 자동 재시도하지 않는다.
+
+`lane_thread_update(id, sourceId, changes)`는 등록된 Discord guild thread의 title,
+appliedTags, archived만 변경한다. 원본 수신 사용자 source와 양쪽 route를 검증하고
+봇의 ManageThreads 권한을 요구한다. 태그 생략은 보존, 빈 배열은 명시적 제거이며 필수
+태그 정책을 우회하지 않는다. 한 번의 SDK edit 뒤 실제 상태를 다시 읽어 요청값을 확인한다.
+결과 유실/불일치는 uncertain으로 남기며 source별 의도·영수증과 Gateway effect 장부로
+중복 변경을 막는다. 같은 source 재호출의 성공값은 과거 영수증이지 현재 상태가 아니다.
+보관은 레인을 pause/close하지 않고 다시 열기도 resume하지 않는다. 완료 보고나
+게시판 글이 외부 변경 권한을 만들지 않으며, 제목 변경은 레인 ID·저장된 작업 제목을 바꾸지 않는다.
 
 기존 thread의 같은 주제는 연결된 세션을 재사용한다. 명확히 다른 주제/저장소는 헤드가
 `destination`에 같은 허용 부모와 `threadId:null`(논리 `topicId` 없음)을 지정해 sibling
@@ -687,7 +703,7 @@ bash·eval 상태, 대기 입력, 승인, 비동기 결과가 다른 세션으�
 ## 5. 레인 관리 도구와 운영 스킬
 
 현재 `src/extension.ts`가 다음 도구를 등록한다. 기존 OMP task·세션 엔진을 대체하지 않는다.
-관리 도구는 9개이며 부모 없는 헤드만 사용할 수 있다. 레인과 native 자식은 관리 호출을 거부하고,
+관리 도구는 부모 없는 헤드만 사용할 수 있다. 레인과 native 자식은 관리 호출을 거부하고,
 운영자가 명시적으로 제외한 도구를 역할 스킬이 다시 활성화하지 않는다.
 
 | 도구 | 책임 |
@@ -700,6 +716,8 @@ bash·eval 상태, 대기 입력, 승인, 비동기 결과가 다른 세션으�
 | `lane_message` | `id`, `text`, 실제 허가 입력 `sourceId`, 선택적 `workflow: {name,reason}`으로 지정 레인에 명시적 지시·후속 맥락 전달 |
 | `lane_pause`, `lane_resume` | 실행과 자동 재개 정책을 함께 제어하고 상태 확인. `lane_resume`는 실제 재개 지시의 `sourceId`로 기존 paused native goal의 결과를 원래 route에 연결 |
 | `lane_close` | 확인한 evidence와 completed/cancelled 결과를 기록. merge·게시·worktree 삭제 권한을 부여하지 않음 |
+| `thread_inspect` | 원본 사용자 sourceId와 선택적 laneId로 Discord 부모 태그·스레드 상태 조회 |
+| `lane_thread_update` | id/sourceId/changes로 관리 Discord 스레드 제목·태그·보관 상태 변경. 레인 실행 상태와 독립 |
 
 `lane_start`는 실행 완료나 빈 슬롯을 기다리지 않고 레인 ID와 접수 상태를 반환한다.
 중복된 원본 요청이나 재전달이 같은 레인을 중복 생성하지 않게 한다.
