@@ -212,6 +212,7 @@ export interface ApprovalResolution {
   response?: DialogResponse;
   reason?: string;
   sourceId?: string;
+  headSelection?: { readonly reviewId: string; readonly reason: string };
 }
 
 export interface HeadRecoveryDecision {

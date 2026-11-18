@@ -649,7 +649,7 @@ try {
   const laneReads = nativeToolResults(laneEntries, "board_read");
   assert.equal(headReads.length, expectedReports.length);
   assert.equal(laneReads.length, laneIds.length);
-  if (presetScenario === "valid") {
+  if (presetScenario === "create") {
     const source: Inbound = { id: "208", messageId: "208", route: thread, receivedAt: Date.now(), attachments: [],
       text: "Please switch your own model to gateway-native/alternate." };
     await messenger.deliver(source);
@@ -667,6 +667,12 @@ try {
     const entries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
     assert.equal(requestIds(entries).filter(id => id === source.id).length, 1);
     assert.equal(entries.filter(entry => entry.type === "model_change" && entry.model === "gateway-native/alternate").length, 1);
+    const choice: Inbound = { id: "209", messageId: "209", route: thread, receivedAt: Date.now(), attachments: [],
+      text: "Choose a reversible cache layout for the active local lane." };
+    await messenger.deliver(choice);
+    await until(() => messenger.sent.some(output => output.replyTo?.messageId === choice.messageId
+      && output.text.includes("Flat") && output.text.includes("simpler and reversible")), "HEAD's confirmed choice and reason on the original request");
+    await until(() => messenger.sent.some(output => output.text === "HEAD:209"), "the original lane continues after the confirmed native choice");
   }
   for (const [name, bytes] of settingsBytes) assert.deepEqual(await fs.readFile(path.join(agent, name)), bytes);
   assert.deepEqual(errors, []);

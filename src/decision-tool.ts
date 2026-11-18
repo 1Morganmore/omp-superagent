@@ -5,7 +5,8 @@ import { parseDialog } from "./dialog";
 
 /** Structured owner questions use the native host's UI, never a second messenger path. */
 export function registerDecisionAsk(pi: ExtensionAPI): void {
-  if (!["head", "lane"].includes(process.env.OMP_SUPERAGENT_ROLE ?? "")) return;
+  const role = process.env.OMP_SUPERAGENT_ROLE;
+  if (role !== "head" && role !== "lane") return;
   const restricted = "Owner decisions are restricted to the root managed HEAD or lane session";
   // Public extension ToolDefinition has no concurrency field. Reject overlap
   // instead of replacing the native host's single active dialog surface.
@@ -19,8 +20,11 @@ export function registerDecisionAsk(pi: ExtensionAPI): void {
     if (event.toolName === "decision_ask" && ctx.agent.kind !== "main") return { block: true, reason: restricted };
   });
   pi.registerTool({
-    name: "decision_ask", label: "Ask an owner decision", approval: "read", loadMode: "essential",
-    description: "Ask structured questions on this managed session's native UI. Returns a stable decision id and the actual submitted answers or cancellation, timeout, or chat state. Only explicit submitted answers are decisions; recommendations, timeouts and chat are not owner acceptance. No default answers, timeout, messenger routing, or automatic work resume.",
+    name: "decision_ask", label: "Request a tracked decision", approval: "read", loadMode: "essential",
+    description: (role === "lane"
+      ? "Send structured questions to the HEAD first. The HEAD can select routine options within the original assignment; important or unresolved choices go to the owner. A submitted answer is not necessarily from the owner and does not grant execution approval or expand scope. "
+      : "Ask the owner structured questions on this managed session's native UI. ") +
+      "Returns a stable decision id and the actual submitted answers or cancellation, timeout, or chat state. Recommendations, timeouts and chat are not acceptance. No default answers, timeout, messenger routing, or automatic work resume.",
     parameters: Type.Object({
       questions: Type.Array(Type.Object({
         question: Type.String(),

@@ -5687,6 +5687,75 @@ describe("real Store runtime coordination", () => {
     return { ...f, id, frame, approval, response: { answers: [{ id: `${id}:0`, selectedOptions: ["Redis"] }] } };
   }
 
+  async function laneDecision() {
+    const f = fixture();
+    const destination = route("42");
+    const lane = savedLane(f.store, f.config, "choice-lane", destination);
+    const source = message("lane-choice-owner", destination, "Implement the fixture; choose a reversible local cache layout.");
+    await f.runtime.start();
+    await admit(f.runtime, source);
+    await f.runtime.messageLane(lane.id, source.text, source.id);
+    await f.runtime.kick();
+    const host = f.hosts.get(lane.socketPath);
+    if (!host) throw new Error("Lane native Host was not launched");
+    const decision = decisionId(host.state.sessionId, "lane-choice-call");
+    const frame = { type: "extension_ui_request", method: "ask", id: "lane-choice-native",
+      questions: [{ id: `${decision}:0`, question: "Which local cache layout?", options: [{ label: "Flat" }, { label: "Nested" }] }] };
+    host.state.pendingUiRequests = [frame];
+    host.emit(frame);
+    f.main.complete("");
+    await f.main.whenPrompts(2);
+    const approval = f.runtime.inspectDecision(decision);
+    return { ...f, source, host, decision, frame, approval, lane, answers: [{ id: `${decision}:0`, selectedOptions: ["Flat"] }] };
+  }
+
+  test("HEAD answers the exact routine lane choice and reports its reason without opening an owner card", async () => {
+    const f = await laneDecision();
+    expect(f.messenger.shown.size).toBe(0);
+    await expect(f.messenger.handlers!.answer(f.approval.approvalId, { answers: f.answers }, f.source.route)).rejects.toMatchObject({ certainty: "rejected" });
+    await expect(f.runtime.reviewLaneDecision({ id: f.decision, reason: "Local and reversible",
+      answers: [{ ...f.answers[0]!, selectedOptions: ["Invented"] }] })).rejects.toMatchObject({ certainty: "rejected" });
+    expect(f.host.responses).toEqual([]);
+
+    const selected = await f.runtime.reviewLaneDecision({ id: f.decision, reason: "Local and reversible", answers: f.answers });
+    await f.messenger.whenSent(1);
+    expect(selected).toMatchObject({ state: "answered", headSelection: { reason: "Local and reversible" }, response: { answers: f.answers } });
+    expect(f.host.responses).toEqual([{ id: f.frame.id, response: { answers: f.answers } }]);
+    expect(f.messenger.sent).toMatchObject([{ route: f.source.route, replyTo: { messageId: f.source.messageId } }]);
+    expect(f.messenger.sent[0]?.text).toContain("Flat");
+    expect(f.messenger.sent[0]?.text).toContain("Local and reversible");
+    expect(f.messenger.shown.size).toBe(0);
+  });
+
+  test("HEAD escalation opens the original lane question and leaves its answer to the owner", async () => {
+    const f = await laneDecision();
+    const escalated = await f.runtime.reviewLaneDecision({ id: f.decision, reason: "Requires an owner commitment" });
+    expect(escalated).toMatchObject({ state: "pending", requestId: f.frame.id, remoteId: `card-${f.approval.approvalId}` });
+    expect(f.host.responses).toEqual([]);
+    await expect(f.runtime.reviewLaneDecision({ id: f.decision, reason: "Trying to bypass the owner", answers: f.answers })).rejects.toThrow("original pending lane choice");
+
+    await f.messenger.handlers!.answer(f.approval.approvalId, { answers: f.answers }, f.source.route);
+    expect(f.host.responses).toEqual([{ id: f.frame.id, response: { answers: f.answers } }]);
+    expect(f.runtime.inspectDecision(f.decision).headSelection).toBeUndefined();
+    expect(f.messenger.sent).toEqual([]);
+  });
+
+  test("unclassified lane selects still go to the operator and cannot be answered by HEAD", async () => {
+    const f = fixture();
+    const lane = savedLane(f.store, f.config, "approval-lane", route("44"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-approval-lane");
+    const frame = { type: "extension_ui_request", method: "select", id: "execution-approval", title: "Allow external action?",
+      options: ["Approve", "Deny"] };
+    host.state.pendingUiRequests = [frame];
+    f.hosts.set(lane.socketPath, host);
+    await f.runtime.start();
+    await f.messenger.whenApproval();
+    expect(f.messenger.shown.size).toBe(1);
+    expect(f.main.prompts).toEqual([]);
+    expect(f.runtime.listDecisions()).toEqual([]);
+    expect(host.responses).toEqual([]);
+  });
+
   test.each(["report", "progress"])("a decision raised from %s retains the original owner source through activity and handoff links", async kind => {
     const { runtime, store, main, messenger } = fixture();
     await runtime.start();

@@ -8,7 +8,7 @@ import { nativeRequestEnvelope } from "./native-request-envelope";
 
 const provider = "gateway-native";
 const model = "local";
-const managers = ["head_recovery", "head_set_model", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close"];
+const managers = ["head_recovery", "head_set_model", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_review_decision", "lane_close"];
 
 export default function gatewayProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_NATIVE_GATEWAY_ROOT;
@@ -63,7 +63,7 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     // silently abandoned 205 when 206 arrived after 205's read(xd://lane_message).
     const activeUsers = users.slice(Math.max(0, users.findLastIndex(user => !user.steering)));
     const selected = activeUsers.find(user => user.requestId && (role === "head"
-      ? ["203", "204", "205", "206"].includes(user.requestId) && !delegated.has(user.requestId)
+      ? ["203", "204", "205", "206", "209"].includes(user.requestId) && !delegated.has(user.requestId)
       : role === "lane" && !findings.has(user.requestId))) ?? activeUsers.at(-1);
     if (!selected) throw new Error("Unexpected native Gateway model input: no runtime request or startup turn");
     const { index: userIndex, text, requestId, bootstrap } = selected;
@@ -120,6 +120,15 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     }
     if (!requestId) throw new Error("Ordinary native input requires its durable request identity");
     if (role === "head") {
+      if (requestId.startsWith("lane-decision-review:")) {
+        const id = /Internal review for lane [^,]+, decision (d-[a-f0-9]{24})\./.exec(text)?.[1];
+        if (!id) throw new Error("Native HEAD review lost its exact decision identity");
+        if (!called("lane_review_decision")) return invoke("lane_review_decision", {
+          id, reason: "A flat layout is simpler and reversible within this local assignment.",
+          answers: [{ id: `${id}:0`, selectedOptions: ["Flat"] }],
+        });
+        return { content: [] };
+      }
       if (requestId.startsWith("progress:")) {
         const snapshot = /Structured lane observation: (\{[^\n]+\})/.exec(text)?.[1];
         if (!snapshot) throw new Error("Structured native progress lost its observation");
@@ -137,7 +146,7 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
         });
         return { content: [] };
       }
-      if (["203", "204", "205", "206"].includes(requestId)) {
+      if (["203", "204", "205", "206", "209"].includes(requestId)) {
         if (!called("lane_message")) {
           const binding = /Bound lane reference \(coordination state, not a transcript\): (\{[^\n]+\})/.exec(text)?.[1];
           const id: unknown = binding ? JSON.parse(binding).id : undefined;
@@ -175,6 +184,13 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     }
 
     if (role !== "lane") throw new Error(`Unexpected Gateway native role: ${role}`);
+    if (requestId === `handoff:209:${process.env.OMP_SUPERAGENT_LANE}`) {
+      if (!called("decision_ask")) return invoke("decision_ask", {
+        questions: [{ question: "Which reversible local cache layout?", options: [{ label: "Flat" }, { label: "Nested" }] }],
+      });
+      if (!JSON.stringify(results).includes("Flat")) throw new Error("Lane did not receive the selected native option");
+      return { content: [`LANE:${requestId}`] };
+    }
     if (!denied) return { content: [{ type: "toolCall", id: `${callPrefix}denied-manager`, name: "write", arguments: {
       path: "xd://lane_message", content: JSON.stringify({ id: process.env.OMP_SUPERAGENT_LANE,
         sourceId: requestId, text: "An unauthorized native lane manager call must be denied." }),
@@ -223,7 +239,7 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
   pi.registerProvider(provider, {
     baseUrl: `mock://${provider}`, api: provider, apiKey: "local-test-only",
     streamSimple: (identity, context, options) => local.stream(identity, context, options),
-    models: (process.env.OMP_NATIVE_GATEWAY_PRESETS === "valid" ? [model, "alternate"] : [model]).map(id => ({
+    models: (["valid", "create"].includes(process.env.OMP_NATIVE_GATEWAY_PRESETS ?? "") ? [model, "alternate"] : [model]).map(id => ({
       id, name: `Native Gateway deterministic ${id} model`, kind: "chat", reasoning: false, input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: local.contextWindow, maxTokens: local.maxTokens,
     })),

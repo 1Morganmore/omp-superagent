@@ -124,6 +124,9 @@ export default function laneExtension(pi: ExtensionAPI): void {
     if (event.toolName === "lane_report" && ctx.agent.kind !== "main") {
       return { block: true, reason: "Lane reporting is restricted to the root lane session" };
     }
+    if (ctx.agent.kind === "main" && (event.toolName === "ask" || event.toolName === "write" && event.input.path === "xd://ask")) {
+      return { block: true, reason: "Use decision_ask so HEAD can review the lane's choices before the owner is interrupted. Native execution approvals are unchanged." };
+    }
   });
   pi.on("tool_approval_requested", (event, ctx) => {
     if (ctx.agent.kind === "main" && event.sessionId === ctx.sessionManager.getSessionId()) {

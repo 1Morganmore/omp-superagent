@@ -1293,6 +1293,13 @@ stable ID를 보존하며 임의 URL·범용 native RPC forwarding을 추가하�
 명시적으로 head-controlled delivery만 Gateway를 통해 원래 요청의 대화로 보낸다. report의
 route와 원래 source를 보존하고 동일 결과를 lane/head 양쪽에서 이중 발송하지 않는다.
 
+원본 운영자 요청에 연결된 레인의 `decision_ask`는 기존 native dialog·결정 장부에 저장하되,
+먼저 전용 내부 검토 입력으로 헤드에 전달한다. 헤드는 `lane_review_decision`으로 현재 검토 중인
+정확한 레인·세션·generation의 질문만 처리한다. 위임 범위 안의 일상적이고 되돌릴 수 있는
+선택은 원래 옵션을 답하고 native 소멸 확인 뒤 원래 대화에 선택과 이유를 보고한다. 그 외에는
+선택값을 넣지 않고 원래 사용자 카드를 연다. 실행 승인과 출처가 검증되지 않는 일반 native
+선택창은 이 경로에 넣지 않는다. 헤드의 선택은 사용자 동의나 새로운 작업 권한이 아니다.
+
 ### 전송·승인·복구의 플랫폼 차이
 
 - Telegram은 Gateway의 durable admission을 await한 뒤 bot별 update offset을 영속화하고 다음 getUpdates로

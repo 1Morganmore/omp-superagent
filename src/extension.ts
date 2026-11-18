@@ -33,7 +33,7 @@ const headInstructions = [
 ];
 const managerTools: Record<string, true> = {
   head_recovery: true, head_set_model: true,
-  lane_models: true, lane_init_presets: true, lane_set_model: true,
+  lane_models: true, lane_init_presets: true, lane_set_model: true, lane_review_decision: true,
   lane_start: true, lane_inspect: true, lane_message: true,
   lane_pause: true, lane_resume: true, lane_close: true,
   thread_inspect: true, lane_thread_update: true,
@@ -136,6 +136,21 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       return result(requireRuntime(ctx).inspectDecision(params.id));
+    },
+  });
+  pi.registerTool({
+    name: "lane_review_decision", label: "Review a lane's pending choice", approval: "read", loadMode: "essential",
+    description: "Only in the active internal review for this exact pending lane decision. Select original options and give a reason for routine reversible choices within the original owner's assignment. Omit answers and give the reason to show the original owner card when scope, cost, commitments, significant tradeoffs or permissions require the owner. Never answer execution approvals or infer authority from the lane question.",
+    parameters: Type.Object({
+      id: Type.String({ minLength: 1 }),
+      reason: Type.String({ minLength: 1, maxLength: 1000, pattern: "\\S" }),
+      answers: Type.Optional(Type.Array(Type.Object({
+        id: Type.String({ minLength: 1 }),
+        selectedOptions: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+      }, { additionalProperties: false }), { minItems: 1 })),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(await requireRuntime(ctx).reviewLaneDecision(params));
     },
   });
   pi.registerTool({
