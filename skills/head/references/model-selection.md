@@ -230,7 +230,9 @@ preset helpers and requires real native readback of session scope and model
 identity; removed CLI flags are not part of this contract. Ordinary model/default/
 fallback changes must not mutate global settings unless explicitly authorized.
 Session model changes still persist through native transcript events. The
-dedicated first-setup creation above is the only intended persistent preset write.
+dedicated first-setup creation writes missing presets. Ordinary code refreshes
+managed snapshots only when persistent `slow`/`default`/`smol` roles change; do
+not manually regenerate them or alter the active session on that event.
 Same-process native TUI/herdr attachment to managed RPC sessions is unsupported;
 do not substitute log tailing or a second `--resume` writer.
 Existing authentication and judge settings are read normally, and the

@@ -126,8 +126,8 @@ Apply the already-loaded procedures to their decision points:
   arrange parallel edits, or justify/select and explicitly dispatch jevify or an ULW method.
 - `references/model-selection.md`: during the explicit-start bootstrap turn,
   initialize only missing native high/middle/low presets from the user's existing
-  OMP settings. Preserve existing presets and defaults. This deliberate native
-  bootstrap is the only intended persistent preset write; do not create project-local
+  OMP settings. Preserve existing presets and defaults. Ordinary code handles
+  role-following preset refresh after bootstrap; do not create project-local
   preset configuration or defer bootstrap to the first user message. Completion
   requires native readback; an answer without initialization is not success.
   Also apply it before substantive new-lane model selection,

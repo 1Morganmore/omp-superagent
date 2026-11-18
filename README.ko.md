@@ -117,7 +117,8 @@ omp-sa start --config ./config.local.json
 ```
 
 같은 헤드가 누락된 native `high`/`middle`/`low` 프리셋만 초기화한 뒤 일반 작업을 시작합니다.
-기존 프리셋은 보존하며 `status`는 초기화와 transport 준비를 구분합니다.
+관리 프리셋은 이후 OMP의 `slow`·`default`·`smol` 역할을 따라가며, 활성 세션과 수동 프리셋은
+보존합니다. `status`는 초기화와 transport 준비를 구분합니다.
 setup과 doctor는 봇·모델 세션을 시작하지 않습니다.
 
 `start`는 설정에 남긴 **모든 플랫폼**을 활성화하고, detached Gateway와 헤드를 시작합니다.

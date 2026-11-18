@@ -761,7 +761,7 @@ bash·eval 상태, 대기 입력, 승인, 비동기 결과가 다른 세션으�
 | 도구 | 책임 |
 | --- | --- |
 | `lane_models` | authoritative 가용 chat 후보와 native 프리셋 상태·안전한 역할/thinking·bootstrap 필요 여부 조회. 광고된 역할 selector·관측한 정확한 provider/id로 shortlist. 프리셋 쓰기 없음 |
-| `lane_init_presets` | `choices`의 선택적 high/middle/low 각각 `{model:{provider,id},reason}`으로 누락 native 프리셋만 최초 생성. 기존 프리셋·기본/활성 역할·judge 보존. 충돌 덮어쓰기 없음. 유일한 의도된 영속 preset 쓰기 |
+| `lane_init_presets` | `choices`의 선택적 high/middle/low 각각 `{model:{provider,id},reason}`으로 누락 native 프리셋만 최초 생성. 기존 프리셋·기본/활성 역할·judge 보존. 충돌 덮어쓰기 없음 |
 | `lane_start` | 실제 수신 `sourceId`, 제목, 존재하는 절대 cwd, 정확히 하나의 `model: {provider,id}` 또는 `preset: string`(관측된 임의의 native 프리셋 이름), 필수 비어 있지 않은 `modelReason`, 선택적 brief/acceptance/destination과 `workflow: {name,reason}`으로 생성·동일 선택 재사용 |
 | `lane_set_model` | `id`, 실제 허가 입력 `sourceId`, 정확히 하나의 model/preset, 필수 modelReason으로 명시적 유휴 레인 변경. active input/UI/goal/소유 서비스/불확실성 없이 durable intent/receipt·native readback으로 확인. 자동 interrupt·승격·전역 설정 변경 없음 |
 | `lane_inspect` | ID 생략 시 관리 레인 목록, 지정 시 기록·실제 실행 상태 조회 |
@@ -981,20 +981,20 @@ surface가 없으면 정확한 gap을 보고하며 local 스킬 적용만으로 
 ### Native judge 자문과 모델 동일성의 구분
 
 명시적 `start`는 기존 메인 헤드의 native 연결·승인 복구 뒤 프리셋을 조사한다. 세 프리셋이
-유효하고 가용하면 모델 호출·쓰기 없이 완료한다. 최초 초기화가 필요하면 같은 헤드에 전용
+유효하고 가용하면 모델 호출 없이 완료한다. 최초 초기화가 필요하면 같은 헤드에 전용
 초기 설정 턴 하나를 제출한다. 첫 사용자 메시지에 맡기거나 별도 셋업 에이전트·모델을 만들지
 않는다. 이 턴은 `lane_models`로 native 프리셋·기존 역할/thinking·가용 후보를 조사하고
 필요한 선택과 생성을 수행한다. 터미널 `setup`과 `doctor`는 계속 봇·모델을 실행하지 않는다.
 실제 OMP 프리셋은 `modelPresets.<name> = {modelRoles:{...}, defaultThinkingLevel?}`이고 기존
 `/modelpreset list/save/switch/delete`로 관리한다. high/middle/low는 이 프리셋 이름이며 custom
-`@high` 역할이 아니다. 세 프리셋이 유효하게 있으면 쓰기 없이 재사용한다.
+`@high` 역할이 아니다. 관리 대상과 역할에 변화가 없으면 쓰기 없이 재사용한다.
 
 없는 항목만 헤드가 근거·native judge 자문을 비판적으로 검토해 `lane_init_presets.choices`에
 각각 정확한 모델과 간결한 reason을 전달한다. NativePresetBootstrap이 누락 항목만 생성하며
 다른 기존 역할/thinking을 snapshot한다. 기존 프리셋·기본/활성 역할·judge·무관한 설정을 보존한다.
 invalid/tombstoned/shadowed 충돌은 덮어쓰지 않고 진짜 운영자 결정이 필요할 때만 질문한다.
-이 최초 생성만 의도된 영속 preset 쓰기이며 재시작·레인 생성·재개·실패·모델 변경 때 반복하지
-않는다. 전용 턴의 성공적인 실제 실행 결과와 세 프리셋의 native readback을 모두 확인해야
+최초 생성 턴은 재시작·레인 생성·재개·실패·모델 변경 때 반복하지 않는다. 전용 턴의
+성공적인 실제 실행 결과와 세 프리셋의 native readback을 모두 확인해야
 완료다. 모델이 생성 도구를 호출하지 않거나 일부만 생성한 경우도 완료가 아니다.
 `head.initialization`은 `checking/running/complete/blocked/failed/uncertain`을 구분하며
 `head.ready`는 초기화 완료까지 요구한다. 최초 승인 복구 후의 영속 수신과 읽기 전용 제어·중지는
@@ -1002,6 +1002,13 @@ invalid/tombstoned/shadowed 충돌은 덮어쓰지 않고 진짜 운영자 결�
 제출 전 시도 상태를 저장하고 자동 재연결·재시작으로 불확실한 모델 턴을 반복하지 않는다.
 실패·충돌·완료 후 삭제는 운영자가 native 프리셋을 복구한 뒤 헤드를 재시작하여 재조회한다.
 별도 유휴 모델 폴링·자동 재시도 루프는 없다. 이름은 측정된 성능·가격 등급이 아니다.
+
+일반 코드가 시작 시와 기존 유지보수 주기에서 영속 OMP 모델 역할을 확인한다. 관리
+프리셋은 `slow → high`, `default → middle`, `smol → low`를 따른다. 역할 설정이나
+native 해석 결과가 바뀌고 설정된 대상 모델을 모두 사용할 수 있을 때 현재 역할/effort
+스냅샷으로 갱신한다. 관리 대상은 최초 생성한 항목과, 현재 역할/모델에 일치해 인수한 기존
+전역 항목이다. 마지막으로 확인한 스냅샷을 장부에 기록하고, 사용자가 수정·삭제한 항목이나
+상위 설정이 가린 항목은 덮어쓰지 않는다. 모델 턴·활성 설정 변경·기존 레인 재선택은 없다.
 
 레인 선택은 프리셋 전체 역할/thinking을 `Lane.modelPresetSnapshot`, 해석된 정확한 기본 모델을
 `Lane.model`, 이름/null을 `modelPreset`에 저장한다. high/middle/low 외에도 관측한 임의의 native

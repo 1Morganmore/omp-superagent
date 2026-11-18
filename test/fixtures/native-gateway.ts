@@ -677,6 +677,27 @@ try {
   for (const [name, bytes] of settingsBytes) assert.deepEqual(await fs.readFile(path.join(agent, name)), bytes);
   assert.deepEqual(errors, []);
 
+  if (presetScenario === "create") {
+    const configPath = path.join(agent, "config.yml");
+    const saved = Bun.YAML.parse(await fs.readFile(configPath, "utf8")) as typeof initialized;
+    const entriesBefore = await fs.readFile(mainPaths.sessionFile, "utf8");
+    const headBefore = await restored.client.getState();
+    const laneBefore = await actualLane.client.getState();
+    const modelRoles = { ...saved.modelRoles, slow: model, default: model, smol: "gateway-native/alternate" };
+    await fs.writeFile(configPath, JSON.stringify({ ...saved, modelRoles }), { mode: 0o600 });
+    await until(async () => {
+      const current = Bun.YAML.parse(await fs.readFile(configPath, "utf8")) as typeof initialized;
+      return current.modelPresets.low?.modelRoles.default === modelRoles.smol;
+    }, "idle Gateway to refresh the low preset after an external OMP role save");
+    const current = Bun.YAML.parse(await fs.readFile(configPath, "utf8")) as typeof initialized;
+    assert.deepEqual(current.modelRoles, modelRoles);
+    assert.equal(current.modelPresets.high?.modelRoles.default, modelRoles.slow);
+    assert.equal(current.modelPresets.middle?.modelRoles.default, modelRoles.default);
+    assert.deepEqual((await restored.client.getState()).model, headBefore.model);
+    assert.deepEqual((await actualLane.client.getState()).model, laneBefore.model);
+    assert.equal(await fs.readFile(mainPaths.sessionFile, "utf8"), entriesBefore, "Preset refresh must not create a native head turn");
+  }
+
   await gateway.close();
   gateway = undefined;
   assert.equal(messenger.handlers, undefined);

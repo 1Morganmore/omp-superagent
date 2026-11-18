@@ -230,7 +230,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
       }))])), { minProperties: 1, additionalProperties: false }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      return result(await (await nativePresets(ctx)).initialize(params.choices));
+      return result(await (await nativePresets(ctx)).initialize(params.choices, requireRuntime(ctx).store));
     },
   });
   pi.registerTool({
@@ -425,6 +425,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
         }, {
           resolvePreset: async (name, thinkingContext) => (await nativePresets(ctx)).resolve(name, thinkingContext),
           inspectPresets: async () => (await nativePresets(ctx)).inspect(),
+          syncPresetRoles: async canWrite => (await nativePresets(ctx)).syncRoles(store, canWrite, () => ctx.modelRegistry.refresh("offline")),
           persistPreset: async selection => (await nativePresets(ctx)).persistSelection(selection),
           requestRestart: request => messenger.requestRestart(request),
         });

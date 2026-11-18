@@ -4,14 +4,18 @@ import { acquireModelRoleMutation, getModelPreset, getModelPresetNames, isValidM
 import { pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { Settings, SettingsMirrorState } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { MODEL_PRESET_NAMES, type LaneModel, type LanePresetSnapshot, type ResolvedLanePreset } from "./contracts";
-import { isLaneModel } from "./lane-models";
+import { MODEL_PRESET_NAMES, type LaneModel, type LanePresetSnapshot, type ResolvedLanePreset, type StorePort } from "./contracts";
+import { isLaneModel, sameLaneModel } from "./lane-models";
 import { editNativeGlobalConfig, hasUnresolvedNativeLegacy, readNativeSettings } from "./native-settings";
 
 export type NativeModel = Awaited<ReturnType<ExtensionContext["models"]["list"]>>[number];
 export type BootstrapName = (typeof MODEL_PRESET_NAMES)[number];
 type PresetSource = "runtime" | "overlay" | "project" | "global";
 export type NativePresetChoices = Partial<Record<BootstrapName, { model: LaneModel; reason: string }>>;
+const followingRoles = { high: "slow", middle: "default", low: "smol" } as const;
+const followedPresets = "head:role-following-presets";
+type FollowedPreset = { readonly preset: LanePresetSnapshot; readonly roles?: string };
+type PresetOwnership = Partial<Record<BootstrapName, FollowedPreset | null>>;
 
 export interface NativePresetStatus {
   name: string;
@@ -161,6 +165,82 @@ export class NativePresetManager {
     return this.inspectLoaded((await this.availableModels()).filter(isCodingModel));
   }
 
+  /** Follow persistent native roles without changing the active native session. */
+  async syncRoles(store: Pick<StorePort, "getMeta" | "setMeta">, canWrite: () => boolean,
+    reloadCatalog?: () => Promise<void>): Promise<void> {
+    const release = await acquireModelRoleMutation();
+    try {
+      await this.reload();
+      if (!canWrite()) return;
+      const settings = this.settings;
+      const base = this.capture();
+      const before = store.getMeta(followedPresets);
+      const ownership: PresetOwnership = before === null ? {} : JSON.parse(before);
+      const resolveRoles = (models: NativeModel[]) => MODEL_PRESET_NAMES.map(name => {
+        const selector = base.modelRoles[followingRoles[name]];
+        const resolution = selector ? resolveModelRoleValue(selector, models, { settings }) : undefined;
+        const model = resolution?.model;
+        const defaultSelector = model ? `${model.provider}/${model.id}${
+          resolution?.explicitThinkingLevel && resolution.thinkingLevel !== undefined ? `:${resolution.thinkingLevel}` : ""}` : null;
+        return { name, selector, model, defaultSelector };
+      });
+      let models = (await this.availableModels()).filter(isCodingModel);
+      let resolved = resolveRoles(models);
+      if (reloadCatalog && canWrite() && resolved.some(({ selector, model }) => selector && !model)) {
+        // Another OMP process may have discovered the new model after this
+        // head loaded its registry. Read through the native cache, not the network.
+        await reloadCatalog();
+        models = (await this.availableModels()).filter(isCodingModel);
+        resolved = resolveRoles(models);
+      }
+      const roles = JSON.stringify(resolved.map(({ selector, defaultSelector }) => [selector ?? null, defaultSelector]));
+      // A temporarily unavailable configured role is not a new policy.
+      if (resolved.some(({ selector, defaultSelector }) => selector && !defaultSelector)) return;
+      const edits: { name: BootstrapName; snapshot: LanePresetSnapshot }[] = [];
+      for (const { name, model, defaultSelector } of resolved) {
+        if (!canWrite()) break;
+        const tracked = ownership[name];
+        if (tracked === null) continue; // A manual edit/deletion releases management.
+        const owned = settings.getOwnedModelPreset(name);
+        const current = getModelPreset(settings, name);
+        if (!owned || owned.source !== "global" || current.kind !== "found") {
+          if (tracked && !owned && !disabledSource(settings.mirrorState(), name)) ownership[name] = null;
+          continue;
+        }
+        const preset = current.preset;
+        if (tracked && !Bun.deepEquals(preset, tracked.preset)) {
+          ownership[name] = null;
+          continue;
+        }
+        if (!model || !defaultSelector) continue;
+        if (!tracked) {
+          // Adopt only an earlier full role snapshot that already selects this
+          // role's model. An unrelated/manual preset is not ours to replace.
+          const { default: _old, ...oldRoles } = preset.modelRoles;
+          const { default: _base, ...baseRoles } = base.modelRoles;
+          const old = resolveModelRoleValue(preset.modelRoles.default, models, { settings });
+          if (!Bun.deepEquals(oldRoles, baseRoles) || !sameLaneModel(old?.model, model)) continue;
+          ownership[name] = { preset, roles };
+          continue;
+        }
+        if (tracked.roles === roles) continue;
+        const next = { ...base, modelRoles: { ...base.modelRoles, default: defaultSelector } };
+        if (Bun.deepEquals(preset, next)) ownership[name] = { preset, roles };
+        else edits.push({ name, snapshot: next });
+      }
+      if (edits.length) {
+        const applied = await editNativeGlobalConfig(settings, edits.map(({ name, snapshot }) => ({
+          path: `modelPresets.${name}`, value: snapshot,
+        })), actual => canWrite() && edits.every(({ name }) => actual.getOwnedModelPreset(name)?.source === "global")
+          && Bun.deepEquals(actual.getModelRoles(), base.modelRoles)
+          && cfgDefaultThinkingLevel.get(actual) === base.defaultThinkingLevel);
+        for (const [index, { name, snapshot }] of edits.entries()) if (applied[index]) ownership[name] = { preset: snapshot, roles };
+      }
+      const saved = JSON.stringify(ownership);
+      if (saved !== (before ?? "{}")) store.setMeta(followedPresets, saved);
+    } finally { release(); }
+  }
+
   async resolve(name: string, thinkingContext?: Pick<LanePresetSnapshot, "defaultThinkingLevel">): Promise<ResolvedLanePreset> {
     if (typeof name !== "string" || !isValidModelPresetName(name)) throw new Error("Invalid native preset name");
     await this.reload();
@@ -213,7 +293,7 @@ export class NativePresetManager {
    * multi-entry transaction: partial creation and conflicts are read back, never
    * repaired by overwriting or rolling back the operator's entry.
    */
-  async initialize(choices: NativePresetChoices): Promise<{
+  async initialize(choices: NativePresetChoices, store?: Pick<StorePort, "getMeta" | "setMeta">): Promise<{
     created: BootstrapName[]; preserved: BootstrapName[]; conflicts: BootstrapName[]; inspection: NativePresetInspection;
   }> {
     if (!isRecord(choices) || Object.keys(choices).length === 0) {
@@ -275,6 +355,14 @@ export class NativePresetManager {
         if (lookup.kind === "found" && this.settings.getOwnedModelPreset(name)?.source === "global" &&
             isRecord(global) && Bun.deepEquals(global[name], snapshot)) created.push(name);
         else conflicts.push(name);
+      }
+      if (store && created.length) {
+        const ownership: PresetOwnership = JSON.parse(store.getMeta(followedPresets) ?? "{}");
+        for (const name of created) {
+          const preset = expected.get(name);
+          if (preset) ownership[name] = { preset };
+        }
+        store.setMeta(followedPresets, JSON.stringify(ownership));
       }
       return { created, preserved, conflicts, inspection: this.inspectLoaded(models) };
     } finally { release(); }

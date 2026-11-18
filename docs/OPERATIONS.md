@@ -129,13 +129,20 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 
 ### 새 레인의 모델 선택
 
-명시적 `start` 때 기존 헤드가 native `high/middle/low` 프리셋을 조사한다. 유효한 기존
-항목은 그대로 쓰며 누락 항목만 같은 헤드의 전용 초기화 턴에서 생성·재조회한다.
+명시적 `start` 때 기존 헤드가 native `high/middle/low` 프리셋을 조사한다. 누락 항목은
+같은 헤드의 최초 전용 초기화 턴에서 생성·재조회한다.
 `setup`·`doctor`는 봇·모델을 실행하지 않는다. `head.initialization`이 `complete`여야 일반
 작업을 시작한다. `blocked/failed/uncertain`이면 `status`의 사유를 확인하고 일반 OMP의
 `/modelpreset list/save/switch/delete`로 충돌·누락을 복구한 뒤 헤드를 재시작해 재조회한다.
 실패·재시작·완료 뒤 삭제를 이유로 초기화 턴을 자동 반복하지 않는다. 프리셋 이름은 실측
 성능·가격 등급이 아니며 모델 정책은 이 JSON 설정에 별도 작성하지 않는다.
+
+관리 프리셋은 영속 OMP 역할 `slow → high`, `default → middle`, `smol → low`를
+따른다. 시작할 때와 실행 중 약 30초마다 역할을 확인하며, 변경된 역할들이 가용하면 모델
+호출 없이 현재 역할·기본 effort를 다시 저장한다. 기존 프리셋은 역할 스냅샷과 모델이
+현재 설정에 일치할 때만 관리 대상으로 인수한다. 수동으로 수정·삭제한 관리 항목과
+다른 프리셋, 상위 설정이 가린 항목은 덮어쓰지 않는다. 이미 실행 중인 헤드와 기존
+레인이 보유한 모델·프리셋 스냅샷은 바뀌지 않는다.
 
 헤드는 실제 요구·native 가용 후보를 조사하고 통상 native judge 자문 뒤 최종 모델과 이유를
 정한다. 자문은 스킬 정책이지 모든 호출에 영수증을 요구하는 runtime gate가 아니다.

@@ -23,6 +23,7 @@ import type { readPrSnapshot } from "./pr-github";
 import { acknowledgeDecision, decisionRequestId, decisionViews, validateDecisionResponse, type DecisionView } from "./decisions";
 
 const key = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 24);
+const presetSyncIntervalMs = 30_000;
 const dialogs = new Set(["select", "confirm", "input", "editor", "ask"]);
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
@@ -65,6 +66,7 @@ export interface RuntimeAdapters {
   startHost(options: HostOptions): Promise<{ pid: number }>;
   resolvePreset?: (name: string, thinkingContext?: Pick<LanePresetSnapshot, "defaultThinkingLevel">) => Promise<ResolvedLanePreset>;
   inspectPresets?: () => Promise<NativePresetInspection>;
+  syncPresetRoles?: (canWrite: () => boolean) => Promise<void>;
   persistPreset?: (selection: ResolvedLanePreset) => Promise<LanePresetSnapshot>;
   requestRestart?: (request: GatewayRestartRequest) => Promise<GatewayRestartRecord>;
   readPrSnapshot?: typeof readPrSnapshot;
@@ -249,6 +251,8 @@ export class Superagent {
   private readonly prWatcher: PrWatcher;
   private readonly prAbort = new AbortController();
   private prObservation?: Promise<void>;
+  private presetSync?: Promise<void>;
+  private nextPresetSync = 0;
 
   constructor(
     readonly config: Config,
@@ -355,10 +359,12 @@ export class Superagent {
       this.timer = setInterval(() => {
         void this.kick().catch(this.report);
         this.observePrs();
+        this.observePresetRoles();
       }, 1000);
       this.timer.unref?.();
       await this.kick();
       this.observePrs();
+      this.observePresetRoles();
     } catch (error) {
       await this.stop();
       throw error;
@@ -389,10 +395,14 @@ export class Superagent {
     const live = this.live.get("main")!;
     const recovery = "Inspect /model preset list and the native head log/session. Repair native high/middle/low presets with the existing OMP preset tools, then restart the head to verify; no initializer is automatically replayed.";
     try {
+      if (this.adapters.syncPresetRoles && !this.restartFence()) {
+        this.nextPresetSync = Date.now() + presetSyncIntervalMs;
+        await this.adapters.syncPresetRoles(() => this.current(live) && !this.restartFence() && !this.headStopping).catch(this.report);
+      }
       const inspection = await this.adapters.inspectPresets!();
       const state = await this.state(live);
       if (this.presetsComplete(inspection)) {
-        this.setInitialization({ sessionId: live.sessionId, state: "complete", detail: "Native readback verified available high/middle/low presets; no setup turn or write was needed." });
+        this.setInitialization({ sessionId: live.sessionId, state: "complete", detail: "Native readback verified available high/middle/low presets without a setup model turn." });
         return;
       }
       if (this.restartFence()) {
@@ -1880,6 +1890,14 @@ export class Superagent {
     this.prObservation = this.prWatcher.poll(Date.now(), this.prAbort.signal)
       .then(() => this.kick()).catch(this.report)
       .finally(() => { this.prObservation = undefined; });
+  }
+
+  private observePresetRoles(): void {
+    const sync = this.adapters.syncPresetRoles;
+    const canWrite = () => this.ready && !this.stopped && !this.restartFence() && !this.headStopping && !this.bootstrapActive;
+    if (!sync || this.presetSync || Date.now() < this.nextPresetSync || !canWrite()) return;
+    this.nextPresetSync = Date.now() + presetSyncIntervalMs;
+    this.presetSync = sync(canWrite).catch(this.report).finally(() => { this.presetSync = undefined; });
   }
 
   async inspectThread(sourceId: string, laneId?: string): Promise<ThreadInfo> {
@@ -4199,7 +4217,7 @@ export class Superagent {
     for (const live of this.live.values()) {
       for (const { input } of live.admitted.values()) this.activity(input, false);
     }
-    await Promise.allSettled([this.prObservation, this.pumping, this.outbound, this.catchupTask, ...this.tasks, ...this.operations.values()]);
+    await Promise.allSettled([this.prObservation, this.presetSync, this.pumping, this.outbound, this.catchupTask, ...this.tasks, ...this.operations.values()]);
     await this.messenger.stop();
     await Promise.allSettled([...this.live.values()].map(async live => { live.unsubscribe(); await live.connection.close(); }));
     this.live.clear();

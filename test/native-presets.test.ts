@@ -205,6 +205,64 @@ if (!workerRoot) {
     expect(JSON.stringify(after)).not.toContain(choice().reason);
   });
 
+  test("saved managed tiers follow changed native roles, not the live session or a manual preset", async () => {
+    const originalRoles = { ...configured.modelRoles, slow: selector(opus) };
+    const high = { modelRoles: { ...originalRoles, default: selector(opus) }, defaultThinkingLevel: Effort.Medium };
+    const middle = { modelRoles: originalRoles, defaultThinkingLevel: Effort.Medium };
+    const low = { modelRoles: { default: selector(opus) }, defaultThinkingLevel: Effort.Low };
+    const f = await fixture({ global: { modelRoles: originalRoles, modelPresets: { high, middle, low, custom: low } } });
+    const { Store } = await import("../src/store");
+    const dbFile = path.join(f.root, "coordination.sqlite");
+    const first = new Store(dbFile);
+    try { await f.manager.syncRoles(first, () => true); }
+    finally { first.close(); }
+    const updatedRoles = { ...originalRoles, slow: selector(sonnet), default: selector(opus) };
+    const baseline = await f.persisted();
+    await fs.writeFile(f.configPath, JSON.stringify({ ...baseline, modelRoles: updatedRoles }));
+    const before = await f.bytes();
+    const replacementSettings = await Settings.loadReadOnly({ cwd: f.cwd, agentDir: f.agent });
+    const replacement = new NativePresetManager(replacementSettings, async () => models, () => true);
+    const reopened = new Store(dbFile);
+    try {
+      await replacement.syncRoles(reopened, () => true);
+      expect(await f.persisted()).toEqual({ ...baseline, modelRoles: updatedRoles, modelPresets: {
+        high: { ...high, modelRoles: { ...updatedRoles, default: selector(sonnet) } },
+        middle: { ...middle, modelRoles: updatedRoles }, low, custom: low,
+      } });
+      const stable = await f.bytes();
+      await replacement.syncRoles(reopened, () => true);
+      expect(await f.bytes()).toEqual(stable);
+      expect(stable.slice(1)).toEqual(before.slice(1));
+    } finally { reopened.close(); }
+  });
+
+  test("bootstrap ownership follows an available smol change but does not recreate deleted or replace edited presets", async () => {
+    const initialRoles = { ...configured.modelRoles, slow: selector(opus) };
+    const f = await fixture({ global: { modelRoles: initialRoles } });
+    const { Store } = await import("../src/store");
+    const store = new Store(path.join(f.root, "coordination.sqlite"));
+    try {
+      await f.manager.initialize({ high: choice(opus), middle: choice(sonnet), low: choice(sonnet) }, store);
+      await f.manager.syncRoles(store, () => true);
+      const state = await f.persisted();
+      const nextRoles = { ...initialRoles, smol: "fixture/unavailable" };
+      const current = { ...state, modelRoles: nextRoles };
+      await fs.writeFile(f.configPath, JSON.stringify(current));
+      await f.manager.syncRoles(store, () => true);
+      expect(await f.persisted()).toEqual(current);
+
+      const roles = { ...nextRoles, smol: selector(opus) };
+      const customHigh = { modelRoles: { default: selector(sonnet) }, defaultThinkingLevel: Effort.Minimal };
+      const settings = await Settings.loadReadOnly({ cwd: f.cwd, agentDir: f.agent });
+      const previous = getModelPreset(settings, "low");
+      if (previous.kind !== "found") throw new Error("Initial low preset was not saved");
+      await fs.writeFile(f.configPath, JSON.stringify({ ...state, modelRoles: roles, modelPresets: { high: customHigh, low: previous.preset } }));
+      await f.manager.syncRoles(store, () => true);
+      expect((await f.persisted()).modelPresets).toEqual({ high: customHigh,
+        low: { ...previous.preset, modelRoles: { ...roles, default: selector(opus) } } });
+    } finally { store.close(); }
+  });
+
   test("all supplied candidates validate before any writes", async () => {
     const runner = getBundledProviders().flatMap(provider => getBundledModels(provider))
       .find(model => model.kind !== undefined && model.kind !== "chat");

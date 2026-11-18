@@ -61,7 +61,8 @@ function valueAt(record: unknown, path: readonly string[]): unknown {
  * the native lock and atomic publisher serialize with stock Settings writers.
  * A stale key is preserved while disjoint keys are merged from the locked file.
  */
-export async function editNativeGlobalConfig(settings: Settings, edits: readonly GlobalEdit[]): Promise<boolean[]> {
+export async function editNativeGlobalConfig(settings: Settings, edits: readonly GlobalEdit[],
+  accept?: (actual: Settings) => boolean): Promise<boolean[]> {
   const agentDir = settings.getAgentDir();
   if (await hasUnresolvedNativeLegacy(agentDir)) throw new Error("Native global settings require legacy migration");
   let configPath = join(agentDir, MAIN_CONFIG_FILENAMES[0]);
@@ -86,6 +87,7 @@ export async function editNativeGlobalConfig(settings: Settings, edits: readonly
   return withFileLock(writePath, async () => {
     const actual = await readNativeSettings(settings);
     if (await hasUnresolvedNativeLegacy(agentDir)) throw new Error("Native global settings require legacy migration");
+    if (accept && !accept(actual)) return edits.map(() => false);
     for (const filename of MAIN_CONFIG_FILENAMES) {
       const candidate = join(agentDir, filename);
       if (await isPresent(candidate)) {

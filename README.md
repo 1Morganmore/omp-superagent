@@ -134,9 +134,10 @@ Start the detached Gateway and head, connecting **all configured messengers**:
 omp-sa start --config ./config.local.json
 ```
 
-The same head initializes only missing native `high`/`middle`/`low` presets before ordinary
-work. Existing presets remain intact; `status` distinguishes initialization from transport
-readiness. Setup and doctor do not start bot/model sessions.
+The same head initializes missing native `high`/`middle`/`low` presets before ordinary
+work. Managed presets then follow OMP's `slow`/`default`/`smol` roles without changing
+active sessions or overwriting custom presets. `status` distinguishes initialization from
+transport readiness. Setup and doctor do not start bot/model sessions.
 
 Native TUI/herdr attachment to managed RPC Hosts is not available in this patch-free
 release. Use messenger commands and `omp-sa status` for managed sessions.
