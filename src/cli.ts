@@ -13,6 +13,7 @@ import { setup } from "./setup";
 const HELP = `omp-sa — messenger-connected OMP head and independent topic sessions
 
 Usage:
+  omp-sa --help                       (also: omp-sa help)
   omp-sa setup --config FILE
   omp-sa start --config FILE
   omp-sa install --config FILE
@@ -24,17 +25,101 @@ Usage:
   omp-sa telegram-commands --config FILE [--language CODE] [--apply]
   omp-sa slack-commands --config FILE --manifest-token-env NAME [--apply]
 
-setup interactively saves configuration and a private FILE.env, then sets Discord/Telegram bot profile pictures to the repository mascot through REST APIs; it never starts messenger connections or services.
-start explicitly launches a detached Gateway and its native head, activating configured messenger connections. No install/autostart is performed.
-install enables macOS per-user startup at future login only; requires configured messenger credentials in private FILE.env and native settings/authentication under the OS account home. No immediate start or shell environment capture.
-uninstall removes only the owned login launcher; it does not stop an existing Gateway/head or remove credentials/state.
-stop main stops the supervised Gateway/head service; busy native hosts refuse without being killed or resurrected.
+Setup and service lifecycle:
+  setup creates FILE interactively, or preserves an existing FILE and prompts for its configured credentials.
+  It saves a private FILE.env and sets configured Discord/Telegram bot profile pictures through REST; it does not start bots.
+  On first setup only, you may opt into native Mnemopi memory. If no native Judge model is configured,
+  setup explains how to select one in ordinary OMP (/models > Roles > Judge); it does not choose a model for you.
+  doctor validates configuration, checks the installed OMP and reports credential presence, not successful login.
+  start launches a detached Gateway and one HEAD, activating ALL configured messengers. No autostart is installed.
+  start can return before HEAD can accept work. Check head.ready and head.initialization in the start response
+  (gateway.head in status); initial high/middle/low model presets must be verified before queued work runs.
+  status shows live Gateway/HEAD readiness when reachable, login launcher status, and saved lane IDs, models and states.
+  A saved lane state does not prove its Host is running or that the work completed.
+  stop main shuts down the Gateway and HEAD; a busy Host can refuse. Bare CLI stop also targets main.
+  stop LANE_ID requests shutdown of just that managed lane Host. It does not delete the lane or its session.
+  install enables macOS per-user startup at future login only; requires configured messenger credentials in private FILE.env
+  and native settings/authentication under the OS account home. No immediate start or shell environment capture.
+  uninstall removes only the owned login launcher; it does not stop an existing Gateway/head or remove credentials/state.
+
+Add a messenger to an existing installation:
+  Edit FILE: keep existing blocks and add the desired top-level block with the fields below.
+    discord   tokenEnv, ownerId, allowedGuildIds[], allowedChannelIds[]
+    telegram  tokenEnv, ownerId, allowedChatIds[]
+    slack     botTokenEnv, appTokenEnv, ownerId, teamId, allowedChannelIds[]
+  Copy the block shape from ${join(import.meta.dir, "../config.example.json")}.
+  Use string IDs for the same trusted owner on each platform. Credential fields name variables, never tokens.
+  Supply their values in the Gateway environment or private FILE.env (mode 0600). Run doctor before activation.
+  Editing FILE does not reload a running service. The next Gateway start activates all configured blocks.
+  Other FILE settings: command (stock OMP argv), headCwd, stateDir, maxHosts (includes HEAD),
+  maxSubagents (shared budget), idleMs (idle lane eviction), optional model (HEAD startup model).
+
+Command registration:
 discord-commands uses Discord REST only: dry-run by default, with no Gateway or native runtime activation.
 --apply exclusively replaces this dedicated bot's GLOBAL commands with supported Superagent commands, deleting obsolete registrations (including Hermes). Guild commands are preserved; shadowing conflicts refuse apply.
 telegram-commands configures owner-scoped Telegram command menus; --language selects an optional Telegram language code.
 slack-commands configures /superagent-* commands through the app manifest; NAME identifies an app-configuration token environment variable, never a token argument.
 All command registration is read-only by default and requires --apply to change remote configuration. No polling, Socket Mode, or native model session is started.
 Requires an already installed stock OMP ${supportedOmp}. Same-process native TUI attach is not supported.
+
+Owner controls in chat (not shell commands):
+  Send /help in Discord or Telegram. In Slack messages replace / with ! (e.g. !help, !status);
+  registered Slack commands use /superagent-* (e.g. /superagent-status).
+  /status, /context, /usage     Inspect HEAD state, context or usage without starting a model turn.
+  /model [list|provider/id]     Inspect or select the shared HEAD model; changes require an idle HEAD.
+  /model preset [list|NAME]     Inspect or select a preset. Only NAME --global also saves future defaults.
+  /effort [LEVEL]               Inspect or change HEAD thinking effort; existing lanes keep their settings.
+  /compact [instructions]       Compact idle HEAD context, optionally with multiline instructions.
+  /new [request], /main         Start a topic or return to the main topic in the owner's DM.
+  /stop [head|LANE_ID]          Stop HEAD work or pause a lane, NOT the service. With no argument, pause
+                                the lane bound to this chat, or stop HEAD work if there is no bound lane.
+  /resume                       Resume the lane bound to this chat, not HEAD.
+  /restart                      Safely replace Gateway and HEAD while preserving the session; no forced kill
+                                or automatic prompt replay. Independent lane Hosts stay running.
+  /resolve [INPUT_ID]           Close one uncertain HEAD input without retrying it. Use /status to find its ID;
+                                the ID is required if several are held. This does not establish task success.
+
+Capabilities to request from HEAD in chat (not CLI subcommands):
+  Lanes and threads: ask HEAD to start, inspect, steer, pause, resume or close an independent lane,
+    select its model/preset, or inspect and update its Discord thread or forum tags.
+  PR monitoring: give HEAD a GitHub PR URL and check interval to watch reviews and CI; ask to list or stop watches.
+    Requires gh with read access. A change notification does not authorize a merge or a new task.
+  Decisions: ask HEAD to request an owner decision, list pending decisions, inspect one or withdraw it.
+  Discord channel context: ask HEAD to inspect channel/thread context or set, list or clear a local purpose
+    note. Notes do not edit Discord's channel description or authorize work.
+  Shared board: registered HEAD and lane sessions can post, read and subscribe to informational updates
+    within this instance. Board posts are not commands or approvals.
+  Workflows: begin a request with ulw, ulw-plan, ulw-execute, ulw-loop, ulw-research or mass-ulw.
+    For batch judging against one rubric, begin with lowercase jevify (not /jevify).
+  Operations guide and native tool names: ${join(import.meta.dir, "../docs/OPERATIONS.md")}
+
+Add Discord voice using a Codex subscription (optional; no API key or paid fallback):
+  In FILE, set discord.voice to the object below. Preserve the existing discord owner, token and allowlists.
+  Replace the IDs with Discord snowflakes (strings). Both channels must be in an allowed guild;
+  restrict the voice channel to the owner and bot, and include the text channel in discord.allowedChannelIds.
+  {"auth":"subscription","channelId":"VOICE_CHANNEL_ID","textChannelId":"TEXT_CHANNEL_ID","voice":"cove","maxSessionSeconds":300}
+  Do not include apiKeyEnv, model or backendModel in this object.
+
+  As the OS user running the Gateway (macOS/Linux):
+    codex login                         # Sign in with an eligible ChatGPT account, not an API key.
+    VENV="$HOME/.local/share/omp-superagent/codex-voice"
+    uv venv --python 3.12 "$VENV"       # First-time setup only.
+    uv pip install --python "$VENV/bin/python" -r ${Bun.$.escape(join(import.meta.dir, "codex-voice-requirements.txt"))}
+    omp-sa doctor --config FILE        # Checks config without connecting; does not verify voice entitlement.
+  The next Gateway start loads the change. Configuration alone does not start a call.
+
+Alternative: Discord voice with separately billed OpenAI Live API (no Codex login or Python bridge):
+  Use the same channel allowlists. Set discord.voice to an API object instead of the subscription object:
+  {"auth":"api","channelId":"VOICE_CHANNEL_ID","textChannelId":"TEXT_CHANNEL_ID","voice":"marin","maxSessionSeconds":300,"model":"gpt-live-1","backendModel":"gpt-6-luna","apiKeyEnv":"SUPERAGENT_VOICE_OPENAI_KEY"}
+  Choose models and a voice available to your account. Put the key in the named environment variable or FILE.env,
+  not in JSON; never reuse a messenger token. Omitting auth selects the existing API mode, not subscription.
+
+  Owner commands are ordinary Discord messages in the configured text channel, not CLI or registered slash commands:
+    /voice start    Join the configured voice channel first, then send this to open the call.
+    /voice share    Subscription only: allow one draft to be posted here within one minute. API mode posts drafts directly.
+    /voice confirm  Reply to the exact posted draft to submit it to HEAD. Separate approvals still apply.
+    /voice stop     End the call.
+  Full guide: ${join(import.meta.dir, "../docs/discord-voice.md")}
 `;
 
 function laneRows(stateDir: string): Lane[] {
