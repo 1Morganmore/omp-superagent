@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # Routine checks use the Intel pool; hosted arm64 jobs have been cancelled before checkout.
+        os: [ubuntu-24.04, macos-15-intel]
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && '[{"os":"macos-15"}]' || '[]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:

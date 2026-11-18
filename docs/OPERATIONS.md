@@ -1085,7 +1085,10 @@ standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너�
 선택한 OMP 버전·실행 경로를 출력하고 지원 범위·공개 RPC 기능을 metadata로 확인한다.
 로컬 테스트 runner는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
 
-GitHub Actions는 Linux와 macOS에서 upstream의 최신 published release tag를 조회하고 해당 공식
+PR과 `main`의 GitHub Actions는 Ubuntu 24.04와 macOS 15 Intel에서 실행한다. GitHub의 ARM64 러너
+배정 지연이 일반 검사를 막지 않도록 풀을 분리했다. 수동 실행과 `v*` 릴리스 태그는 macOS 15 ARM64도
+같은 행렬에 추가하며, 릴리스 게시는 모든 대상이 통과해야 진행된다.
+각 러너는 upstream의 최신 published release tag를 조회하고 해당 공식
 OMP binary를 다운로드한 뒤 checksum을 확인해 같은 회귀를 실행한다. SDK 의존성 pin으로
 실행 binary 버전을 고정하거나 OMP 소스·native addon을 빌드하지 않는다. 최신 release가 지원
 범위를 벗어나거나 검사가 실패해도 과거 binary로 자동 대체하지 않는다. 이 검사는 실제 계정·유료
