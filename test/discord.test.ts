@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApplicationCommandOptionType, Attachment as DiscordAttachment, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, type Client, type Message, type MessageCreateOptions } from "discord.js";
+import { ApplicationCommandOptionType, Attachment as DiscordAttachment, AttachmentBuilder, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, type Client, type Message, type MessageCreateOptions } from "discord.js";
 import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "../src/discord.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import { parseDialog } from "../src/dialog.ts";
@@ -1274,6 +1274,67 @@ describe("Discord approval controls", () => {
     await messenger.stop();
   });
 
+  test("a native select with long labels and descriptions displays the full text and returns the exact label", async () => {
+    const { messenger, channel, gateway, answers } = await fixture();
+    const label = ` ${"가나다".repeat(58)} 🙂 `;
+    const description = `Details ${"x".repeat(2050)} end`;
+    const request = { method: "select", title: "Pick", options: ["Short", label], optionDetails: [{}, { description }] };
+    const id = await messenger.showApproval(approval({ request }));
+    expect(answers).toEqual([]);
+    const file = channel.sent[0]?.files?.[0];
+    expect(file).toBeInstanceOf(AttachmentBuilder);
+    if (!(file instanceof AttachmentBuilder)) throw new Error("Expected the full choice text in a Discord attachment");
+    const text = String(file.attachment);
+    expect(text).toContain(label);
+    expect(text).toContain(description);
+    const message = channel.remote.get(id)!;
+    gateway.emit(Events.InteractionCreate, interaction(message, control(message, "select"), "select", { values: ["1"] }));
+    await drain();
+    expect(answers.map(value => value.response)).toEqual([{ value: label }]);
+    await messenger.stop();
+  });
+
+  test("a native select can navigate to later choices on the same approval card", async () => {
+    const { messenger, channel, gateway, answers, errors } = await fixture();
+    const options = Array.from({ length: 26 }, (_, index) => `Choice ${index + 1}`);
+    const id = await messenger.showApproval(approval({ request: { method: "select", title: "Pick", options } }));
+    expect(answers).toEqual([]);
+    const message = channel.remote.get(id)!;
+    const action = (name: string) => {
+      const component = message.components.flatMap(row => row.components).find(value => parseDiscordControl(value.customId)?.action === name);
+      if (!component) throw new Error(`Missing ${name} on the current Discord card`);
+      return component.customId;
+    };
+    const next = interaction(message, action("page-1"));
+    gateway.emit(Events.InteractionCreate, next);
+    await drain();
+    expect(next.ack).toBe(1);
+    expect(answers).toEqual([]);
+    expect(channel.sent).toHaveLength(1);
+    expect(message.edits[0]).toMatchObject({ content: expect.stringContaining("Choice 26") });
+    const previous = interaction(message, action("page-0"));
+    gateway.emit(Events.InteractionCreate, previous);
+    await drain();
+    expect(previous.ack).toBe(1);
+    const forward = interaction(message, action("page-1"));
+    gateway.emit(Events.InteractionCreate, forward);
+    await drain();
+    const select = action("select-1");
+    const wrongPage = interaction(message, select, "select", { values: ["0"] });
+    gateway.emit(Events.InteractionCreate, wrongPage);
+    await drain();
+    expect(wrongPage.ack).toBe(0);
+    expect(answers).toEqual([]);
+    expect(errors).toHaveLength(1);
+    const choose = interaction(message, select, "select", { values: ["25"] });
+    gateway.emit(Events.InteractionCreate, choose);
+    await drain();
+    expect(choose.ack).toBe(1);
+    expect(answers.map(value => value.response)).toEqual([{ value: "Choice 26" }]);
+    expect(message.components).toEqual([]);
+    await messenger.stop();
+  });
+
   test("native checkbox selects show host state and return one exact label per toggle or action", async () => {
     const { messenger, channel, gateway, answers } = await fixture();
     const request = { method: "select", title: "Choose", options: ["Alpha", "Beta", "Other", "Done selecting"], selectionMarker: "checkbox", markableCount: 3, checkedIndices: [0, 2] };
@@ -1392,12 +1453,9 @@ describe("Discord approval controls", () => {
     await messenger.stop();
   });
 
-  test("shared normalization does not relax Discord menu, modal, or attachment capacities", async () => {
+  test("shared normalization does not relax Discord ask, modal, or attachment capacities", async () => {
     const { messenger, channel, answers } = await fixture();
     const requests = [
-      { method: "select", title: "Many", options: Array.from({ length: 26 }, (_, index) => String(index)) },
-      { method: "select", title: "Wide", options: ["x".repeat(101)] },
-      { method: "select", title: "Details", options: ["one"], optionDetails: [{ description: "x".repeat(101) }] },
       { method: "ask", questions: [{ id: "q", question: "Many?", options: Array.from({ length: 26 }, (_, index) => ({ label: String(index) })) }] },
       { method: "ask", questions: [{ id: "q", question: "Wide?", options: [{ label: "x".repeat(101) }] }] },
       { method: "ask", questions: [{ id: "q", question: "Details?", options: [{ label: "one", description: "x".repeat(101) }] }] },

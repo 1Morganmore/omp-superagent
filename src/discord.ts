@@ -20,6 +20,8 @@ import { renderDiscordMarkdown } from "./discord-markdown.ts";
 const NO_MENTIONS = { parse: [] as never[], repliedUser: false };
 const FILE_LIMIT = 8 * 1024 * 1024;
 const MESSAGE_LIMIT = 2000;
+const SELECT_PAGE_SIZE = 25;
+const SELECT_TEXT_LIMIT = 100;
 type Handlers = Parameters<Messenger["start"]>[0];
 type Controls = ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[];
 type Answer = NonNullable<DialogResponse["answers"]>[number];
@@ -77,6 +79,9 @@ export function parseDiscordControl(value: string): { token: string; action: str
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function unsupported(reason: string): never { throw new Error(reason); }
+function menuText(value: string): string {
+  return value.length <= SELECT_TEXT_LIMIT ? value : `${value.slice(0, SELECT_TEXT_LIMIT - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+}
 
 /** Keep Discord capacity checks separate from shared native dialog semantics. */
 function discordDialog(request: Record<string, unknown>): Dialog {
@@ -86,15 +91,11 @@ function discordDialog(request: Record<string, unknown>): Dialog {
   if (Buffer.byteLength(JSON.stringify(request), "utf8") > FILE_LIMIT - 64 * 1024) unsupported("Dialog content exceeds the safe Discord attachment limit; use the local OMP interface.");
   const dialog = parseDialog(request);
   if (dialog.method === "ask") for (const question of dialog.questions) {
-    if (question.options.length > 25) unsupported("Ask options exceed Discord limits.");
+    if (question.options.length > SELECT_PAGE_SIZE) unsupported("Ask options exceed Discord limits.");
     for (const option of question.options) {
-      if (option.label.length > 100) unsupported("Ask option cannot fit a Discord select menu.");
-      if (option.description && option.description.length > 100) unsupported("Ask description cannot fit a Discord select menu.");
+      if (option.label.length > SELECT_TEXT_LIMIT) unsupported("Ask option cannot fit a Discord select menu.");
+      if (option.description && option.description.length > SELECT_TEXT_LIMIT) unsupported("Ask description cannot fit a Discord select menu.");
     }
-  }
-  if (dialog.method === "select") {
-    if (dialog.options.length > 25 || dialog.options.some(option => option.length > 100)) unsupported("Select options cannot fit a Discord select menu.");
-    if (dialog.details.some(detail => detail && detail.length > 100)) unsupported("Select description cannot fit a Discord select menu.");
   }
   if (dialog.method === "input" || dialog.method === "editor") {
     if (dialog.title.length > 45 || dialog.title.length === 0) unsupported("Input title cannot fit a Discord modal.");
@@ -414,7 +415,7 @@ export class DiscordMessenger implements Messenger {
   private button(pending: Pending, action: string, label: string, style = ButtonStyle.Secondary): ButtonBuilder {
     return new ButtonBuilder().setCustomId(this.control(pending, action)).setLabel(label).setStyle(style);
   }
-  private view(pending: Pending): { content: string; components: Controls } {
+  private view(pending: Pending, selectPage?: number): { content: string; components: Controls } {
     const dialog = pending.dialog;
     const cancel = this.button(pending, "cancel", "Cancel");
     if (dialog.method === "confirm") return {
@@ -426,11 +427,35 @@ export class DiscordMessenger implements Messenger {
       components: [new ActionRowBuilder<ButtonBuilder>().addComponents(this.button(pending, "open", "Respond", ButtonStyle.Primary), cancel)],
     };
     if (dialog.method === "select") {
+      const page = selectPage ?? Math.floor((dialog.initialIndex ?? 0) / SELECT_PAGE_SIZE);
+      const first = page * SELECT_PAGE_SIZE;
+      const labels = dialog.options.slice(first, first + SELECT_PAGE_SIZE);
+      const pages = Math.ceil(dialog.options.length / SELECT_PAGE_SIZE);
+      const numbered = pages > 1 || labels.some((label, offset) => label.length > SELECT_TEXT_LIMIT
+        || (dialog.details[first + offset]?.length ?? 0) > SELECT_TEXT_LIMIT);
       const marker = (index: number) => index >= dialog.markableCount || !dialog.marker ? "" : dialog.marker === "checkbox" ? (dialog.checked.includes(index) ? "☑️" : "⬜") : "⚪";
-      const state = dialog.marker ? `\n${dialog.options.map((label, index) => `${marker(index)} ${label}${index === dialog.initialIndex ? " (initial focus)" : ""}`).join("\n")}\nChoose one row per response; OMP supplies the checked state on each request.` : "";
+      const rows = labels.map((label, offset) => {
+        const index = first + offset;
+        const detail = dialog.details[index];
+        const emoji = marker(index);
+        const name = numbered ? `#${index + 1}: ${label}` : label;
+        return {
+          text: `${emoji ? `${emoji} ` : ""}${name}${index === dialog.initialIndex ? " (initial focus)" : ""}${numbered && detail ? `\n${detail}` : ""}`,
+          option: { label: menuText(name), value: String(index), ...(emoji ? { emoji: { name: emoji } } : {}),
+            ...(detail ? { description: menuText(detail) } : {}) },
+        };
+      });
+      const state = numbered || dialog.marker ? `\n${rows.map(row => row.text).join("\n")}` : "";
+      const navigation = new ActionRowBuilder<ButtonBuilder>();
+      if (page > 0) navigation.addComponents(this.button(pending, `page-${page - 1}`, "Previous"));
+      if (page + 1 < pages) navigation.addComponents(this.button(pending, `page-${page + 1}`, "Next"));
+      navigation.addComponents(cancel);
       return {
-        content: dialog.title + state,
-        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(this.control(pending, "select")).setMinValues(1).setMaxValues(1).addOptions(dialog.options.map((label, index) => ({ label, value: String(index), ...(marker(index) ? { emoji: { name: marker(index) } } : {}), ...(dialog.details[index] ? { description: dialog.details[index] } : {}) })))), new ActionRowBuilder<ButtonBuilder>().addComponents(cancel)],
+        content: dialog.title + (pages > 1 ? `\nPage ${page + 1}/${pages}` : "") + state
+          + (dialog.marker ? "\nChoose one row per response; OMP supplies the checked state on each request." : ""),
+        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
+          .setCustomId(this.control(pending, page === 0 ? "select" : `select-${page}`))
+          .setMinValues(1).setMaxValues(1).addOptions(rows.map(row => row.option))), navigation],
       };
     }
     const question = dialog.questions[pending.question]!;
@@ -513,12 +538,12 @@ export class DiscordMessenger implements Messenger {
     }
   }
 
-  private async refresh(pending: Pending): Promise<void> {
+  private async refresh(pending: Pending, selectPage?: number): Promise<void> {
     if (!pending.messageId || !pending.active) return;
     const channel = await this.destination(pending.approval.route);
     const message = await channel.messages.fetch(pending.messageId);
     this.assertApprovalMessage(message, pending.approval, pending.token);
-    const view = this.view(pending);
+    const view = this.view(pending, selectPage);
     const payload = this.payload(view.content, discordNonce(`approval:${pending.token}`, pending.approval.route), view.components);
     await message.edit({ content: payload.content, files: payload.files, attachments: [], components: view.components, allowedMentions: NO_MENTIONS });
   }
@@ -671,10 +696,22 @@ export class DiscordMessenger implements Messenger {
       if (dialog.method === "confirm" && interaction.isButton() && (action === "yes" || action === "no")) {
         await this.finish(pending, { confirmed: action === "yes" }, interaction); return;
       }
-      if (dialog.method === "select" && interaction.isStringSelectMenu() && action === "select") {
+      if (dialog.method === "select" && interaction.isButton() && action.startsWith("page-")) {
+        const page = Number(action.slice("page-".length));
+        if (page * SELECT_PAGE_SIZE >= dialog.options.length) throw new Error("Invalid Discord select page");
+        // Navigation only edits this card. It never admits or resolves a native answer.
+        await interaction.deferUpdate();
+        await this.refresh(pending, page);
+        return;
+      }
+      if (dialog.method === "select" && interaction.isStringSelectMenu() && (action === "select" || action.startsWith("select-"))) {
+        const first = action === "select" ? 0 : Number(action.slice("select-".length)) * SELECT_PAGE_SIZE;
         const index = interaction.values[0];
-        if (interaction.values.length !== 1 || !index || !/^(0|[1-9][0-9]*)$/.test(index) || !dialog.options[Number(index)]) throw new Error("Invalid Discord select value");
-        await this.finish(pending, { value: dialog.options[Number(index)]! }, interaction); return;
+        const position = Number(index);
+        const label = dialog.options[position];
+        if (interaction.values.length !== 1 || !index || !/^(0|[1-9][0-9]*)$/.test(index)
+          || position < first || position >= first + SELECT_PAGE_SIZE || label === undefined) throw new Error("Invalid Discord select value");
+        await this.finish(pending, { value: label }, interaction); return;
       }
       if ((dialog.method === "input" || dialog.method === "editor") && interaction.isModalSubmit() && action === "value") {
         await this.finish(pending, { value: interaction.fields.getTextInputValue("value") }, interaction); return;

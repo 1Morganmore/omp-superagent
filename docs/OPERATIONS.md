@@ -927,7 +927,7 @@ head의 native 승인 카드 복구를 먼저 마친 뒤 입력·콜백 처리�
 
 | 플랫폼 | 승인·질문 UI와 실제 한계 |
 | --- | --- |
-| Discord | 버튼·선택·모달. 원래 요청·메시지·세션에 묶인 응답만 수락. 실제 승인 답변은 durable 접수 뒤 ACK하며 단순 handler 진입을 접수 성공으로 보지 않음 |
+| Discord | 버튼·선택·모달. native `select`는 한 카드에서 25개씩 페이지로 표시하고, 긴 선택지·설명은 메뉴에서 줄여 표시하되 전문은 카드 본문이나 텍스트 첨부에 싣는다. 답변은 원래 선택값을 그대로 돌려준다. `ask`는 질문당 25개 및 label·설명당 100 UTF-16 단위 이하. 원래 요청·메시지·세션에 묶인 응답만 수락하고 durable 접수 뒤 ACK |
 | Telegram | inline 버튼과 **정확한 활성 봇 카드에 대한 답장**으로 input/editor·ask 자유 입력. 카드 4,096 UTF-16 단위, 100행 이하, 버튼 label 64 UTF-16 단위 이하, callback_data 64바이트 이하. ask의 진행·답안을 영속화하며 재시작 시 같은 카드를 편집해 API 응답 신원을 확인. 단순 캐시를 readback으로 간주하거나 불확실한 카드를 새로 만들지 않음 |
 | Slack | Block Kit 버튼·최대 100개 옵션 select·input/editor/ask 자유 입력 모달. label·옵션 설명 75자, 입력 3,000자, placeholder 150자 이하. 카드 50 blocks·39,000자·semantic content 100 KiB 이하. 원래 workspace·사용자·카드 및 모달 ID/metadata를 확인 |
 
