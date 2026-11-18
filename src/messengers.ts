@@ -1,5 +1,5 @@
 import type { Config } from "./config";
-import { requireMessengerCredentials } from "./config";
+import { credentialEnvNames, requireMessengerCredentials, voiceApiKeyEnv } from "./config";
 import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Platform, Route, StorePort, ThreadInfo, ThreadUpdate } from "./contracts";
 import { physicalRouteKey } from "./contracts";
 import { DeliveryError } from "./delivery";
@@ -122,9 +122,16 @@ export class MessengerHub implements Messenger {
 export function createMessenger(config: Config, store: Pick<StorePort, "getMeta" | "setMeta">, onError: (error: unknown) => void): MessengerHub {
   requireMessengerCredentials(config);
   const adapters: Partial<Record<Platform, Messenger>> = {};
-  if (config.discord) adapters.discord = new DiscordMessenger({
-    ...config.discord, token: process.env[config.discord.tokenEnv]!, store, onError,
-  });
+  if (config.discord) {
+    const keyName = voiceApiKeyEnv(config);
+    const key = keyName && process.env[keyName];
+    // Different variable names can still contain the same secret. Never use a
+    // configured transport token as a bearer credential on the OpenAI socket.
+    const shared = key && credentialEnvNames(config).some(name => name !== keyName && process.env[name] === key);
+    adapters.discord = new DiscordMessenger({
+      ...config.discord, token: process.env[config.discord.tokenEnv]!, voiceApiKey: shared ? undefined : key, store, onError,
+    });
+  }
   if (config.telegram) adapters.telegram = new TelegramMessenger({
     ...config.telegram, token: process.env[config.telegram.tokenEnv]!, store, onError,
   });

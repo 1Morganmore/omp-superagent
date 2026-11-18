@@ -152,6 +152,12 @@ crash supervisor; Linux service installation is not provided.
 
 ## Working from chat
 
+Discord can optionally join a private voice conversation with the owner. A separate
+OpenAI Live session answers speech; work goes to HEAD only after written confirmation.
+Select Codex subscription voice or the separately billed API in the
+[voice configuration guide](docs/discord-voice.md). Voice is off by default;
+a rejected subscription call never switches to API billing.
+
 - Ask normally. Questions get direct answers; work instructions open a topic with a
   brief approach, followed by meaningful progress and results.
 - Follow up in the same topic to steer active work through the head. Repositories and

@@ -12,6 +12,9 @@ import { parseDialog, type Dialog } from "./dialog.ts";
 import { DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
 import { renderDiscordMarkdown } from "./discord-markdown.ts";
+import { DiscordVoice } from "./discord-voice";
+import { VOICE_DRAFT_HEADER } from "./discord-voice-draft";
+import type { DiscordVoiceConfig } from "./config";
 
 // Reference (not copied): gimso2x/ompbot @ 4d2eb28d0bf66644892dc0fc333580d0eb7e7780,
 // src/discord/{adapter,attachments,channel,transport}.ts (MIT, ompbot contributors).
@@ -42,6 +45,8 @@ export interface DiscordMessengerOptions {
   ownerId: string;
   allowedGuildIds: string[];
   allowedChannelIds: string[];
+  voice?: DiscordVoiceConfig;
+  voiceApiKey?: string;
   /** A supported discord.js Client, primarily for deterministic transport tests. */
   client?: Client;
   /** Attachment HTTP boundary; Discord credentials are never sent to the CDN. */
@@ -115,11 +120,31 @@ export class DiscordMessenger implements Messenger {
   private intake: Promise<void> = Promise.resolve();
   private readonly pending = new Map<string, Pending>();
   private readonly report: (error: unknown) => void;
-  private readonly onMessage = (message: Message) => { this.enqueue(message); };
-  private readonly onEdit = (_old: Message | PartialMessage, message: Message | PartialMessage) => { this.enqueue(message); };
+  private readonly voice?: DiscordVoice;
+  private voiceConnected = false;
+  private voiceEpoch = 0;
+  private readonly onVoiceDisconnect = () => {
+    this.voiceConnected = false;
+    this.voiceEpoch++;
+    this.voice?.close();
+  };
+  private readonly onMessage = (message: Message) => {
+    // Revocation must not wait behind a slow reply fetch or HEAD intake. command()
+    // checks origin/identity and fences older queued starts by real snowflake.
+    if (this.voice && this.voiceConnected && this.admission?.resolvedReady && !this.admission.stopped &&
+      !message.partial && message.content === "/voice stop" && message.channelId === this.options.voice?.textChannelId &&
+      this.route(message.channel)?.guildId) {
+      const input = this.normalize(message);
+      if (input) this.voice.command(message, input);
+      return;
+    }
+    this.enqueue(message, true);
+  };
+  private readonly onEdit = (_old: Message | PartialMessage, message: Message | PartialMessage) => { this.enqueue(message, false); };
   private readonly onInteraction = (interaction: Interaction) => { void this.interact(interaction).catch(this.report); };
   private readonly onReconnect = () => {
     if (!this.connected) return;
+    this.voiceConnected = true;
     const admission = this.admission;
     this.intake = this.intake.then(async () => {
       if (await this.admitted(admission)) await this.handlers?.reconnect?.();
@@ -130,8 +155,11 @@ export class DiscordMessenger implements Messenger {
     this.guilds = new Set(options.allowedGuildIds);
     this.channels = new Set(options.allowedChannelIds);
     this.report = options.onError ?? (error => console.error("Discord event failed:", error));
+    if (options.voice) this.voice = new DiscordVoice(options.voice, options.ownerId,
+      options.voiceApiKey !== options.token ? options.voiceApiKey : undefined, this.report);
     this.client = options.client ?? new Client({
-      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
+      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent,
+        ...(options.voice ? [GatewayIntentBits.GuildVoiceStates] : [])],
       partials: [Partials.Channel, Partials.Message],
       allowedMentions: NO_MENTIONS,
       rest: { retries: 0, rejectOnRateLimit: () => true },
@@ -163,6 +191,8 @@ export class DiscordMessenger implements Messenger {
     this.client.on(Events.MessageUpdate, this.onEdit);
     this.client.on(Events.InteractionCreate, this.onInteraction);
     this.client.on(Events.ShardResume, this.onReconnect);
+    this.client.on(Events.ShardDisconnect, this.onVoiceDisconnect);
+    this.client.on(Events.ShardReconnecting, this.onVoiceDisconnect);
     this.client.on(Events.ShardReady, this.onReconnect);
     this.client.on(Events.Error, this.report);
     try {
@@ -174,6 +204,7 @@ export class DiscordMessenger implements Messenger {
         finally { this.client.off(Events.ClientReady, ready); }
       }
       this.connected = true;
+      this.voiceConnected = true;
     } catch (error) { await this.stop(); throw error; }
   }
 
@@ -191,8 +222,9 @@ export class DiscordMessenger implements Messenger {
     return { platform: "discord", accountId, authorityId: this.options.ownerId, guildId, channelId, threadId };
   }
 
-  private enqueue(message: Message | PartialMessage): void {
+  private enqueue(message: Message | PartialMessage, fresh: boolean): void {
     const admission = this.admission;
+    const voiceEpoch = this.voiceConnected && admission?.resolvedReady ? this.voiceEpoch : null;
     this.intake = this.intake.then(async () => {
       if (!await this.admitted(admission)) return;
       // Check destination and known author before even fetching a partial message.
@@ -201,6 +233,12 @@ export class DiscordMessenger implements Messenger {
       const full = message.partial ? await message.fetch() : message;
       const inbound = this.normalize(full);
       if (inbound) {
+        if (this.isVoiceControl(inbound)) {
+          if (!fresh || message.partial || voiceEpoch !== this.voiceEpoch || !this.voiceConnected) return;
+          const work = this.voice?.command(full, inbound);
+          if (work) await this.handlers?.message({ ...inbound, text: work, attachments: [], reply: undefined });
+          return;
+        }
         await this.resolveReply(full, inbound);
         await this.handlers?.message(inbound);
       }
@@ -236,6 +274,11 @@ export class DiscordMessenger implements Messenger {
       ...(reply ? { reply } : {}),
       discordContext: this.context(route, message.channel),
     };
+  }
+
+  private isVoiceControl(input: Inbound): boolean {
+    return input.route.guildId !== null && input.route.threadId === null &&
+      input.route.channelId === this.options.voice?.textChannelId && DiscordVoice.isControl(input.text);
   }
 
   /** Cached objects only: optional metadata must never delay or discard intake. */
@@ -308,7 +351,9 @@ export class DiscordMessenger implements Messenger {
     if (!referenced || referenced.partial || referenced.id !== reply.messageId ||
       referenced.channelId !== message.channelId || referenced.guildId !== message.guildId) return false;
     reply.authorId = referenced.author?.id ?? null;
-    reply.text = typeof referenced.content === "string" ? referenced.content : null;
+    reply.text = typeof referenced.content === "string" &&
+      !(referenced.author?.id === this.client.user?.id && referenced.content.startsWith(VOICE_DRAFT_HEADER))
+      ? referenced.content : null;
     return true;
   }
 
@@ -393,6 +438,7 @@ export class DiscordMessenger implements Messenger {
         // without a reference: an ambiguous first attempt may already exist.
         ...(output.replyTo ? { reply: { messageReference: output.replyTo.messageId, failIfNotExists: false } } : {}),
       });
+      this.voice?.textDelivered(output);
       return message.id;
     } catch (error) { throw deliveryError(error); }
   }
@@ -756,7 +802,7 @@ export class DiscordMessenger implements Messenger {
       if (!messages.length) break;
       for (const message of messages) {
         const input = this.normalize(message);
-        if (input && physicalRouteKey(input.route) === physicalRouteKey(route)) {
+        if (input && !this.isVoiceControl(input) && physicalRouteKey(input.route) === physicalRouteKey(route)) {
           await this.resolveReply(message, input);
           inputs.push(input);
         }
@@ -940,6 +986,7 @@ export class DiscordMessenger implements Messenger {
 
   async stop(): Promise<void> {
     this.connected = false;
+    this.onVoiceDisconnect();
     if (this.admission) {
       this.admission.stopped = true;
       this.admission.stop();
@@ -948,6 +995,8 @@ export class DiscordMessenger implements Messenger {
     this.client.off(Events.MessageUpdate, this.onEdit);
     this.client.off(Events.InteractionCreate, this.onInteraction);
     this.client.off(Events.ShardResume, this.onReconnect);
+    this.client.off(Events.ShardDisconnect, this.onVoiceDisconnect);
+    this.client.off(Events.ShardReconnecting, this.onVoiceDisconnect);
     this.client.off(Events.ShardReady, this.onReconnect);
     this.client.off(Events.Error, this.report);
     await this.intake;

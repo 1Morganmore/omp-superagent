@@ -15,6 +15,9 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 플랫폼·계정·대화·주제 신원은 분리한다. 멀티테넌트 구성이나 OS 보안 샌드박스가 아니다.
 관리 RPC Host의 동일 프로세스 native TUI/herdr attach는 지원하지 않는다.
 
+선택 기능인 [Discord 실시간 음성채팅](discord-voice.md)은 일반 대화를 별도 OpenAI Live 세션에서
+처리한다. 음성 모델이 제안한 작업은 소유자가 원래 텍스트 채널에서 서면으로 확인해야 HEAD에 접수된다.
+
 ### 레인 관리 도구와 운영 스킬
 
 헤드만 `lane_models`, `lane_init_presets`, `lane_start`, `lane_set_model`,

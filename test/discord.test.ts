@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationCommandOptionType, Attachment as DiscordAttachment, AttachmentBuilder, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, type Client, type Message, type MessageCreateOptions } from "discord.js";
 import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "../src/discord.ts";
+import { VOICE_DRAFT_HEADER } from "../src/discord-voice-draft";
 import { DeliveryError } from "../src/delivery.ts";
 import { parseDialog } from "../src/dialog.ts";
 import { Store } from "../src/store";
@@ -117,7 +118,7 @@ function inbound(channel: Channel, patch: Record<string, unknown> = {}): Message
   } as unknown as Message;
 }
 
-async function fixture(options: Pick<DiscordMessengerOptions, "fetch" | "store"> = {}, admit?: (id: string, response: DialogResponse, route: Route) => Promise<void>) {
+async function fixture(options: Pick<DiscordMessengerOptions, "fetch" | "store" | "voice"> = {}, admit?: (id: string, response: DialogResponse, route: Route) => Promise<void>) {
   const gateway = new Gateway();
   const channel = new Channel();
   gateway.channelMap.set(channel.id, channel);
@@ -205,6 +206,53 @@ describe("shared native dialog normalization", () => {
 });
 
 describe("Discord routing and parsing", () => {
+  test("voice controls require a fresh owner message; edits, redelivery and catchup never open paid sessions", async () => {
+    const { messenger, gateway, channel, received } = await fixture({ voice: {
+      apiKeyEnv: "SUPERAGENT_TEST_ABSENT_VOICE_KEY", channelId: "401", textChannelId: "parent",
+      model: "speech", backendModel: "delegate", voice: "selected", maxSessionSeconds: 60,
+    } });
+    try {
+      const message = inbound(channel, { content: "/voice start", createdTimestamp: Date.now() });
+      gateway.emit(Events.MessageCreate, { ...message, author: { id: "someone-else", bot: false } });
+      gateway.emit(Events.MessageUpdate, message, { ...message, editedTimestamp: Date.now() });
+      channel.history.set("100", message);
+      expect(await messenger.fetchAfter(route, "99")).toEqual([]);
+      await drain();
+      expect(channel.sent).toHaveLength(0);
+      gateway.emit(Events.ShardDisconnect);
+      gateway.emit(Events.MessageCreate, message);
+      gateway.emit(Events.ShardResume);
+      await drain();
+      expect(channel.sent).toHaveLength(0);
+      gateway.emit(Events.MessageCreate, message);
+      gateway.emit(Events.MessageCreate, message);
+      gateway.emit(Events.MessageCreate, inbound(channel, { id: "101" }));
+      await drain();
+      expect(channel.sent.map(payload => payload.content)).toEqual(["A separate voice provider key is required. No Live session was opened."]);
+      expect(received.map(input => input.text)).toEqual(["hello"]);
+      gateway.emit(Events.MessageCreate, inbound(channel, { id: "102", content: "/voice start", createdTimestamp: Date.now() }));
+      gateway.emit(Events.MessageCreate, inbound(channel, { id: "103", content: "/voice stop", createdTimestamp: Date.now() }));
+      expect(channel.sent.at(-1)?.content).toBe("Voice is off.");
+      await drain();
+      expect(channel.sent).toHaveLength(2);
+    } finally { await messenger.stop(); }
+  });
+  test("an ordinary reply to a voice draft never includes the unconfirmed task, even from history", async () => {
+    const { messenger, gateway, channel, received } = await fixture();
+    try {
+      channel.references.set("100", inbound(channel, { id: "100", author: { id: bot, bot: true },
+        content: VOICE_DRAFT_HEADER + "unconfirmed task" }));
+      const question = inbound(channel, { id: "101", type: 19, content: "What would this do?",
+        reference: { messageId: "100", guildId: channel.guildId, channelId: channel.id } });
+      gateway.emit(Events.MessageCreate, question);
+      await drain();
+      channel.history.set("101", question);
+      const recovered = await messenger.fetchAfter(route, "100");
+      for (const input of [received[0], recovered[0]]) expect(input).toMatchObject({
+        text: "What would this do?", reply: { authorId: bot, messageId: "100", text: null },
+      });
+    } finally { await messenger.stop(); }
+  });
   test("authenticated thread intake snapshots cached parent topics and exact channel/thread purpose notes without fetching", async () => {
     const store = new Store(":memory:");
     const { messenger, gateway, channel, received } = await fixture({ store });

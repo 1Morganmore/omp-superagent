@@ -8,7 +8,30 @@ export interface DiscordConfig {
   ownerId: string;
   allowedGuildIds: string[];
   allowedChannelIds: string[];
+  voice?: DiscordVoiceConfig;
 }
+
+type DiscordVoiceSessionConfig = {
+  readonly channelId: string;
+  readonly textChannelId: string;
+  readonly voice: string;
+  readonly maxSessionSeconds: number;
+};
+
+export type DiscordVoiceConfig = DiscordVoiceSessionConfig & (
+  | {
+      readonly auth?: "api";
+      readonly apiKeyEnv: string;
+      readonly model: string;
+      readonly backendModel: string;
+    }
+  | {
+      readonly auth: "subscription";
+      readonly apiKeyEnv?: never;
+      readonly model?: never;
+      readonly backendModel?: never;
+    }
+);
 
 export interface TelegramConfig {
   tokenEnv: string;
@@ -72,16 +95,32 @@ export function configuredPlatforms(config: Config): Platform[] {
   return (["discord", "telegram", "slack"] as const).filter(platform => config[platform] !== undefined);
 }
 
+export function voiceApiKeyEnv(config: Config): string | undefined {
+  const voice = config.discord?.voice;
+  switch (voice?.auth) {
+    case "api":
+    case undefined:
+      return voice?.apiKeyEnv;
+    case "subscription":
+      return undefined;
+  }
+}
+
 export function credentialEnvNames(config: Config): string[] {
+  const voiceKey = voiceApiKeyEnv(config);
   return [...new Set([
     ...(config.discord ? [config.discord.tokenEnv] : []),
+    ...(voiceKey === undefined ? [] : [voiceKey]),
     ...(config.telegram ? [config.telegram.tokenEnv] : []),
     ...(config.slack ? [config.slack.botTokenEnv, config.slack.appTokenEnv] : []),
   ])];
 }
 
 export function requireMessengerCredentials(config: Config): void {
+  // Only an explicit API voice session needs its provider key, not text intake.
+  const voiceKey = voiceApiKeyEnv(config);
   for (const name of credentialEnvNames(config)) {
+    if (name === voiceKey) continue;
     if (!process.env[name]) throw new Error(`Missing messenger credential environment variable ${name}`);
   }
 }
@@ -140,6 +179,41 @@ export function parseConfig(value: unknown, path: string): Config {
   const command = resolveOmpCommand(raw.command as string[]);
   const maxHosts = integer(raw.maxHosts, "maxHosts", 2);
   const maxSubagents = integer(raw.maxSubagents, "maxSubagents", maxHosts);
+  const discordChannels = discord ? ids(discord.allowedChannelIds, "discord.allowedChannelIds") : [];
+  const voice = discord?.voice === undefined ? undefined : record(discord.voice, "discord.voice");
+  let voiceConfig: DiscordVoiceConfig | undefined;
+  if (voice) {
+    const channelId = id(voice.channelId, "discord.voice.channelId", /^\d+$/);
+    const textChannelId = id(voice.textChannelId, "discord.voice.textChannelId", /^\d+$/);
+    if (textChannelId === channelId || !discordChannels.includes(textChannelId))
+      throw new Error("discord.voice.textChannelId must be a separate, allowed text channel");
+    const maxSessionSeconds = integer(voice.maxSessionSeconds, "discord.voice.maxSessionSeconds", 1);
+    if (maxSessionSeconds * 1000 > 2 ** 31 - 1) throw new Error("discord.voice.maxSessionSeconds exceeds timer range");
+    const session = { channelId, textChannelId, voice: text(voice.voice, "discord.voice.voice"), maxSessionSeconds };
+    const auth = voice.auth;
+    switch (auth) {
+      case "subscription": {
+        const unsupported = Object.keys(voice).find(key => key !== "auth" && !Object.hasOwn(session, key));
+        if (unsupported !== undefined) throw new Error(`discord.voice.${unsupported} is not supported with subscription auth`);
+        voiceConfig = { ...session, auth: "subscription" };
+        break;
+      }
+      case "api":
+      case undefined: {
+        const apiKeyEnv = tokenEnv(voice.apiKeyEnv, "discord.voice.apiKeyEnv");
+        if ([discord?.tokenEnv, telegram?.tokenEnv, slack?.appTokenEnv, slack?.botTokenEnv].includes(apiKeyEnv))
+          throw new Error("discord.voice.apiKeyEnv must not name a messenger token");
+        voiceConfig = {
+          ...session, ...(auth === undefined ? {} : { auth }), apiKeyEnv,
+          model: text(voice.model, "discord.voice.model"),
+          backendModel: text(voice.backendModel, "discord.voice.backendModel"),
+        };
+        break;
+      }
+      default:
+        throw new Error('discord.voice.auth must be "api" or "subscription"');
+    }
+  }
   return {
     path: absolute,
     stateDir: pathValue(raw.stateDir, "stateDir"),
@@ -153,7 +227,8 @@ export function parseConfig(value: unknown, path: string): Config {
       tokenEnv: tokenEnv(discord.tokenEnv, "discord.tokenEnv"),
       ownerId: id(discord.ownerId, "discord.ownerId", /^\d+$/),
       allowedGuildIds: ids(discord.allowedGuildIds, "discord.allowedGuildIds"),
-      allowedChannelIds: ids(discord.allowedChannelIds, "discord.allowedChannelIds"),
+      allowedChannelIds: discordChannels,
+      ...(voiceConfig ? { voice: voiceConfig } : {}),
     } } : {}),
     ...(telegram ? { telegram: {
       tokenEnv: tokenEnv(telegram.tokenEnv, "telegram.tokenEnv"),

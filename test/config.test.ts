@@ -2,8 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { authorizeRoute, configuredPlatforms, credentialEnvNames, loadConfig } from "../src/config";
+import { authorizeRoute, configuredPlatforms, credentialEnvNames, loadConfig, requireMessengerCredentials } from "../src/config";
 import { main } from "../src/cli";
+import { loadCredentials } from "../src/credentials";
 import { discoverInstalledOmp, inspectInstalledOmp } from "../src/installed-omp";
 import type { Route } from "../src/contracts";
 import { dependencies } from "../package.json";
@@ -23,6 +24,10 @@ async function config(patch: Record<string, unknown> = {}) {
 }
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 describe("operator execution limits", () => {
+  const voiceDiscord = { tokenEnv: "DISCORD_TOKEN", ownerId: "1", allowedGuildIds: ["2"], allowedChannelIds: ["3"] };
+  const voiceSession = { textChannelId: "3", channelId: "4", voice: "selected", maxSessionSeconds: 60 };
+  const paidVoice = { ...voiceSession, model: "speech", backendModel: "delegate", apiKeyEnv: "OMP_VOICE_KEY" };
+
   test("rejects a subagent budget that cannot cover admitted hosts", async () => {
     await expect(loadConfig(await config({ maxHosts: 4, maxSubagents: 2 }))).rejects.toThrow("maxSubagents");
   });
@@ -36,6 +41,59 @@ describe("operator execution limits", () => {
   test("requires an explicit Discord owner rather than a permissive default", async () => {
     await expect(loadConfig(await config({ discord: { tokenEnv: "TOKEN", allowedGuildIds: [], allowedChannelIds: [] } })))
       .rejects.toThrow("discord.ownerId");
+  });
+  test.each(["implicit", "explicit"])("bounds API voice and isolates its provider credential with %s auth", async mode => {
+    const voice = { ...paidVoice, ...(mode === "explicit" ? { auth: "api" as const } : {}) };
+    const loaded = await loadConfig(await config({ discord: { ...voiceDiscord, voice } }));
+    expect(credentialEnvNames(loaded)).toEqual(["DISCORD_TOKEN", "OMP_VOICE_KEY"]);
+    expect(loaded.discord?.voice).toEqual(voice);
+    for (const patch of [{ apiKeyEnv: "DISCORD_TOKEN" }, { textChannelId: "5" }, { channelId: "3" },
+      { maxSessionSeconds: 0 }, { maxSessionSeconds: 2 ** 31 }, { backendModel: "" }]) {
+      await expect(loadConfig(await config({ discord: { ...voiceDiscord, voice: { ...voice, ...patch } } }))).rejects.toThrow("discord.voice");
+    }
+  });
+  test("subscription voice loads and requires only messenger credentials", async () => {
+    const token = "SUPERAGENT_TEST_SUBSCRIPTION_DISCORD_TOKEN";
+    const paidKey = "SUPERAGENT_TEST_SUBSCRIPTION_STALE_VOICE_KEY";
+    const voice = { ...voiceSession, auth: "subscription" as const };
+    const path = await config({ discord: { ...voiceDiscord, tokenEnv: token, voice } });
+    writeFileSync(`${path}.env`, `${token}=test-discord-token\n${paidKey}=test-paid-key\n`, { mode: 0o600 });
+    const loaded = await loadConfig(path);
+    const previous = { [token]: process.env[token], [paidKey]: process.env[paidKey] };
+    try {
+      delete process.env[token];
+      delete process.env[paidKey];
+      loadCredentials(loaded);
+      expect(loaded.discord?.voice).toEqual(voice);
+      expect(credentialEnvNames(loaded)).toEqual([token]);
+      expect(process.env[token]).toBe("test-discord-token");
+      expect(process.env[paidKey]).toBeUndefined();
+      expect(() => requireMessengerCredentials(loaded)).not.toThrow();
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+  test.each([
+    ["model", "speech"],
+    ["backendModel", ""],
+    ["apiKeyEnv", null],
+    ["provider", "unexpected"],
+    ["textChannelId", "5"],
+    ["maxSessionSeconds", 2 ** 31],
+  ] as const)("rejects invalid subscription voice field %s", async (field, value) => {
+    const voice = { ...voiceSession, auth: "subscription", [field]: value };
+    await expect(loadConfig(await config({ discord: { ...voiceDiscord, voice } }))).rejects.toThrow(`discord.voice.${field}`);
+  });
+  test.each(["oauth", "", null])("rejects invalid voice auth %p rather than starting API voice", async auth => {
+    const voice = { ...paidVoice, auth };
+    await expect(loadConfig(await config({ discord: { ...voiceDiscord, voice } }))).rejects.toThrow("discord.voice.auth");
+  });
+  test("does not infer subscription voice from missing paid settings", async () => {
+    await expect(loadConfig(await config({ discord: { ...voiceDiscord, voice: voiceSession } })))
+      .rejects.toThrow("discord.voice.apiKeyEnv");
   });
   test("supports Telegram-only and Slack-only installations without Discord credentials", async () => {
     const telegram = await loadConfig(await config({

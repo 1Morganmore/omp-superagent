@@ -56,6 +56,19 @@ SOFTWARE.
 
 ## Discord transport
 
+- The optional voice link uses [`@discordjs/voice` 0.19.2](https://www.npmjs.com/package/@discordjs/voice/v/0.19.2)
+  (Apache-2.0), its locked DAVE implementation [`@snazzah/davey` 0.1.12](https://github.com/Snazzah/davey),
+  [`opusscript` 0.0.8](https://github.com/abalabahaha/opusscript) (MIT bindings for libopus),
+  and [`@noble/ciphers` 2.4.0](https://github.com/paulmillr/noble-ciphers) (MIT) for XChaCha20 transport encryption.
+  These packages are installed as dependencies, not vendored. Their licenses and included codec notices remain applicable.
+- For subscription voice, we compared the independent billing/transport paths in
+  [TheSmokeDev/hermes-talk `f19bc975`](https://github.com/TheSmokeDev/hermes-talk/blob/f19bc975d3f5ea1bfb533c42966cec2fca7f7678/talk_live_realtime.py)
+  and the WebRTC media, server-side event handling and retention caveats in
+  [dmmeteo/codex-voice `956d6b29`](https://github.com/dmmeteo/codex-voice/blob/956d6b299f13b02a7ad036a619568e1740a2ee67/docs/voice.md#test-subscription-gpt-live).
+  The [Hermes Talk MIT notice](https://github.com/TheSmokeDev/hermes-talk/blob/f19bc975d3f5ea1bfb533c42966cec2fca7f7678/LICENSE)
+  credits `Copyright (c) 2026 SmokeDev`; the [codex-voice MIT notice](https://github.com/dmmeteo/codex-voice/blob/956d6b299f13b02a7ad036a619568e1740a2ee67/LICENSE-MIT)
+  credits `Copyright (c) 2026 codex-asr contributors`. Both use the MIT permission notice reproduced above.
+  Neither project grants a subscription entitlement. Discord routing, source-bound confirmation and HEAD delivery remain this project's responsibilities.
 - Gateway/REST and component support use the
   [discord.js](https://github.com/discordjs/discord.js) dependency, not a copied
   client. The declared range is `^14.25.1`; `bun.lock` records the resolved version.
@@ -97,6 +110,13 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   `LICENSE.omp-dori` is not treated as an MIT grant for that entire repository.
 
 ### Dori pull-request comparisons: independent implementation
+
+- The opt-in Discord voice assistant is conceptually based on
+  [Dori PR #86](https://github.com/vntrevx/omp-dori/pull/86), feature commit
+  `d2a5b3ac3f168650190a03167c86b20afe52b5b7`, reviewed at
+  `c136c9e7e78a54629b63c5093ac7b4b9c1ad65a0`. The Gateway integration,
+  voice link, provider client and written handoff are independently implemented;
+  no Dori source, prompts or tests were imported.
 
 - Snapshot: [vntrevx/omp-dori `dc7402efce8adc87aeac808a1b1f50100f9f53d9`](https://github.com/vntrevx/omp-dori/tree/dc7402efce8adc87aeac808a1b1f50100f9f53d9).
 - Compared Git environment isolation in [#9](https://github.com/vntrevx/omp-dori/pull/9),
