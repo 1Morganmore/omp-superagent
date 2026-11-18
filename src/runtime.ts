@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Approval, DialogResponse, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, InputRecord, Lane, LaneModel, LaneModelChoice, LanePresetSnapshot, ResolvedLanePreset, ModelPreset, Messenger, Route, StorePort, ThreadInfo, ThreadUpdate, WorkflowChoice } from "./contracts";
 import { authorizeDiscordPurpose, discordPurposeRequest } from "./discord-context";
-import { physicalRoute, physicalRouteKey, routeKey } from "./contracts";
+import { HEAD_MODEL_CONTROL, physicalRoute, physicalRouteKey, routeKey, type HeadModelChange } from "./contracts";
 import { authorizeRoute, credentialEnvNames, type Config, hostPaths, privateDirectory } from "./config";
 import { DeliveryError } from "./delivery";
 import { connect, type HostOptions, startHost } from "./host";
@@ -735,6 +735,28 @@ export class Superagent {
     const data = successful(await head.connection.request({ type: "get_available_models" }), "get_available_models");
     if (!this.current(head)) throw new Error("The authoritative head changed while reading its model catalog");
     return codingModels(data.models);
+  }
+
+  requestHeadModel({ sourceId, model }: HeadModelChange) {
+    this.assertRestartOpen();
+    const live = this.live.get("main");
+    const owner = live?.input;
+    const source = this.store.input(sourceId);
+    if (this.stopped || this.headStopping || this.headRecoveryActive() || !live || !this.current(live)
+      || !owner || source?.target !== "main" || source.state !== "submitted" || !source.requestId
+      || live.admitted.get(source.requestId)?.input.id !== source.id || this.store.getMeta(`user-source:${source.id}`) !== "true"
+      || this.store.getMeta(`steering-owner:${source.id}`) !== owner.id) {
+      throw new Error("A HEAD model change requires an original owner request admitted to the current HEAD turn");
+    }
+    this.authorized(source.route);
+    const exact = laneModelArgument(model);
+    if (/\s/.test(exact)) throw new Error("Use one exact provider/model identity, not a preset or command");
+    const key = `head:model-request:${owner.id}`;
+    const intent = JSON.stringify({ sourceId, model: { provider: model.provider, id: model.id } });
+    const previous = this.store.getMeta(key);
+    if (previous !== null && previous !== intent) throw new Error("A different HEAD model change is already requested for this turn");
+    if (previous === null) this.store.setMeta(key, intent);
+    return { status: "scheduled", model: exact, detail: "Not applied yet. The runtime will report the verified result after this turn settles." };
   }
 
   private async requireAvailableModel(model: LaneModel): Promise<void> {
@@ -2265,7 +2287,11 @@ export class Superagent {
   }
 
   private headCommand(input: InputRecord): HeadCommand | null {
-    if (input.target !== "main" || this.store.getMeta(`user-source:${input.id}`) !== "true"
+    if (input.target !== "main") return null;
+    if (input.id.startsWith("head-model:") && this.store.getMeta(HEAD_MODEL_CONTROL) === input.id) {
+      return { name: "model", argument: input.text };
+    }
+    if (this.store.getMeta(`user-source:${input.id}`) !== "true"
       || this.store.getMeta(`handoff-source:${input.id}`)) return null;
     const match = /^\/(help|status|stop|restart|context|compact|usage|model|effort|resolve)(?:\s+([\s\S]*))?$/.exec(input.text.trim());
     return match ? { name: match[1] as HeadCommand["name"], argument: (match[2] ?? "").trim() } : null;
@@ -3149,6 +3175,7 @@ export class Superagent {
         return;
       }
       const busy = (current: RuntimeState) => this.headRecoveryActive() || !!this.restartFence() || earlierMain || this.initializationHoldsHead() || this.headStopping > 0 || !!this.headCompaction || this.blocked.has("main") || !!live.input || live.busy
+        || !!this.pendingHeadModel(input.id)
         || !current.isSettled || current.isStreaming || current.hasPendingAsyncWork || current.hasOwnedRunningWork
         || !!current.pendingUiRequests?.length || !!this.store.approvals("main").length || current.goal?.enabled || current.isCompacting
         || !!current.queuedMessageCount;
@@ -3298,6 +3325,13 @@ export class Superagent {
     });
   }
 
+  private pendingHeadModel(exceptId?: string): InputRecord | undefined {
+    const id = this.store.getMeta(HEAD_MODEL_CONTROL);
+    if (!id || id === exceptId) return;
+    const input = this.store.input(id);
+    if (input?.state === "pending") return input;
+  }
+
   private async pump(): Promise<void> {
     try {
       do {
@@ -3318,24 +3352,32 @@ export class Superagent {
         }
         const heldTargets = new Set<string>();
         const earlierMain = new Set<string>();
-        for (const input of this.store.inputs()) {
+        const inputs = this.store.inputs();
+        const deferredId = this.store.getMeta(HEAD_MODEL_CONTROL);
+        const deferred = inputs.find(input => input.id === deferredId);
+        // This control belongs to the preceding turn, not to the time its
+        // settlement appended the row. Its uncertainty must also fence later work.
+        const ordered = deferred ? [deferred, ...inputs.filter(input => input !== deferred)] : inputs;
+        for (const input of ordered) {
           if (input.target && (input.state === "submitted" || input.state === "uncertain")) heldTargets.add(input.target);
           if (input.target === "main" && input.state !== "pending") earlierMain.add(input.id);
           if (this.stopped || input.state !== "pending" || input.target === null) continue;
           if (this.controls.has(input.id)) continue;
+          if (input === deferred && this.initializationHoldsHead()) continue;
           const command = this.headCommand(input);
           if (command) {
-            const unresolved = [...earlierMain].some(id => {
-              const state = this.store.input(id)?.state;
-              return state === "pending" || state === "submitted" || state === "uncertain";
-            });
+            const unresolved = (input === deferred && inputs.some(other => other.target === "main" && other.state !== "pending"))
+              || [...earlierMain].some(id => {
+                const state = this.store.input(id)?.state;
+                return state === "pending" || state === "submitted" || state === "uncertain";
+              });
             await this.headControl(input, command, unresolved);
             if (this.store.input(input.id)?.state === "uncertain") heldTargets.add("main");
             earlierMain.add(input.id);
             continue;
           }
           if (input.target === "main") earlierMain.add(input.id);
-          if (input.target === "main" && (this.headRecoveryActive() || this.initializationHoldsHead() || this.headStopping > 0 || this.headCompaction)) continue;
+          if (input.target === "main" && (this.headRecoveryActive() || this.initializationHoldsHead() || this.headStopping > 0 || this.headCompaction || this.pendingHeadModel())) continue;
           if (this.modelChanges.has(input.target)) continue;
           if (this.blocked.has(input.target)) continue;
           if (this.kickoffHeld(input.target)) continue;
@@ -3561,7 +3603,7 @@ export class Superagent {
       if (!this.current(live) || live.input !== owner || version !== live.nativeVersion
         || !confirmed.isSettled || confirmed.isStreaming || confirmed.isCompacting
         || confirmed.pendingUiRequests?.length || this.store.approvals("main").length
-        || this.restartFence() || this.headRecoveryActive() || this.headStopping || this.headCompaction
+        || this.restartFence() || this.headRecoveryActive() || this.headStopping || this.headCompaction || this.pendingHeadModel()
         || this.store.input(input.id)?.state !== "pending") return;
       this.store.setMeta(`head-native-owner:${input.id}`, JSON.stringify({
         requestId, generation: live.generation, sessionId: live.sessionId,
@@ -3860,8 +3902,17 @@ export class Superagent {
         const status = admitted.result!.status;
         this.store.settle(admitted.input.id, status === "completed" ? "done" : status === "aborted" ? "cancelled" : "uncertain");
       }
+      let headModel: HeadModelChange | undefined;
+      if (live.id === "main" && completed && result?.agentInvoked && !this.headStopping && !this.restartFence()) {
+        const saved = this.store.getMeta(`head:model-request:${input.id}`);
+        const intent = saved ? record(JSON.parse(saved)) : {};
+        if (typeof intent.sourceId === "string" && isLaneModel(intent.model)
+          && (intent.sourceId === input.id || this.store.input(intent.sourceId)?.state === "done")) {
+          headModel = { sourceId: intent.sourceId, model: intent.model };
+        }
+      }
       // Joined receipts are durable, not separate answers or duplicate lane reports.
-      this.store.settle(input.id, state, text || live.id !== "main" ? { id: `${input.id}:answer`, text } : undefined);
+      this.store.settle(input.id, state, text || live.id !== "main" ? { id: `${input.id}:answer`, text } : undefined, headModel);
       if (live.input === input) {
         live.admitted.clear();
         live.input = undefined;

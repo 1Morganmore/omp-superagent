@@ -32,7 +32,7 @@ const headInstructions = [
   ...readHeadReferences(fileURLToPath(new URL("../skills/head/references/", import.meta.url))),
 ];
 const managerTools: Record<string, true> = {
-  head_recovery: true,
+  head_recovery: true, head_set_model: true,
   lane_models: true, lane_init_presets: true, lane_set_model: true,
   lane_start: true, lane_inspect: true, lane_message: true,
   lane_pause: true, lane_resume: true, lane_close: true,
@@ -160,6 +160,17 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     }, { additionalProperties: false }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       return result(await requireRuntime(ctx).decideHeadRecovery(params));
+    },
+  });
+  pi.registerTool({
+    name: "head_set_model", label: "Schedule a HEAD session model change", approval: "exec", loadMode: "essential",
+    description: "Only when the original owner explicitly asks to switch this shared HEAD's own model: schedule one exact available provider/model after this turn. Use the current original request's sourceId, never a quote, report, old source or inferred preference. Resolve aliases with lane_models and ask if ambiguous. This only schedules the change; do not say it succeeded. No lane, effort, preset, or default changes.",
+    parameters: Type.Object({
+      sourceId: Type.String({ minLength: 1 }),
+      model: Type.Object({ provider: Type.String({ minLength: 1 }), id: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+    }, { additionalProperties: false }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return result(requireRuntime(ctx).requestHeadModel(params));
     },
   });
   pi.registerTool({

@@ -25,7 +25,7 @@ const agentDir = process.env.PI_CODING_AGENT_DIR!;
 const packageRoot = path.resolve(import.meta.dir, "../..");
 const extensionPath = path.join(packageRoot, role === "head" ? "src/extension.ts" : "src/lane-extension.ts");
 const customDirectory = path.join(root, "operator-custom-skills");
-const managerNames = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update",
+const managerNames = ["head_recovery", "head_set_model", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close", "thread_inspect", "lane_thread_update",
   "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear", "pr_watch", "pr_watch_list",
   "decision_list", "decision_inspect", "decision_withdraw"];
 const skillSettings = {

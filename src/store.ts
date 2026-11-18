@@ -24,13 +24,13 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-  physicalRoute, physicalRouteKey, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
+  HEAD_MODEL_CONTROL, physicalRoute, physicalRouteKey, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
   type OutputRecord, type Route, type StorePort, type WorkflowActivation,
-  type HeadRecoveryAttempt, type HeadRecoveryEffect,
+  type HeadModelChange, type HeadRecoveryAttempt, type HeadRecoveryEffect,
 } from "./contracts.ts";
 import type { ApprovalResolution } from "./contracts";
 import { captureDecision, resolveDecision } from "./decisions";
-import { isLaneModel, sameLaneModel } from "./lane-models";
+import { isLaneModel, laneModelArgument, sameLaneModel } from "./lane-models";
 import { workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
 
@@ -438,7 +438,7 @@ export class Store implements StorePort {
     }).immediate();
   }
 
-  settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }): boolean {
+  settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }, headModel?: HeadModelChange): boolean {
     return this.db.transaction(() => {
       const input = this.input(id);
       if (!input || input.state === "done" || input.state === "cancelled" || input.state === state) return false;
@@ -471,6 +471,20 @@ export class Store implements StorePort {
         this.queueOutput({ ...output, sourceId: id, route: input.route });
       }
       this.db.query("UPDATE inputs SET state = ? WHERE id = ?").run(state, id);
+      if (headModel && state === "done" && input.state === "submitted" && input.target === "main") {
+        const source = this.requireInput(headModel.sourceId);
+        if (source.state !== "done" || this.getMeta(`user-source:${source.id}`) !== "true"
+          || this.getMeta(`steering-owner:${source.id}`) !== input.id) {
+          throw new Error("Deferred HEAD model change lacks a completed original request");
+        }
+        const controlId = `head-model:${source.id}`;
+        this.receive({
+          id: controlId, route: source.route, messageId: source.messageId, receivedAt: source.receivedAt, attachments: [],
+          ...(source.interactionId === undefined ? {} : { interactionId: source.interactionId }),
+          ...(source.invocationId === undefined ? {} : { invocationId: source.invocationId }),
+          text: laneModelArgument(headModel.model),
+        }, "main", { [HEAD_MODEL_CONTROL]: controlId, [`activity-source:${controlId}`]: source.id });
+      }
       return true;
     }).immediate();
   }

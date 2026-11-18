@@ -107,6 +107,11 @@ export interface LaneModel {
   provider: string;
   id: string;
 }
+export const HEAD_MODEL_CONTROL = "head:model-control";
+export interface HeadModelChange {
+  readonly sourceId: string;
+  readonly model: LaneModel;
+}
 export const MODEL_PRESET_NAMES = ["high", "middle", "low"] as const;
 export type ModelPreset = string;
 export type LanePresetSnapshot = NativeModelPreset;
@@ -257,7 +262,7 @@ export interface StorePort {
   progress(id: string, generation: number, sessionId: string, eventId: string, text: string): boolean;
   recordLaneReport(id: string, generation: number, sessionId: string, eventId: string, report: LaneReport, observedAt?: number): boolean;
   resolveLaneWaiting(id: string, generation: number, sessionId: string, kind: "tool" | "approval", nativeId: string): boolean;
-  settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }): boolean;
+  settle(id: string, state: "done" | "uncertain" | "cancelled", output?: { id: string; text: string }, headModel?: HeadModelChange): boolean;
   headRecoveryEffects(inputId: string): HeadRecoveryEffect[];
   prepareHeadRecovery(attempt: HeadRecoveryAttempt): boolean;
   commitHeadRecovery(expected: HeadRecoveryAttempt, decided: HeadRecoveryAttempt): boolean;

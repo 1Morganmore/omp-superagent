@@ -203,6 +203,7 @@ function cleanup(): Promise<void> {
       stoppedPid = undefined;
     }
     await fs.writeFile(path.join(root!, "release-207"), "cleanup", { mode: 0o600 });
+    await fs.writeFile(path.join(root!, "release-208"), "cleanup", { mode: 0o600 });
     await fs.writeFile(path.join(root!, "release-bootstrap"), "cleanup", { mode: 0o600 });
     await fs.writeFile(path.join(root!, "release-observation"), "cleanup", { mode: 0o600 });
     await fs.writeFile(path.join(root!, "release-observation-final"), "cleanup", { mode: 0o600 });
@@ -648,6 +649,25 @@ try {
   const laneReads = nativeToolResults(laneEntries, "board_read");
   assert.equal(headReads.length, expectedReports.length);
   assert.equal(laneReads.length, laneIds.length);
+  if (presetScenario === "valid") {
+    const source: Inbound = { id: "208", messageId: "208", route: thread, receivedAt: Date.now(), attachments: [],
+      text: "Please switch your own model to gateway-native/alternate." };
+    await messenger.deliver(source);
+    await until(() => existsSync(path.join(root, "entered-208")), "native HEAD schedules its own switch during the owner turn");
+    const active = await restored.client.getState();
+    assert.equal(active.isStreaming, true);
+    assert.equal(active.model?.id, "local", "The active native turn must retain its original model");
+    await fs.writeFile(path.join(root, "release-208"), "finish the original model turn", { mode: 0o600 });
+    await until(() => messenger.sent.some(output => output.replyTo?.messageId === source.messageId
+      && output.text.includes("Changed model;") && output.text.includes("gateway-native/alternate")), "verified model change reply on the original native request");
+    const switched = await restored.client.getState();
+    assert.equal(switched.sessionId, active.sessionId);
+    assert.equal(switched.model?.id, "alternate");
+    assert.equal((await actualLane.client.getState()).model?.id, "local");
+    const entries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
+    assert.equal(requestIds(entries).filter(id => id === source.id).length, 1);
+    assert.equal(entries.filter(entry => entry.type === "model_change" && entry.model === "gateway-native/alternate").length, 1);
+  }
   for (const [name, bytes] of settingsBytes) assert.deepEqual(await fs.readFile(path.join(agent, name)), bytes);
   assert.deepEqual(errors, []);
 

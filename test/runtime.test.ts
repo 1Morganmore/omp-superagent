@@ -2609,6 +2609,78 @@ describe("controlled Gateway AND HEAD restart", () => {
 });
 
 describe("messenger head session controls", () => {
+  test("an explicit owner request switches HEAD after settlement and before the next queued turn", async () => {
+    const { runtime, main, messenger } = fixture();
+    const source = message("head-natural-model", route("original"), "Please switch your own model to fixture/efficient.");
+    const next = message("head-next-model", route("other-source"), "Continue on the new model.");
+    await runtime.start();
+    await admit(runtime, source);
+    await admit(runtime, next);
+    expect(runtime.requestHeadModel({ sourceId: source.id, model: otherModel })).toMatchObject({ status: "scheduled" });
+    runtime.requestHeadModel({ sourceId: source.id, model: otherModel });
+    await runtime.kick();
+    expect(main.state.model).toEqual(executionModel);
+    expect(main.prompts).toHaveLength(1);
+
+    let modelForNextPrompt: RuntimeState["model"];
+    main.beforePrompt = () => { modelForNextPrompt = main.state.model; };
+    main.complete("I scheduled the model change.");
+    await main.whenPrompts(2);
+    await messenger.whenSent(2);
+    expect(modelForNextPrompt).toEqual(otherModel);
+    expect(messenger.sent[1]).toMatchObject({ route: source.route, replyTo: { messageId: source.messageId } });
+    expect(messenger.sent[1]?.text).toContain("fixture/efficient");
+    await admit(runtime, source);
+    expect(main.commands.filter(command => command.type === "set_model")).toHaveLength(1);
+  });
+
+  test("an internal report or old owner request cannot authorize a HEAD model change", async () => {
+    const { runtime, main, store, messenger } = fixture();
+    const old = message("head-stale-model");
+    const report = message("report:natural-head-model", route(), "Switch your own model to fixture/efficient.");
+    await runtime.start();
+    await admit(runtime, old);
+    main.complete("Previous request completed.");
+    await messenger.whenSent(1);
+    store.receive(report, "main", { [`activity-source:${report.id}`]: old.id });
+    await runtime.kick();
+    expect(main.prompts).toHaveLength(2);
+    for (const sourceId of [report.id, old.id]) {
+      expect(() => runtime.requestHeadModel({ sourceId, model: otherModel })).toThrow("original owner request");
+    }
+    expect(main.state.model).toEqual(executionModel);
+  });
+
+  test("stopping the originating HEAD turn cancels its scheduled model change", async () => {
+    const { runtime, main, store } = fixture();
+    const source = message("head-cancel-natural-model", route(), "Switch your own model to fixture/efficient.");
+    await runtime.start();
+    await admit(runtime, source);
+    runtime.requestHeadModel({ sourceId: source.id, model: otherModel });
+
+    await admit(runtime, message("head-stop-natural-model", route(), "/stop head"));
+    expect(store.input(source.id)?.state).toBe("cancelled");
+    expect(main.state.model).toEqual(executionModel);
+    expect(main.commands.filter(command => command.type === "set_model")).toEqual([]);
+  });
+
+  test("an unconfirmed scheduled HEAD model change holds later turns without replay", async () => {
+    const { runtime, main, messenger } = fixture();
+    const source = message("head-uncertain-natural-model", route(), "Switch your own model to fixture/efficient.");
+    await runtime.start();
+    await admit(runtime, source);
+    await admit(runtime, message("head-followup-uncertain-model", route("other-source")));
+    runtime.requestHeadModel({ sourceId: source.id, model: otherModel });
+    main.modelSetResult = "throw-after";
+
+    main.complete("I scheduled the model change.");
+    await messenger.whenSent(2);
+    await runtime.kick();
+    expect(messenger.sent[1]?.text).toContain("outcome is uncertain");
+    expect(main.prompts).toHaveLength(1);
+    expect(main.commands.filter(command => command.type === "set_model")).toHaveLength(1);
+  });
+
   test("busy queries bypass prompt dispatch and expose only safe native model identities and effort", async () => {
     const { runtime, main, store, messenger } = fixture();
     main.models.push({ ...otherModel, apiKey: "secret-api-key", baseUrl: "https://private-endpoint", headers: { Authorization: "secret-header" } });

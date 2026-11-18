@@ -156,7 +156,8 @@ crash supervisor; Linux service installation is not provided.
 - Follow up in the same topic to steer active work through the head. Repositories and
   topics keep independent lane context; voice metadata does not imply transcription.
 - Use `/help` and `/status` for controls and state. `/model` and `/effort` manage the
-  idle head session, not existing lanes or global defaults. Global preset changes
+  idle head session, not existing lanes or global defaults. You can also ask the head
+  in a normal message to switch its own model after that turn. Global preset changes
   require explicit `--global`. Slack's message commands use `!`.
 - `/stop` pauses the bound lane; `/resume` authorizes continuation. Approvals,
   cancellations, tool exclusions, and uncertain-effect holds remain binding.

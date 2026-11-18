@@ -8,7 +8,7 @@ import { nativeRequestEnvelope } from "./native-request-envelope";
 
 const provider = "gateway-native";
 const model = "local";
-const managers = ["head_recovery", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close"];
+const managers = ["head_recovery", "head_set_model", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_close"];
 
 export default function gatewayProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_NATIVE_GATEWAY_ROOT;
@@ -157,14 +157,17 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
         if (!sources.includes(sourceId) || new Set(sources).size !== sources.length) throw new Error("Consolidated lane report lost or duplicated its original sources");
         return { content: [sources.map(id => `HEAD:${id}`).join("\n")] };
       }
-      if (requestId === "207") {
+      if (requestId === "208" && !called("head_set_model")) {
+        return invoke("head_set_model", { sourceId: requestId, model: { provider, id: "alternate" } });
+      }
+      if (requestId === "207" || requestId === "208") {
         // Hold only the deterministic model boundary so stop() sees real native
         // streaming work. The release file is an event, not a guessed delay.
         const released = Promise.withResolvers<void>();
-        const watcher = watch(root, (_event, name) => { if (String(name) === "release-207") released.resolve(); });
+        const watcher = watch(root, (_event, name) => { if (String(name) === `release-${requestId}`) released.resolve(); });
         try {
-          await writeFile(join(root, "entered-207"), "ready", { mode: 0o600 });
-          try { await access(join(root, "release-207")); }
+          await writeFile(join(root, `entered-${requestId}`), "ready", { mode: 0o600 });
+          try { await access(join(root, `release-${requestId}`)); }
           catch { await released.promise; }
         } finally { watcher.close(); }
       }
@@ -220,7 +223,9 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
   pi.registerProvider(provider, {
     baseUrl: `mock://${provider}`, api: provider, apiKey: "local-test-only",
     streamSimple: (identity, context, options) => local.stream(identity, context, options),
-    models: [{ id: model, name: "Native Gateway deterministic local model", kind: "chat", reasoning: false, input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: local.contextWindow, maxTokens: local.maxTokens }],
+    models: (process.env.OMP_NATIVE_GATEWAY_PRESETS === "valid" ? [model, "alternate"] : [model]).map(id => ({
+      id, name: `Native Gateway deterministic ${id} model`, kind: "chat", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: local.contextWindow, maxTokens: local.maxTokens,
+    })),
   });
 }
