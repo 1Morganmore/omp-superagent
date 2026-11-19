@@ -109,6 +109,14 @@ current OMP tool/session contracts, not copied from Dori skill text or scripts.
   [SUL and NOTICE](https://github.com/vntrevx/omp-dori/blob/3b5487df12540cdd428ebcf7455375d72921e2dc/NOTICE).
   `LICENSE.omp-dori` is not treated as an MIT grant for that entire repository.
 
+The on-demand HEAD references and parallel-work guidance also use conceptual
+comparisons with [original dori-superagent `78c863a`](https://github.com/sisyphuslabs/dori-superagent/tree/78c863a9b0c4c03fd7ef3e679e4dcf44a86d4fbf)
+(role contract, sessions, and verifiable completion) and
+[Cataly `9b380aa`](https://github.com/vntrevx/Cataly/tree/9b380aa0f454fed73b00d22ac6666d2e4de56ef0)
+(per-resource sequencing in `docs/locks.md` and `src/lock.ts`). No prompt or code
+was copied, and neither a shared lock service nor Cataly's patched OMP runtime
+was imported. This project continues to use stock OMP and native skill discovery.
+
 ### Dori pull-request comparisons: independent implementation
 
 - The opt-in Discord voice assistant is conceptually based on

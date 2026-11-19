@@ -25,6 +25,8 @@ const agentDir = process.env.PI_CODING_AGENT_DIR!;
 const packageRoot = path.resolve(import.meta.dir, "../..");
 const extensionPath = path.join(packageRoot, role === "head" ? "src/extension.ts" : "src/lane-extension.ts");
 const customDirectory = path.join(root, "operator-custom-skills");
+const shadowHead = role === "head" && kind === "main" && selection === "narrow";
+const shadowDirectory = path.join(workspace, ".omp/skills/superagent-head");
 const managerNames = ["head_recovery", "head_set_model", "lane_models", "lane_init_presets", "lane_set_model", "lane_start", "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_review_decision", "lane_close", "thread_inspect", "lane_thread_update",
   "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear", "pr_watch", "pr_watch_list",
   "decision_list", "decision_inspect", "decision_withdraw"];
@@ -46,6 +48,11 @@ await Promise.all([
   skill(path.join(agentDir, "skills/ignored-local"), "ignored-local"),
   skill(path.join(customDirectory, "custom-existing"), "custom-existing"),
 ]);
+if (shadowHead) {
+  await skill(shadowDirectory, "superagent-head");
+  await fs.mkdir(path.join(shadowDirectory, "references"));
+  await fs.writeFile(path.join(shadowDirectory, "references/routing.md"), "# Project-local routing\n");
+}
 await fs.writeFile(path.join(agentDir, "config.yml"), JSON.stringify({
   disabledProviders: nativeDisabledProviders,
   skills: skillSettings,
@@ -156,16 +163,16 @@ try {
     (await fs.readdir(headReferenceDirectory, { recursive: true })).filter(name => name.endsWith(".md"))
       .map(name => fs.readFile(path.join(headReferenceDirectory, name), "utf8")),
   );
+  const laneReference = await fs.readFile(path.join(packageRoot, "skills/lane/references/workflow.md"), "utf8");
   const nativeBase = session.baseSystemPrompt;
   assert(nativeBase[0] && nativeBase[0].length > 500, "Use the real rendered native system prompt, not a sentinel");
   const branchBefore = structuredClone(sessionManager.getBranch());
   const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
-  const assertRolePolicy = (blocks: string[]) => {
+  const assertRolePolicy = (blocks: string[]): string | undefined => {
     const combined = blocks.join("\n\n");
     assert.equal(occurrences(combined, roleBody), kind === "main" ? 1 : 0);
-    for (const reference of headReferences) {
-      assert.equal(occurrences(combined, reference), role === "head" && kind === "main" ? 1 : 0,
-        "The complete head bundle belongs exactly once to root heads only");
+    for (const reference of [...headReferences, laneReference]) {
+      assert(!combined.includes(reference), "Packaged references must not be added to automatic system prompts");
     }
     if (kind === "sub") {
       assert.equal(occurrences(combined, childRole), 1);
@@ -182,21 +189,25 @@ try {
       if (kind === "sub") assert.match(combined, /host-provided specialist role and assigned task/);
       assert(!combined.includes("<omp-ulw-policy>"), "Loading a model profile is not workflow activation");
     }
+    const referenceLocations = [...combined.matchAll(/^Packaged HEAD reference directory: (.+)$/gm)];
+    assert.equal(referenceLocations.length, role === "head" && kind === "main" ? 1 : 0);
+    const [referenceLocation] = referenceLocations;
+    if (!referenceLocation) return undefined;
+    const directory: unknown = JSON.parse(referenceLocation[1] ?? "");
+    assert(typeof directory === "string" && path.isAbsolute(directory));
+    return directory;
   };
+  let emittedHeadReferences: string | undefined;
   for (let turn = 0; turn < 2; turn++) {
     const instruction = await runner.emitBeforeAgentStart("Inspect the requested implementation and report evidence.", undefined, [...nativeBase]);
     const blocks = instruction?.systemPrompt ?? nativeBase;
-    assertRolePolicy(blocks);
+    emittedHeadReferences = assertRolePolicy(blocks);
     if (kind === "sub" && !ulwPath) assert.equal(instruction, undefined);
     else if (kind === "sub") assert.equal(blocks.length, nativeBase.length);
     else {
       assert.equal(instruction?.systemPrompt?.filter(part => part === roleBody).length, 1);
       if (!ulwPath) assert.equal(instruction?.systemPrompt?.[0], nativeBase[0]);
-      assert.equal(blocks.length, nativeBase.length + (role === "lane" ? 2 : 1 + headReferences.length));
-      for (const reference of headReferences) {
-        assert.equal(instruction?.systemPrompt?.filter(part => part === reference).length, role === "head" ? 1 : 0,
-          "Every head procedure must be present before inference, only in the root head, without a read tool call");
-      }
+      assert.equal(blocks.length, nativeBase.length + 2);
       if (role === "lane") {
         const actualCwd = runner.createContext().cwd;
         assert.equal(await fs.realpath(actualCwd), await fs.realpath(workspace));
@@ -222,7 +233,7 @@ try {
       const system = rewritten.instructions;
       assert(!system.includes("stale request profile"));
       assert(system.includes(preset), "Provider refresh preserves the supported base model working methods");
-      assertRolePolicy([system]);
+      assert.equal(assertRolePolicy([system]), emittedHeadReferences);
       assert.deepEqual(await runner.emitBeforeProviderRequest(rewritten, compositionModel), rewritten,
         "Repeated native payload projection must not duplicate local policy");
     }
@@ -243,7 +254,12 @@ try {
     assert.deepEqual(currentSettings[key], skillSettings[key]);
   }
   for (const name of ["superagent-head", "superagent-lane"]) {
-    const entry = discovered.find(skill => skill.name === name)!;
+    const entry = discovered.find(skill => skill.name === name);
+    assert(entry);
+    if (shadowHead && name === "superagent-head") {
+      assert.notEqual(entry._source?.provider, "omp-plugins");
+      continue;
+    }
     assert.equal(entry._source?.provider, "omp-plugins");
     assert.equal(entry.hide, true);
   }
@@ -257,9 +273,18 @@ try {
     ["superagent-lane", "lane", "references/workflow.md"],
   ] as const;
   const read = session.getToolByName("read")!;
+  if (shadowHead) {
+    const shadow = await read.execute("native-read-shadow", { path: "skill://superagent-head/references/routing.md:raw" });
+    const text = shadow.content.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
+    assert.equal(text, await fs.readFile(path.join(shadowDirectory, "references/routing.md"), "utf8"));
+  }
   const reads: string[] = [];
   for (const [name, directory, relative] of resources) {
-    const uri = relative === "SKILL.md" ? `skill://${name}:raw` : `skill://${name}/${relative}:raw`;
+    let uri = relative === "SKILL.md" ? `skill://${name}:raw` : `skill://${name}/${relative}:raw`;
+    if (directory === "head" && emittedHeadReferences) {
+      if (relative !== "SKILL.md") uri = `${path.join(emittedHeadReferences, path.basename(relative))}:raw`;
+      else if (shadowHead) uri = `${path.join(path.dirname(emittedHeadReferences), relative)}:raw`;
+    }
     const output = await read.execute(`native-read-${reads.length}`, { path: uri });
     const text = output.content.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
     assert.equal(text, await fs.readFile(path.join(packageRoot, "skills", directory, relative), "utf8"));

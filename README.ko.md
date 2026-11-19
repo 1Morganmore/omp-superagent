@@ -15,9 +15,8 @@ Discord·Telegram·Slack을 [oh-my-pi](https://github.com/can1357/oh-my-pi)의 �
 
 ## 배포 형태
 
-**0.1.1부터 [npm 패키지](https://www.npmjs.com/package/omp-superagent)를 제공합니다.**
-Bun 또는 npm으로 설치하거나
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.1)의 소스·npm tarball을 받으세요.
+[npm 패키지](https://www.npmjs.com/package/omp-superagent)를 Bun 또는 npm으로 설치하거나
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.2)의 소스·npm tarball을 받으세요.
 실행에는 Bun이 필요하며 독립 실행 바이너리는 아닙니다. OMP는 미리 설치되어 있어야 하며
 이 프로젝트가 패치하거나 빌드하지 않습니다. 설치 시 관리형 의존성도 준비합니다.
 
@@ -43,7 +42,7 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 
 ## 빠른 시작
 
-현재 소스에서 설치하려면 Git, **Bun >= 1.4.4**, 별도로 설치한 **OMP >= 19.0.0, < 20.0.0**,
+**0.1.2**에는 Git, **Bun >= 1.4.4**, 별도로 설치한 **OMP >= 19.0.0, < 20.0.0**,
 로컬 Unix socket 지원 환경이 필요합니다. 배포된 SDK **19.0.0**의 upstream `v19.0.0` 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)입니다.
 `bun run test:ci`는 현재 설치된 OMP를 검사합니다. PR·릴리스 CI를 재현하려면
@@ -54,15 +53,15 @@ Windows는 지원하지 않습니다.
 
 ### 1. 설치
 
-아래의 `omp-superagent@0.1.1` 명령은 현재 소스가 아닌 기존 릴리즈를 설치합니다.
-해당 릴리즈는 OMP >= 18.20.2, < 19가 필요합니다.
+0.1.1에서 올리는 경우 OMP 18이 맡은 백그라운드 서비스부터 확인하세요.
+OMP 19 데몬은 이전 브로커의 서비스를 인수하지 않습니다.
 
 [공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)에 따라 OMP를 먼저 설치한 뒤,
 Bun으로 CLI를 설치합니다.
 
 ```sh
 omp --version
-bun add --global --trust omp-superagent@0.1.1
+bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
@@ -70,7 +69,7 @@ omp-sa --help
 `bun pm bin --global`의 출력 경로를 `PATH`에 포함하세요. Bun이 `PATH`에 있다면 npm으로도 설치할 수 있습니다.
 
 ```sh
-npm install --global omp-superagent@0.1.1
+npm install --global omp-superagent@0.1.2
 ```
 
 설치 시 별도로 설치된 OMP를 먼저 확인하고, postinstall이 필수 관리형 `omp-ulw`를 준비합니다.

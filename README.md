@@ -18,9 +18,9 @@ the results back to your conversation.
 
 ## Distribution
 
-**0.1.1 is available on [npm](https://www.npmjs.com/package/omp-superagent)** and as
-source and npm tarballs in the
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.1).
+Install from [npm](https://www.npmjs.com/package/omp-superagent) or use the source
+and npm tarballs from the
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.2).
 Install with Bun or npm below. Bun is still required at runtime; this is not a
 standalone binary. OMP must already be installed; this project neither patches nor
 builds it. Installation prepares the managed dependencies.
@@ -55,7 +55,7 @@ head; the head replies to the original conversation.
 
 ## Quick start
 
-The current source requires Git, **Bun >= 1.4.4**, a separately installed
+Version **0.1.2** requires Git, **Bun >= 1.4.4**, a separately installed
 **OMP >= 19.0.0 and < 20.0.0**, and local Unix sockets. It pins the published SDK
 to **19.0.0**, from upstream `v19.0.0` commit
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e).
@@ -70,8 +70,8 @@ runtime/script wrappers are unsupported.
 
 ### 1. Install
 
-The pinned `omp-superagent@0.1.1` commands below install the existing release, not
-the current source. That release requires OMP >= 18.20.2 and < 19.
+Upgrading from 0.1.1? Check any background services still owned by OMP 18 before
+switching to OMP 19; its daemon does not take over the previous broker's services.
 
 Install OMP using the
 [upstream instructions](https://github.com/can1357/oh-my-pi#installation) first,
@@ -79,7 +79,7 @@ then install the CLI with Bun:
 
 ```sh
 omp --version
-bun add --global --trust omp-superagent@0.1.1
+bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
@@ -87,7 +87,7 @@ omp-sa --help
 Ensure `bun pm bin --global` is on `PATH`. Alternatively, with Bun on `PATH`:
 
 ```sh
-npm install --global omp-superagent@0.1.1
+npm install --global omp-superagent@0.1.2
 ```
 
 Installation checks for a separately installed OMP before preparing the managed

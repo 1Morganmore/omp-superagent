@@ -56,3 +56,38 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bun run release --publish
+
+  npm:
+    name: Publish npm package
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - name: Download and verify the released npm tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          name=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          test "$GITHUB_REF_NAME" = "v$version"
+          filename="$name-$version.tgz"
+          mkdir -p dist
+          cd dist
+          gh release download "$GITHUB_REF_NAME" --pattern "$filename" --pattern "$filename.sha256"
+          sha256sum --check --strict "$filename.sha256"
+      - name: Publish with npm Trusted Publishing
+        run: |
+          filename=$(node -p 'const {name, version} = require("./package.json"); `${name}-${version}.tgz`')
+          npm publish "./dist/$filename" --access public --ignore-scripts

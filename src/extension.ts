@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -15,22 +15,10 @@ import { MODEL_PRESET_NAMES, WORKFLOW_NAMES } from "./contracts";
 import type { PrWatchCommand } from "./pr-watch";
 import { registerDecisionAsk } from "./decision-tool";
 
-function readHeadReferences(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true })
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .flatMap(entry => {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) return readHeadReferences(path);
-      return entry.isFile() && entry.name.endsWith(".md") ? [readFileSync(path, "utf8")] : [];
-    });
-}
-
-// Required operating policy, not optional discovery or compactable chat history.
-// Missing/unreadable files fail extension loading rather than silently omitting policy.
-const headInstructions = [
-  readFileSync(new URL("../skills/head/SKILL.md", import.meta.url), "utf8"),
-  ...readHeadReferences(fileURLToPath(new URL("../skills/head/references/", import.meta.url))),
-];
+// Inject the role contract, not the references. Resolve the reference directory
+// from this package so a same-name workspace skill cannot change the procedure.
+const headInstructions = readFileSync(new URL("../skills/head/SKILL.md", import.meta.url), "utf8");
+const headReferenceDirectory = fileURLToPath(new URL("../skills/head/references", import.meta.url));
 const managerTools: Record<string, true> = {
   head_recovery: true, head_set_model: true,
   lane_models: true, lane_init_presets: true, lane_set_model: true, lane_review_decision: true,
@@ -90,7 +78,8 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     if (ctx.agent.kind !== "main") return;
     return { systemPrompt: [
       ...event.systemPrompt,
-      ...headInstructions,
+      headInstructions,
+      `Packaged HEAD reference directory: ${JSON.stringify(headReferenceDirectory)}`,
     ] };
   });
 

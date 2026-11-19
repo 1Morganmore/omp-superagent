@@ -422,6 +422,10 @@ try {
       const requests = await events("native-events.jsonl");
       const requested = requests.find(event => event.kind === "head-recovery-entries-request" && event.requestId === heldResponse?.requestId);
       assert(requested);
+      // The native restorer can request the journal before the Gateway's
+      // separate process/socket probe publishes ownership. Neither needs the
+      // held journal response to complete the Gateway ownership handshake.
+      await until(() => metadata("gateway:head") !== null, "replacement Gateway publishes verified HEAD ownership");
       const successorOwner = metadata<{ pid: number }>("gateway:head");
       assert(successorOwner);
       assert.equal(requested.pid, successorOwner.pid);

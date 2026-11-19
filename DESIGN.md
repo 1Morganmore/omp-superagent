@@ -116,7 +116,7 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 | `src/lane-extension.ts`, `src/lane-report.ts` | root lane의 역할 지침·근거/대기 관측 보고. 헤드 manager·메신저 권한 없음 |
 | `src/board.ts`, `src/board-extension.ts` | 독립 SQLite 정보 게시판과 head/lane 공통 도구·세션별 알림/구독 |
 | `src/messengers.ts` | Gateway 안에서 구성된 실제 어댑터·자격 증명을 hub에 연결, 원래 platform으로 발송·승인·첨부 API dispatch |
-| `skills/head/SKILL.md`, `skills/head/references/`, `skills/lane/SKILL.md` | `before_agent_start`의 필수 역할 계약과 native `skill://superagent-head`, `skill://superagent-lane` 진입점. root head에는 헤드 계약과 재귀적인 전체 Markdown 절차를 매 턴 주입하고, 레인의 `references/workflow.md`는 필요할 때 읽음 |
+| `skills/head/`, `skills/lane/` | 해당 root 역할의 `SKILL.md`만 필수 지침으로 주입. 상세 절차는 필요할 때 native `read`로 읽으며, HEAD는 로드된 패키지의 참조 경로를 사용 |
 | `src/runtime.ts` | 요청·주제 라우팅, 레인 수명·대기열·예산, 승인·발송·catchup 조율 |
 | `src/lane-models.ts` | 허용된 native chat 후보의 안전한 capability/cost 투영과 정확한 provider/id 동일성 |
 | `src/contracts.ts`, `src/store.ts` | 명시적 연결/요청/레인 계약과 SQLite 장부. OMP 전체 transcript를 재구현하지 않음 |
@@ -798,32 +798,36 @@ Gateway 접수 전에 거절하며, HEAD의 최종 검증도 이를 불확실한
 중복된 원본 요청이나 재전달이 같은 레인을 중복 생성하지 않게 한다.
 작업을 기다리는 메인 헤드는 턴을 끝내고 후속 이벤트로 깨어난다.
 
-root head의 manager 확장은 Host 시작 시 `skills/head/SKILL.md`와
-`skills/head/references/` 아래의 모든 Markdown 파일을 재귀적으로 한 번 읽는다.
-각 root-head `before_agent_start`에서 기존 system prompt를 보존한 채 전체 번들을 덧붙이므로
-첫 추론부터 후속 턴까지 모든 헤드 운영 절차가 필수 지침으로 제공된다. 첫 메시지에만
-transcript로 삽입하는 방식이 아니며, 적용 전에 별도 `read`나 스킬 조회를 할 필요가 없다.
-파일 수정은 Host 재시작 후 반영된다. 같은 소스의 native URI는 기존 OMP 패키지 discovery로
-계속 제공하며 별도 스킬 레지스트리는 만들지 않는다.
-소스 편집은 현재 운영 서비스의 적용 증거가 아니며, 기존 Host의 역할 번들을 바꾸려면 별도로
-허가된 재시작이 필요하다. 이번 역할 변경만으로 live 서비스를 재시작하거나 적용했다고 하지 않는다.
+각 역할 확장은 Host 시작 시 자체 `SKILL.md`를 읽고, root의 `before_agent_start`에서
+기존 system prompt를 보존한 채 이 핵심 계약만 덧붙인다. HEAD의 여러 작업 분리 판단, 권한,
+원래 source·route, 대기·복구 경계는 첫 추론부터 적용된다. 상세 절차는 매 턴 주입하지 않고,
+필요한 판단에서 native `read`로 해당 문서만 읽는다. HEAD 확장이 패키지 기준 절대 참조 경로를
+제공하므로 프로젝트에 이름이 같은 스킬이 있어도 HEAD의 참조 원본이 바뀌지 않는다.
+이미 필요한 절차가 컨텍스트에 있다면 재조회하지 않는다. 격리된 HEAD 복구 턴에는 예외로
+문서를 읽지 않고 런타임이 준 스냅샷과 `head_recovery`만 사용한다.
 
-전체 로드는 번들된 헤드 운영 절차에만 적용하며 관련 없는 사용자·프로젝트 스킬을 모두
-로드하지 않는다. 헤드 번들은 레인이나 native 자식에 주입하지 않는다. 레인은 기존의 별도
-필수 역할 계약을 유지하고 상세 workflow는 필요한 판단 시점에 native `read`로 읽는다.
-native 위임과 manager/board 권한 경계는 그대로 유지한다.
+별도 스킬 레지스트리는 두지 않는다. HEAD 지침을 레인에 주입하지 않으며 둘 다 native 자식에게
+역할 지침이나 manager/board 권한을 부여하지 않는다. 로딩된 본문이나 확장 변경을 운영 Host에
+반영하려면 별도로 허가된 재시작이 필요하다. 소스 편집만으로 적용됐다고 하지 않는다.
 
-- `skill://superagent-head/references/routing.md`: 실제 저장소·cwd 결정, 직접 처리·native task·레인 선택, 병렬 변경 충돌, 브리핑·완료 조건.
-- `skill://superagent-head/references/model-selection.md`: 실제 요구·native 후보 조사, 통상적인 judge 자문, 헤드의 최종 역량/비용 판단, 생략·실패·선택 유지와 관측 한계.
-- `skill://superagent-head/references/supervision.md`: 보고 수신·수정 지시, 승인·일시정지, 중단 후 상태 대조, 증거 기반 종료.
+- `skills/head/references/routing.md`: 실제 저장소·cwd 결정, 직접 처리·native task·레인 선택, 병렬 변경 충돌, 브리핑·완료 조건.
+- `skills/head/references/model-selection.md`: 실제 요구·native 후보 조사, 통상적인 judge 자문, 헤드의 최종 역량/비용 판단, 생략·실패·선택 유지와 관측 한계.
+- `skills/head/references/supervision.md`: 보고 수신·수정 지시, 승인·일시정지, 중단 후 상태 대조, 증거 기반 종료.
 - `skill://superagent-lane/references/workflow.md`: 작업 범위 확인, 직접 구현·부분 위임, 실제 검증, 결과·미검증 항목·인계.
 - 역할 진입점은 `hide: true`로 일반 스킬 목록 광고를 숨기되 native URI와 역할 주입은 유지한다.
   헤드 역할이 자식 세션의 일반 지침으로 섞이지 않게 하고, 자식의 레인 관리 호출도 거부한다.
 - `lane_inspect({})`는 기록된 목록이고 ID 지정 시에만 연결된 실제 상태를 더한다.
   현재 도구에는 불확실한 제출 기록을 해제하는 API가 없으므로 `lane_resume`를 복구 완료로 설명하지 않는다.
 
-- 헤드 스킬: 요청 해석, 저장소 결정, 직접 처리·위임 판단, 브리핑, 감독, 복구, 결과 전달.
-- 레인 스킬: 범위 내 직접 작업, 전문 스킬 활용, 진행·막힘·완료 근거 보고.
+- 헤드 스킬: 이벤트별 진입점에서 라우팅·모델 선택·감독 절차로 이어진다. 한 요청에 여러 작업이 있어도 메시지 수가 아니라
+  독립적인 완료 기준, 맥락·저장소·실행 수명 분리의 이점, 선행 결과와 쓰기 충돌을 보고 레인 수를 판단한다.
+  하나의 결과물 안의 분업은 통합 책임자 한 명과 native `task`를 우선한다. 같은 Git 저장소의 독립 편집 레인은 허가된
+  별도 브랜치·워크트리로 병렬화하되 공유 자원과 통합 충돌은 따로 조율한다.
+  판단과 접수는 별개다. `lane_start`는 원본 입력당 새 레인 하나만 만들며, 같은 원본으로 이미 연결된 레인 여러 곳에
+  `lane_message`를 보내려면 각 목적지와 작업 범위가 허가되고 원본 첨부·인용, 보고 경로, 이벤트 식별자가 모두 호환되어야 한다.
+  보고는 원본의 전달 경로를 따르며, 진행 중인 실행에 조인하면 그 실행의 보고에 합쳐진다. 독립 실행이 가능한 작업들을
+  불필요하게 직렬화하지 않는다.
+- 레인 스킬: 할당된 범위에서 직접 작업하고, 병렬 작업이면 자기 산출물과 인계 경계만 책임진다. 진행·막힘·완료 근거는 HEAD에 보고한다.
 - Dori harness의 “모든 요청을 레인으로” 지침은 채택하지 않는다.
 - 별도의 duty LLM이나 레인별 감독 루프를 기본 구성으로 추가하지 않는다.
 

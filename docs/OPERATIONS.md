@@ -159,7 +159,7 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 
 ## 1. 로컬 준비 — 봇은 시작하지 않음
 
-현재 소스에서 설치하려면 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`), 별도 설치한 수정 없는
+**0.1.2**에는 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`), 별도 설치한 수정 없는
 **OMP >= 19.0.0, < 20.0.0**, 로컬 Unix socket을 지원하는 환경이 필요하다. SDK/API 기준선은
 OMP 19.0.0이며 upstream `v19.0.0` 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
@@ -169,17 +169,16 @@ OMP 19.0.0 런타임에서 새로 실행한 검증을 뜻하지 않는다.
 데몬은 이전 브로커의 서비스를 인수하지 않는다. 새 데몬의 목록이 비어 있어도 이전 세션에서
 완료를 확인하지 못한 작업의 종료·회수를 승인하는 증거는 아니다.
 OMP 공식 설치를 먼저 완료해 `omp`가 PATH에 있어야 한다. 이 저장소는 OMP 소스 checkout이나
-native addon 빌드를 하지 않는다. 아래 npm 레지스트리 설치 예는 현재 소스가 아닌
-OMP >= 18.20.2, < 19를 요구하는 기존 `omp-superagent@0.1.1` 릴리즈를 대상으로 한다.
+native addon 빌드를 하지 않는다.
 
 ```sh
-bun add --global --trust omp-superagent@0.1.1
+bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
 `--trust`는 OMP 검사·관리형 ULW 준비 lifecycle 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
-`npm install --global omp-superagent@0.1.1`도 사용할 수 있다.
+`npm install --global omp-superagent@0.1.2`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
 `omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
 
@@ -1156,10 +1155,15 @@ bun run release
 `bun pm pack --ignore-scripts`로 `package.json`의 files 목록에 한정한 npm 패키지를 만든다.
 `dist/omp-superagent-<version>.tar.gz`, `.tgz`와 각각의 `.sha256`이 생성된다.
 이 명령 자체는 게시하지 않는다.
-승인받은 버전 태그를 원격에 푸시하면 `.github/workflows/ci.yml`이 양쪽 플랫폼 검증 후
-`bun run release --publish`로 GitHub Release를 게시한다. 버전과 태그·commit이 일치해야 하며
-기존 릴리즈를 덮어쓰거나 실패한 검증을 우회하지 않는다.
-같은 검증을 통과한 `.tgz`를 npm 인증이 있는 환경에서
-`npm publish ./dist/omp-superagent-<version>.tgz --access public`으로 게시한다.
-GitHub workflow가 npm 인증을 대신하거나 npm에 자동 게시하지는 않는다.
+승인받은 버전 태그를 원격에 푸시하면 `.github/workflows/ci.yml`이 Linux/macOS 검증 후
+`bun run release --publish`로 GitHub Release를 게시한다. 이어 별도 npm job이 그 릴리즈의
+동일한 `.tgz`를 내려받아 SHA-256을 확인하고 GitHub Actions OIDC로 npm에 게시한다.
+버전과 태그·commit이 일치해야 하며 기존 릴리즈를 덮어쓰거나 실패한 검증을 우회하지 않는다.
+
+최초 한 번, npm의 `omp-superagent` 패키지 설정 → **Trusted publishing**에서 GitHub Actions를
+추가한다. 사용자/조직은 `dbc-hbin`, 저장소는 `omp-superagent`, 워크플로우 파일은 `ci.yml`,
+환경 이름은 비워두고 `npm publish`를 허용한다. 이후 로컬 `npm login`이나 저장된 npm 토큰은
+필요 없다. npm 게시 결과가 불확실하면 먼저 레지스트리에서 정확한 버전과 tarball 해시를
+확인한다. 버전이 없고 원인을 해소한 경우에만 실패한 npm job을 다시 실행한다. GitHub Release
+또는 성공한 검증 job을 다시 실행할 필요는 없다.
 외부 게시, 태그 푸시, 운영 Gateway 재시작은 로컬 테스트 성공과 별개의 명시적 작업이다.
