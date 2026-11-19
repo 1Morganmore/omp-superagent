@@ -174,9 +174,6 @@ OMP 19.0.0이며 upstream `v19.0.0` 커밋은
 그 OMP 경로를 넣는다. 상대 경로는 설정 파일의 디렉터리 기준이며 모든 레인이 같은 경로를
 사용한다. 이 저장소는 OMP를 다운로드하거나 소스에서 빌드하지 않는다.
 
-아래의 배포판 **0.1.2**는 이 변경 전 릴리스라 설치 시 OMP 19가 필요하다. 현재 호환 동작은
-새 릴리스 전까지 아래 소스 설치에서 사용할 수 있다.
-
 ```sh
 bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
@@ -1166,7 +1163,12 @@ bun run release
 승인받은 버전 태그를 원격에 푸시하면 `.github/workflows/ci.yml`이 Linux/macOS 검증 후
 `bun run release --publish`로 GitHub Release를 게시한다. 이어 별도 npm job이 그 릴리즈의
 동일한 `.tgz`를 내려받아 SHA-256을 확인하고 GitHub Actions OIDC로 npm에 게시한다.
-버전과 태그·commit이 일치해야 하며 기존 릴리즈를 덮어쓰거나 실패한 검증을 우회하지 않는다.
+버전과 태그·commit이 일치해야 하며 일반 태그 푸시는 기존 릴리즈를 덮어쓰지 않는다.
+기존 릴리즈의 교체를 명시적으로 승인받은 경우에만, 이미 검증하고 병합한 커밋으로
+해당 태그를 옮긴 뒤 그 태그에서 `ci.yml`을 `replace_release=true`로 수동 실행한다.
+강제 태그 푸시 자체는 검증만 하며 게시하지 않는다. 수동 실행도 검증을 다시 통과해야
+첨부 파일과 노트를 교체하고, 같은 tarball을 npm에 게시한다. 이미 게시된 npm 버전은
+같은 번호로 덮어쓸 수 없다.
 
 최초 한 번, npm의 `omp-superagent` 패키지 설정 → **Trusted publishing**에서 GitHub Actions를
 추가한다. 사용자/조직은 `dbc-hbin`, 저장소는 `omp-superagent`, 워크플로우 파일은 `ci.yml`,

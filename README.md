@@ -75,13 +75,10 @@ runtime/script wrappers are unsupported.
 Before switching a Host from OMP 18 to 19, check its background services; the
 OMP 19 daemon does not take over the old broker's services.
 
-The published **0.1.2** shown below predates this change and still requires OMP 19
-on `PATH` during install. To use the compatibility behavior above before a new
-release, use the source install below. To install OMP separately, see the
+To install OMP separately, see the
 [upstream instructions](https://github.com/can1357/oh-my-pi#installation).
 
 ```sh
-omp --version
 bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```

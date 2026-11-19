@@ -57,12 +57,9 @@ Windows는 지원하지 않습니다.
 Host를 OMP 18에서 19로 바꾸기 전에 기존 백그라운드 서비스를 확인하세요.
 OMP 19 데몬은 이전 브로커의 서비스를 인수하지 않습니다.
 
-아래의 배포판 **0.1.2**는 이 변경 전 릴리스라 설치 시 `PATH`에 OMP 19가 필요합니다.
-새 릴리스 전에는 아래 소스 설치로 현재 호환 동작을 사용할 수 있습니다.
 OMP 자체를 설치하려면 [공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)를 참고하세요.
 
 ```sh
-omp --version
 bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
