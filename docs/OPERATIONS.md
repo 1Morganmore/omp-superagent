@@ -1089,17 +1089,23 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
 ULW entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선택기로 PATH의 현재 설치
 standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
 선택한 OMP 버전·실행 경로를 출력하고 지원 범위·공개 RPC 기능을 metadata로 확인한다.
-로컬 테스트 runner는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
+`test:ci` 자체는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
 `test:ci`는 설치된 CLI가 추출한 네이티브 바이너리만 실행별 임시 캐시에 공유한다. 각 fixture의 HOME·설정·인증은 계속 격리한다.
 `OMP_TEST_NATIVES_DIR`에 신뢰하는 절대 경로를 직접 지정하면 임시 캐시 대신 사용하며, 이 경로는 실행 후 삭제하지 않는다.
 
 PR과 `main`의 GitHub Actions는 Ubuntu 24.04와 macOS 15 Intel에서 실행한다. GitHub의 ARM64 러너
 배정 지연이 일반 검사를 막지 않도록 풀을 분리했다. 수동 실행과 `v*` 릴리스 태그는 macOS 15 ARM64도
 같은 행렬에 추가하며, 릴리스 게시는 모든 대상이 통과해야 진행된다.
-각 러너는 upstream의 최신 published release tag를 조회하고 해당 공식
-OMP binary를 다운로드한 뒤 checksum을 확인해 같은 회귀를 실행한다. SDK 의존성 pin으로
-실행 binary 버전을 고정하거나 OMP 소스·native addon을 빌드하지 않는다. 최신 release가 지원
-범위를 벗어나거나 검사가 실패해도 과거 binary로 자동 대체하지 않는다. 이 검사는 실제 계정·유료
+각 러너는 `bun run test:baseline`으로 `package.json`의 `@oh-my-pi/pi-coding-agent`와 같은
+버전의 공식 CLI를 임시 디렉터리에 받아 SHA-256과 `omp --version`을 확인한 뒤,
+그 CLI로 `bun install --frozen-lockfile`과 `bun run test:ci`를 실행한다. 같은 명령을 로컬에서
+실행해도 PATH의 기존 OMP를 교체하지 않는다. 다운로드에는 인터넷·curl·shasum이 필요하다.
+
+**OMP upstream compatibility**는 매주 월요일 04:17 UTC 또는 Actions에서 수동으로 실행한다.
+upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macOS Intel에서 그 태그로 같은 검사를 수행한다.
+실패한 태그는 로컬에서 `bash scripts/test-omp.sh vX.Y.Z`로 재현한다. 지원 범위 밖이거나 회귀가
+있으면 이 워크플로는 실패하고 PR·릴리스의 기준판 검사는 영향을 받지 않는다. 호환성 확인만으로
+제품의 지원 범위나 SDK lockfile이 바뀌지는 않는다. 이 검사는 실제 계정·유료
 제공자·herdr·실제 로그인/재부팅을 검증하지 않으며 과거의 동일 프로세스 TUI attach 지원도
 뜻하지 않는다. 실행 결과는 [릴리즈 검증 기록](releases/0.1.0.md#verification-records)에 모은다.
 이전 stock 18.20.2와 패치된 18.20.0의 결과는 현재 기준 버전의 검증과 구분하며 이후 변경의 증거로 재사용하지 않는다.

@@ -31,6 +31,7 @@
     "check": "tsc --noEmit",
     "test": "bun test test",
     "test:ci": "bun --no-env-file scripts/ci.ts",
+    "test:baseline": "bash scripts/test-omp.sh",
     "release": "bun --no-env-file scripts/release.ts",
     "start": "bun --no-env-file src/cli.ts start",
     "setup": "bash scripts/setup.sh",

@@ -4,6 +4,10 @@
 OMP >= 19.0.0, < 20.0.0과 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
 하지 않는다. SDK/API 기준선은 stock OMP 19.0.0이며 upstream `v19.0.0` 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
+로컬 `test:ci`는 현재 설치된 CLI를 검사한다. PR·릴리스 CI(`test:baseline`)는 SDK pin과
+같은 공식 CLI를 사용하고, 주간·수동 호환성 워크플로는 upstream 최신 릴리스를 검사한다.
+두 경로 모두 다운로드한 파일의 체크섬과 실행 파일 버전을 확인한다. 새 버전이 호환되지
+않으면 호환성 검사만 실패하며, 과거 실행 파일로 우회하거나 SDK lockfile을 자동 변경하지 않는다.
 비동기 wake 여부는 native RPC와 동일하게 `session.wakeSources !== undefined`로 읽고,
 소유 서비스·하위 작업·미확인 delivery의 별도 해제 차단은 유지한다.
 설치·일상 제어는 [운영 가이드](docs/OPERATIONS.md), 날짜·환경별 실행 결과와 이전 패치된

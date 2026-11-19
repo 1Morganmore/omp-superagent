@@ -223,8 +223,10 @@ else process.exit(8);
     await expect(inspectInstalledOmp([ui.command])).rejects.toThrow("public stdio RPC");
   });
 
-  test("doctor reports installed capabilities without activating services or native settings", async () => {
-    const f = await executable();
+  test("doctor distinguishes a newer supported CLI from the SDK baseline without activating services", async () => {
+    const [major, minor] = testedVersion.split(".");
+    const installedVersion = `${major}.${Number(minor) + 1}.0`;
+    const f = await executable(installedVersion);
     const path = await config({ command: [f.command] });
     const child = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/cli.ts"), "doctor", "--config", path], {
       env: { PATH: process.env.PATH, HOME: f.directory, PI_CODING_AGENT_DIR: join(f.directory, "agent") },
@@ -235,7 +237,7 @@ else process.exit(8);
     ]);
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     expect(JSON.parse(stdout)).toMatchObject({
-      omp: { version: testedVersion, testedVersion, stdioRpc: true },
+      omp: { version: installedVersion, testedVersion, stdioRpc: true },
       nativeTuiAttach: false, messengersActivated: false,
       credentials: { DISCORD_BOT_TOKEN: false },
     });

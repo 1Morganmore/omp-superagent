@@ -59,6 +59,11 @@ The current source requires Git, **Bun >= 1.4.4**, a separately installed
 **OMP >= 19.0.0 and < 20.0.0**, and local Unix sockets. It pins the published SDK
 to **19.0.0**, from upstream `v19.0.0` commit
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e).
+`bun run test:ci` tests the installed OMP. To reproduce PR and release CI, run
+`bun run test:baseline`: it downloads the SDK-matched CLI into a temporary directory,
+checks its checksum and version, installs frozen dependencies, and runs the same suite.
+The separate weekly/manual **OMP upstream compatibility** workflow tests the latest
+published CLI without falling back to the baseline or blocking releases.
 Windows is unsupported.
 Configure `command` with the installed OMP executable followed by native CLI flags;
 runtime/script wrappers are unsupported.

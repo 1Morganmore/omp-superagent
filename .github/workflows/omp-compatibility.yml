@@ -1,0 +1,42 @@
+name: OMP upstream compatibility
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Resolve the latest published OMP once for all runners
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo can1357/oh-my-pi --json tagName --jq .tagName)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  compatibility:
+    needs: upstream
+    name: Latest OMP (${{ needs.upstream.outputs.tag }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Install and test the upstream release without fallback
+        env:
+          OMP_TAG: ${{ needs.upstream.outputs.tag }}
+        run: bash scripts/test-omp.sh "$OMP_TAG"

@@ -46,7 +46,10 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 현재 소스에서 설치하려면 Git, **Bun >= 1.4.4**, 별도로 설치한 **OMP >= 19.0.0, < 20.0.0**,
 로컬 Unix socket 지원 환경이 필요합니다. 배포된 SDK **19.0.0**의 upstream `v19.0.0` 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)입니다.
-CI는 최신 공식 릴리즈를 checksum 확인 후 사용합니다. 오래된 런타임으로 자동 우회하지 않습니다.
+`bun run test:ci`는 현재 설치된 OMP를 검사합니다. PR·릴리스 CI를 재현하려면
+`bun run test:baseline`을 사용하세요. SDK와 같은 버전의 공식 CLI를 임시 디렉터리에 받아
+체크섬과 버전을 확인하고, lockfile대로 설치한 뒤 같은 전체 회귀를 실행합니다.
+별도의 주간·수동 **OMP upstream compatibility** 검사는 최신판이 깨지면 그대로 실패하며 릴리스를 막지 않습니다.
 Windows는 지원하지 않습니다.
 
 ### 1. 설치

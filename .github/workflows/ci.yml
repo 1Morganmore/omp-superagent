@@ -27,31 +27,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Read pinned Bun version
-        id: runtime
-        run: echo "bun=$(jq -r '.packageManager | sub("^bun@"; "")' package.json)" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ steps.runtime.outputs.bun }}
-      - name: Install latest published OMP binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="$(gh release view --repo can1357/oh-my-pi --json tagName --jq .tagName)"
-          asset="$(bun -p '`omp-${process.platform}-${process.arch}`')"
-          directory="$RUNNER_TEMP/omp"
-          mkdir -p "$directory"
-          echo "Testing current upstream OMP release: $tag"
-          gh release download "$tag" --repo can1357/oh-my-pi \
-            --pattern "$asset" --pattern SHA256SUMS.txt --dir "$directory"
-          (cd "$directory" && grep "  $asset\$" SHA256SUMS.txt | shasum -a 256 -c -)
-          mv "$directory/$asset" "$directory/omp"
-          chmod +x "$directory/omp"
-          echo "$directory" >> "$GITHUB_PATH"
-      - name: Install project and managed ULW
-        run: bun install --frozen-lockfile
-      - name: Typecheck and offline native regression suite
-        run: bun run test:ci
+          bun-version-file: package.json
+      - name: Install and test with the SDK-matched OMP release
+        run: bun run test:baseline
       - name: Package committed source
         run: bun run release
       - uses: actions/upload-artifact@v4
@@ -69,12 +49,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Read pinned Bun version
-        id: runtime
-        run: echo "bun=$(jq -r '.packageManager | sub("^bun@"; "")' package.json)" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ steps.runtime.outputs.bun }}
+          bun-version-file: package.json
       - name: Publish verified tag
         env:
           GH_TOKEN: ${{ github.token }}
