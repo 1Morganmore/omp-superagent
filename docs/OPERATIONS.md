@@ -1095,9 +1095,8 @@ standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너�
 `test:ci`는 설치된 CLI가 추출한 네이티브 바이너리만 실행별 임시 캐시에 공유한다. 각 fixture의 HOME·설정·인증은 계속 격리한다.
 `OMP_TEST_NATIVES_DIR`에 신뢰하는 절대 경로를 직접 지정하면 임시 캐시 대신 사용하며, 이 경로는 실행 후 삭제하지 않는다.
 
-PR과 `main`의 GitHub Actions는 Ubuntu 24.04와 macOS 15 Intel에서 실행한다. GitHub의 ARM64 러너
-배정 지연이 일반 검사를 막지 않도록 풀을 분리했다. 수동 실행과 `v*` 릴리스 태그는 macOS 15 ARM64도
-같은 행렬에 추가하며, 릴리스 게시는 모든 대상이 통과해야 진행된다.
+PR, `main`, 수동 실행과 `v*` 릴리즈 태그의 GitHub Actions는 Ubuntu 24.04와 macOS 15 ARM64에서
+실행한다. macOS Intel은 CI에서 검사하지 않으며, 릴리즈 게시는 두 러너가 모두 통과해야 진행된다.
 각 러너는 `bun run test:baseline`으로 SDK와 같은 공식 CLI를, `bash scripts/test-omp.sh v18.22.2`로
 공식 OMP 18을 임시 디렉터리에 받아 각각 SHA-256과 `omp --version`을 확인한다.
 `bun install --frozen-lockfile`로 패키지를 먼저 설치한 뒤 `bun run test:ci`에만 그 CLI를
@@ -1106,7 +1105,7 @@ PR과 `main`의 GitHub Actions는 Ubuntu 24.04와 macOS 15 Intel에서 실행한
 Ubuntu CI는 이전 비동기 작업 API를 쓰는 `v18.20.3`도 같은 방식으로 검증한다.
 
 **OMP upstream compatibility**는 매주 월요일 04:17 UTC 또는 Actions에서 수동으로 실행한다.
-upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macOS Intel에서 그 태그로 같은 검사를 수행한다.
+upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macOS ARM64에서 그 태그로 같은 검사를 수행한다.
 실패한 태그는 로컬에서 `bash scripts/test-omp.sh vX.Y.Z`로 재현한다. 필요한 기능이 없거나 회귀가
 있으면 이 워크플로는 실패하고 PR·릴리스의 기준판 검사는 영향을 받지 않는다. 호환성 확인만으로
 제품의 지원 범위나 SDK lockfile이 바뀌지는 않는다. 이 검사는 실제 계정·유료
