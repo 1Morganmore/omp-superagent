@@ -390,6 +390,7 @@ await stockHostFixture({ sessionFile, beforeReady: async () => {
     JSON.stringify({ beforeInode, ino, mode: mode & 0o777, pid: process.pid }) + "\\n");
 } });
 `);
+  launch.command = [path.relative(process.cwd(), launch.command[0]!)];
   let pid: number;
   try {
     for (const name of credentialNames) process.env[name] = "must-not-reach-lane";

@@ -322,7 +322,7 @@ const originalSpawn = Bun.spawn;
 Bun.spawn = function (...args) {
   const command = Array.isArray(args[0]) ? args[0] : args[0]?.cmd;
   const child = originalSpawn.apply(Bun, args);
-  if (process.argv.includes("doctor") && command?.includes("--help")) {
+  if (process.argv.includes("doctor") && command) {
     record("doctor");
     const options = Array.isArray(args[0]) ? args[1] : args[0];
     record("probe", command, options?.env ?? process.env);
@@ -450,6 +450,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 
 async function doctor(context: Fixture, explicit: Record<string, string> = {}) {
   const env = { ...context.env, ...explicit };
+  const auditStart = (await context.audit()).length;
   const child = Bun.spawn([process.execPath, "--no-env-file", cli, "doctor", "--config", context.config], {
     cwd: context.root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
@@ -463,7 +464,7 @@ async function doctor(context: Fixture, explicit: Record<string, string> = {}) {
     expect(result.config).toBe(context.config);
     expect(result.messengersActivated).toBe(false);
     expect(Object.values(result.credentials).every(value => value === true)).toBe(true);
-    const audit = await context.audit();
+    const audit = (await context.audit()).slice(auditStart);
     const launch = audit.filter(row => row.phase === "launch" && row.argv.includes("doctor")).at(-1)!;
     expect(launch).toBeDefined();
     for (const name of trackedNames) {
@@ -471,12 +472,14 @@ async function doctor(context: Fixture, explicit: Record<string, string> = {}) {
     }
     const observed = audit.filter(row => row.phase === "doctor").at(-1)!;
     expect(observed).toBeDefined();
-    // The installed compiled CLI need not execute Bun preloads. Observe the
-    // actual spawn boundary; successful doctor proves its metadata probe exited.
-    const probe = audit.filter(row => row.phase === "probe" && row.argv.includes("--help")).at(-1)!;
-    expect(probe).toBeDefined();
-    expect(probe.argv).toEqual([context.nativeCommand[0]!, "--help"]);
-    for (const name of Object.keys(result.credentials)) expect(probe.hashes[name]).toBeNull();
+    // The compiled CLI need not execute Bun preloads. Audit the actual child
+    // environment and permit only metadata commands on the selected executable.
+    const probes = audit.filter(row => row.phase === "probe");
+    expect(probes.map(row => row.argv)).toEqual(
+      [["--version"], ["--help"], ["ps", "--help"]].map(argv => [context.nativeCommand[0], ...argv]));
+    for (const probe of probes) {
+      for (const name of Object.keys(result.credentials)) expect(probe.hashes[name]).toBeNull();
+    }
     return { stdout, result, observed };
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL");

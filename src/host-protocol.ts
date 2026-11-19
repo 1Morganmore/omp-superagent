@@ -18,8 +18,10 @@ export type HostState = RpcSessionState & {
 };
 export type Frame = Record<string, unknown>;
 /** Only lifecycle evidence crosses the private socket, never command lines or service logs. */
-export type ServiceUnit = Pick<UnitSnapshot, "id" | "scope" | "kind" | "key" | "owner" | "generation" |
-  "startedAt" | "restartCount" | "state" | "exitedAt" | "pids" | "supervised">;
+export type ServiceUnit = Pick<UnitSnapshot, "id" | "key" | "owner" |
+  "startedAt" | "restartCount" | "state" | "exitedAt" | "pids" | "supervised"> & {
+    readonly generation?: UnitSnapshot["generation"];
+  };
 export type Response = Frame & { success: boolean; data?: unknown; error?: string };
 export type HostResponse = RpcResponse | {
   type: "response"; id?: string; command: "shutdown_host" | "set_model_preset" | "get_host_admission"; success: true; data: Frame;

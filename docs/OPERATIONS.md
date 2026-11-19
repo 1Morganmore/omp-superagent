@@ -159,24 +159,30 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 
 ## 1. 로컬 준비 — 봇은 시작하지 않음
 
-**0.1.2**에는 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`), 별도 설치한 수정 없는
-**OMP >= 19.0.0, < 20.0.0**, 로컬 Unix socket을 지원하는 환경이 필요하다. SDK/API 기준선은
+현재 소스는 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`)와 로컬 Unix socket을
+사용한다. OMP 없이 패키지를 설치할 수 있다. Host 실행에는 별도로 설치한 stock OMP가
+필요하며, 버전 번호로 차단하지 않고 `rpc-ui`, 세션 재개, 확장, 모델 선택과 프로세스 관측
+인터페이스를 확인한다. 검증 대상은 OMP 18.20.3, 18.22.2, 19.0.0이다. SDK 기준선은
 OMP 19.0.0이며 upstream `v19.0.0` 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
-native 검증은 현재 설치된 실행 파일을 사용한다. 이 소스 기준선이나 이전 버전의 검증 결과는
-OMP 19.0.0 런타임에서 새로 실행한 검증을 뜻하지 않는다.
+`doctor`는 `command`가 고른 실행 파일 경로, 버전, 서비스 백엔드를 보여주며 로그인이나
+런타임 호환성을 보증하지 않는다. Host는 실제 RPC 초기화와 소유권 검사를 거친다.
 18에서 19로 올리기 전에 기존 Host가 맡은 백그라운드 서비스를 확인한다. OMP 19의 사용자별
 데몬은 이전 브로커의 서비스를 인수하지 않는다. 새 데몬의 목록이 비어 있어도 이전 세션에서
 완료를 확인하지 못한 작업의 종료·회수를 승인하는 증거는 아니다.
-OMP 공식 설치를 먼저 완료해 `omp`가 PATH에 있어야 한다. 이 저장소는 OMP 소스 checkout이나
-native addon 빌드를 하지 않는다.
+기본 `command: ["omp"]`는 PATH에서 찾는다. 다른 설치를 쓰려면 `command`의 첫 항목에
+그 OMP 경로를 넣는다. 상대 경로는 설정 파일의 디렉터리 기준이며 모든 레인이 같은 경로를
+사용한다. 이 저장소는 OMP를 다운로드하거나 소스에서 빌드하지 않는다.
+
+아래의 배포판 **0.1.2**는 이 변경 전 릴리스라 설치 시 OMP 19가 필요하다. 현재 호환 동작은
+새 릴리스 전까지 아래 소스 설치에서 사용할 수 있다.
 
 ```sh
 bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
-`--trust`는 OMP 검사·관리형 ULW 준비 lifecycle 스크립트를 허용한다.
+`--trust`는 관리형 ULW 준비 등 패키지 설치 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
 `npm install --global omp-superagent@0.1.2`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
@@ -188,7 +194,7 @@ omp-sa --help
 bun install --frozen-lockfile
 ```
 
-preinstall의 `scripts/check-omp.ts`가 설치된 CLI의 버전·필요 기능을 확인한다.
+설치 단계에서는 OMP를 실행하지 않는다. `setup`·`doctor`와 실제 Host 시작에서 선택된 CLI를 확인한다.
 루트 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-ai`,
 `@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils` 19.0.0이다. 설치는 봇을 시작하지 않으며
 기존 OMP 실행 파일·전역 설정을 교체하지 않는다.
@@ -1087,7 +1093,7 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
 타입 검사와 모든 로컬 project/native/PTY·관리형 ULW 회귀를 실행한다. `scripts/ci.ts`는 활성
 ULW entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선택기로 PATH의 현재 설치
 standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
-선택한 OMP 버전·실행 경로를 출력하고 지원 범위·공개 RPC 기능을 metadata로 확인한다.
+선택한 OMP 버전·실행 경로를 출력하고 공개 RPC·프로세스 관측 기능을 메타데이터로 확인한다.
 `test:ci` 자체는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
 `test:ci`는 설치된 CLI가 추출한 네이티브 바이너리만 실행별 임시 캐시에 공유한다. 각 fixture의 HOME·설정·인증은 계속 격리한다.
 `OMP_TEST_NATIVES_DIR`에 신뢰하는 절대 경로를 직접 지정하면 임시 캐시 대신 사용하며, 이 경로는 실행 후 삭제하지 않는다.
@@ -1095,14 +1101,16 @@ standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너�
 PR과 `main`의 GitHub Actions는 Ubuntu 24.04와 macOS 15 Intel에서 실행한다. GitHub의 ARM64 러너
 배정 지연이 일반 검사를 막지 않도록 풀을 분리했다. 수동 실행과 `v*` 릴리스 태그는 macOS 15 ARM64도
 같은 행렬에 추가하며, 릴리스 게시는 모든 대상이 통과해야 진행된다.
-각 러너는 `bun run test:baseline`으로 `package.json`의 `@oh-my-pi/pi-coding-agent`와 같은
-버전의 공식 CLI를 임시 디렉터리에 받아 SHA-256과 `omp --version`을 확인한 뒤,
-그 CLI로 `bun install --frozen-lockfile`과 `bun run test:ci`를 실행한다. 같은 명령을 로컬에서
+각 러너는 `bun run test:baseline`으로 SDK와 같은 공식 CLI를, `bash scripts/test-omp.sh v18.22.2`로
+공식 OMP 18을 임시 디렉터리에 받아 각각 SHA-256과 `omp --version`을 확인한다.
+`bun install --frozen-lockfile`로 패키지를 먼저 설치한 뒤 `bun run test:ci`에만 그 CLI를
+`PATH` 앞에 넣는다. 같은 명령을 로컬에서
 실행해도 PATH의 기존 OMP를 교체하지 않는다. 다운로드에는 인터넷·curl·shasum이 필요하다.
+Ubuntu CI는 이전 비동기 작업 API를 쓰는 `v18.20.3`도 같은 방식으로 검증한다.
 
 **OMP upstream compatibility**는 매주 월요일 04:17 UTC 또는 Actions에서 수동으로 실행한다.
 upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macOS Intel에서 그 태그로 같은 검사를 수행한다.
-실패한 태그는 로컬에서 `bash scripts/test-omp.sh vX.Y.Z`로 재현한다. 지원 범위 밖이거나 회귀가
+실패한 태그는 로컬에서 `bash scripts/test-omp.sh vX.Y.Z`로 재현한다. 필요한 기능이 없거나 회귀가
 있으면 이 워크플로는 실패하고 PR·릴리스의 기준판 검사는 영향을 받지 않는다. 호환성 확인만으로
 제품의 지원 범위나 SDK lockfile이 바뀌지는 않는다. 이 검사는 실제 계정·유료
 제공자·herdr·실제 로그인/재부팅을 검증하지 않으며 과거의 동일 프로세스 TUI attach 지원도

@@ -32,6 +32,11 @@ jobs:
           bun-version-file: package.json
       - name: Install and test with the SDK-matched OMP release
         run: bun run test:baseline
+      - name: Test with stock OMP 18
+        run: bash scripts/test-omp.sh v18.22.2
+      - name: Test the earlier OMP 18 native lifecycle
+        if: matrix.os == 'ubuntu-24.04'
+        run: bash scripts/test-omp.sh v18.20.3
       - name: Package committed source
         run: bun run release
       - uses: actions/upload-artifact@v4

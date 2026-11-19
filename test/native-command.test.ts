@@ -11,13 +11,14 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function installation(identity: string, version = testedVersion) {
+function installation(identity: string, help = "--mode rpc, rpc-ui --resume PATH --extension FILE --model MODEL") {
   const directory = mkdtempSync(join(tmpdir(), "superagent-test-command-"));
   directories.push(directory);
   const executable = join(directory, "omp");
   writeFileSync(executable, `#!${process.execPath}
-if (process.argv.includes("--version")) console.log(${JSON.stringify(`omp/${version}`)});
-else if (process.argv.includes("--help")) console.log("--mode rpc --resume PATH --extension FILE --model MODEL");
+if (process.argv.includes("--version")) console.log(${JSON.stringify(`omp/${testedVersion}`)});
+else if (process.argv[2] === "ps" && process.argv[3] === "--help") console.log("--signal SIGNAL");
+else if (process.argv.includes("--help")) console.log(${JSON.stringify(help)});
 else console.log(JSON.stringify({
   runtime: ${JSON.stringify(identity)},
   profile: process.argv.includes("--profile") ? process.argv[process.argv.indexOf("--profile") + 1] : null,
@@ -76,12 +77,12 @@ test.each(["", "not-json"])("malformed native argv %j cannot fall back to discov
   await expect(nativeTestCommand({ PATH: installed.directory, OMP_TEST_COMMAND: override })).rejects.toThrow(SyntaxError);
 });
 
-test("an unsupported explicit runtime cannot fall back to a supported installed runtime", async () => {
+test("an explicit runtime without rpc-ui cannot fall back to an otherwise usable runtime", async () => {
   const installed = installation("installed");
-  const unsupported = installation("old-runtime", "17.99.0");
+  const unsupported = installation("plain-rpc", "--mode rpc --resume PATH --extension FILE --model MODEL");
   await expect(nativeTestCommand({
     PATH: installed.directory, OMP_TEST_COMMAND: JSON.stringify([unsupported.executable]),
-  })).rejects.toThrow("Install a supported stock OMP");
+  })).rejects.toThrow("public stdio RPC (rpc-ui)");
 });
 
 test("native tests require a standalone installation when PATH contains only a dependency shim", async () => {

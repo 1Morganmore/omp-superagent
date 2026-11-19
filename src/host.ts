@@ -296,7 +296,8 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
       throw new Error(`RPC socket already hosts session ${state.sessionId} at ${state.sessionFile}; explicit adoption required`);
     } finally { await connection.close(); }
   }
-  await inspectInstalledOmp(options.command, [], options.env);
+  const { executable, processBackend } = await inspectInstalledOmp(options.command, [], options.env);
+  options = { ...options, command: [executable, ...options.command.slice(1)] };
 
   const launchDirectory = await fs.mkdtemp(path.join(path.dirname(options.socketPath), ".launch-"));
   const configPath = path.join(launchDirectory, "config.json");
@@ -334,7 +335,7 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
       launchArgs: [...options.command.slice(1), ...buildHostArgs(options, configPath)],
       env: options.env, bunCommand: [bun, "--no-env-file"] });
     const { env: _inheritedEnvironment, ...launchOptions } = options;
-    await fs.writeFile(manifestPath, JSON.stringify({ options: launchOptions, args: buildHostArgs(options, configPath, composition), configPath,
+    await fs.writeFile(manifestPath, JSON.stringify({ options: launchOptions, args: buildHostArgs(options, configPath, composition), configPath, processBackend,
       nativeSocket: path.join(path.dirname(options.socketPath), `.n-${crypto.randomUUID().slice(0, 8)}.sock`) }),
     { flag: "wx", mode: 0o600 });
     child = spawn(bun, ["--no-env-file", fileURLToPath(new URL("./host-owner.ts", import.meta.url)), manifestPath], {

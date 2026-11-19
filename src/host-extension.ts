@@ -30,12 +30,19 @@ const serviceOwner = ({ agent, sessionManager }: ExtensionContext) => {
   return agent.kind === "sub" && agent.id === "advisor" ? `${id}-advisor` : id;
 };
 
+/** Match the running CLI's own RPC settlement predicate (old and new SDK surface). */
+function pendingNativeWake(session: { readonly wakeSources?: unknown; readonly hasPendingAsyncWork?: () => boolean }): boolean {
+  if ("wakeSources" in session) return session.wakeSources !== undefined;
+  if (typeof session.hasPendingAsyncWork === "function") return session.hasPendingAsyncWork();
+  throw new Error("Installed OMP cannot observe pending native async work");
+}
+
 // Root and subagent extension factories in one native process share this pipe owner.
 let ownerChannel: HostChannel | undefined;
 const serviceReservations = new Set<string>();
-async function observeServices(scope?: UnitScope): Promise<ServiceUnit[]> {
+async function observeServices(scope?: UnitScope, name?: string): Promise<ServiceUnit[]> {
   if (!ownerChannel || scope && scope.kind !== "project") throw new Error("No native service observation channel");
-  const response = await ownerChannel.request({ type: "list_service_units", projectDir: scope?.dir });
+  const response = await ownerChannel.request({ type: "list_service_units", projectDir: scope?.dir, serviceName: name });
   const data = response.data as { units?: ServiceUnit[] } | undefined;
   if (!response.success || !Array.isArray(data?.units)) throw new Error("Native service ownership is unavailable");
   return data.units;
@@ -110,7 +117,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
       || typeof session.isCompacting !== "boolean" || typeof session.isDisposed !== "boolean"
       || !Number.isSafeInteger(session.queuedMessageCount) || session.queuedMessageCount < 0
       || typeof session.instanceKey !== "string" || !session.instanceKey
-      || !("wakeSources" in session) || typeof session.getAsyncJobTree !== "function"
+      || typeof session.getAsyncJobTree !== "function"
       || typeof session.getAsyncJobSnapshot !== "function" || typeof session.beginDispose !== "function"
       || typeof session.abortCompaction !== "function" || typeof session.goalRuntime.pauseGoal !== "function"
       || typeof session.waitForIdle !== "function" || typeof session.yieldQueue?.has !== "function"
@@ -209,7 +216,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
       && !(ref.session instanceof pi.pi.AgentSession));
     const descendantsBusy = () => refs.some(ref => agents.has(ref.id) && ref.id !== pi.pi.MAIN_AGENT_ID
       && (registry.isRunning(ref) || ref.session instanceof pi.pi.AgentSession
-        && (ref.session.wakeSources !== undefined || ref.session.hasAdmittedSubmission || ref.session.hasPostPromptWork
+        && (pendingNativeWake(ref.session) || ref.session.hasAdmittedSubmission || ref.session.hasPostPromptWork
           || ref.session.isBusyForSnapshot || ref.session.yieldQueue.has() || deliveriesPending(ref.session))));
     const tracking = journal.flatMap(entry => entry.type === "custom" && entry.customType === "superagent_service_tracking"
       && (entry.data as Frame)?.rootSessionId === identity.id ? [(entry.data as Frame).known] : []);
@@ -278,7 +285,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     const { session } = exact();
     return !mutationHeld && !observationHeld && !session.isDisposed && !session.isBusyForSnapshot && !session.isStreaming
       && !session.isCompacting && !session.hasAdmittedSubmission && !session.hasPostPromptWork
-      && session.queuedMessageCount === 0 && session.wakeSources === undefined
+      && session.queuedMessageCount === 0 && !pendingNativeWake(session)
       && !session.yieldQueue.has()
       && !session.getGoalModeState()?.enabled;
   };
@@ -298,7 +305,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
         interruptMode: session.interruptMode, sessionFile: session.sessionFile,
         sessionId: session.sessionId, sessionName: session.sessionName,
         autoCompactionEnabled: session.autoCompactionEnabled,
-        queuedMessageCount: session.queuedMessageCount, hasPendingAsyncWork: session.wakeSources !== undefined,
+        queuedMessageCount: session.queuedMessageCount, hasPendingAsyncWork: pendingNativeWake(session),
         isSettled: false,
         queuedMessages: { steering: [...queued.steering], followUp: [...queued.followUp], liveSteered: queued.liveSteered },
         todoPhases: session.getTodoPhases(), fastModeEnabled: session.isFastModeEnabled(),
@@ -438,7 +445,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     serviceReservations.add(reservation);
     let admitted = false;
     try {
-      const previous = (await observeServices(scope)).filter(unit => unit.key === name);
+      const previous = await observeServices(scope, name);
       if (previous.some(unit => !unit.supervised && (!terminalService(unit.state) || unit.exitedAt === undefined)))
         return { block: true, reason: "The existing named service's live state could not be established" };
       if (previous.some(unit => !terminalService(unit.state) && unit.owner !== owner))
@@ -483,7 +490,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     // without that PID, but still needs its exact durable launch completion.
     try {
       const unit = details?.service?.name === start.name
-        ? (await observeServices(start.scope)).find(unit => unit.supervised && unit.key === start.name
+        ? (await observeServices(start.scope, start.name)).find(unit => unit.supervised && unit.key === start.name
           && unit.owner === start.owner && unit.restartCount === 0 && !start.previousIds.has(unit.id)
           && (terminalService(unit.state) || unit.pids[0] !== undefined && unit.pids[0] === details.service?.pid))
         : undefined;
@@ -507,6 +514,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     if (server) return;
     context = ctx;
     const identity = exact();
+    pendingNativeWake(identity.session);
     await ctx.sessionManager.ensureOnDisk();
     if (exact().ref !== identity.ref) throw new Error("Native session changed during materialization");
     identity.session.sessionManager.flushSync();

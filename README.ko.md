@@ -42,22 +42,24 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 
 ## 빠른 시작
 
-**0.1.2**에는 Git, **Bun >= 1.4.4**, 별도로 설치한 **OMP >= 19.0.0, < 20.0.0**,
-로컬 Unix socket 지원 환경이 필요합니다. 배포된 SDK **19.0.0**의 upstream `v19.0.0` 커밋은
+현재 소스는 Git, **Bun >= 1.4.4**, 로컬 Unix socket을 사용합니다. 패키지 설치에는 OMP가
+필요 없습니다. Host를 실행할 때는 별도로 설치한 OMP의 기능을 검사하며, 버전 범위로 제한하지
+않습니다. 검증한 공식 버전은 **OMP 18.20.3, 18.22.2, 19.0.0**입니다. SDK는 **19.0.0**으로 유지하며 upstream 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)입니다.
-`bun run test:ci`는 현재 설치된 OMP를 검사합니다. PR·릴리스 CI를 재현하려면
-`bun run test:baseline`을 사용하세요. SDK와 같은 버전의 공식 CLI를 임시 디렉터리에 받아
-체크섬과 버전을 확인하고, lockfile대로 설치한 뒤 같은 전체 회귀를 실행합니다.
+`bun run test:ci`는 현재 설치된 OMP를 검사합니다. CI를 재현하려면 SDK 기준판은
+`bun run test:baseline`, OMP 18은 `bash scripts/test-omp.sh v18.22.2` 또는 `v18.20.3`을 사용하세요.
+두 명령 모두 공식 바이너리를 검증한 뒤 같은 회귀를 실행합니다.
 별도의 주간·수동 **OMP upstream compatibility** 검사는 최신판이 깨지면 그대로 실패하며 릴리스를 막지 않습니다.
 Windows는 지원하지 않습니다.
 
 ### 1. 설치
 
-0.1.1에서 올리는 경우 OMP 18이 맡은 백그라운드 서비스부터 확인하세요.
+Host를 OMP 18에서 19로 바꾸기 전에 기존 백그라운드 서비스를 확인하세요.
 OMP 19 데몬은 이전 브로커의 서비스를 인수하지 않습니다.
 
-[공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)에 따라 OMP를 먼저 설치한 뒤,
-Bun으로 CLI를 설치합니다.
+아래의 배포판 **0.1.2**는 이 변경 전 릴리스라 설치 시 `PATH`에 OMP 19가 필요합니다.
+새 릴리스 전에는 아래 소스 설치로 현재 호환 동작을 사용할 수 있습니다.
+OMP 자체를 설치하려면 [공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)를 참고하세요.
 
 ```sh
 omp --version
@@ -65,15 +67,14 @@ bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
-`--trust`는 이 패키지의 OMP 검사와 관리형 `omp-ulw` 준비 스크립트 실행을 허용합니다.
+`--trust`는 관리형 `omp-ulw` 준비 등 패키지 설치 스크립트 실행을 허용합니다.
 `bun pm bin --global`의 출력 경로를 `PATH`에 포함하세요. Bun이 `PATH`에 있다면 npm으로도 설치할 수 있습니다.
 
 ```sh
 npm install --global omp-superagent@0.1.2
 ```
 
-설치 시 별도로 설치된 OMP를 먼저 확인하고, postinstall이 필수 관리형 `omp-ulw`를 준비합니다.
-설치 lifecycle 스크립트를 생략하지 마세요.
+postinstall이 필수 관리형 `omp-ulw`를 준비하므로 설치 스크립트를 생략하지 마세요.
 공개 SDK 패키지와 플랫폼 네이티브 의존성은 패키지 레지스트리에서 받으며, Rust 도구·OMP 소스
 checkout·코어 패치·네이티브 빌드가 필요하지 않습니다. 의존성 설치에는 네트워크가 필요하지만,
 봇을 시작하거나 설치된 OMP를 교체하지는 않습니다.

@@ -176,7 +176,7 @@ export function parseConfig(value: unknown, path: string): Config {
     throw new Error("command contains unsupported patched OMP arguments; configure an installed stock OMP executable");
   const headCwd = realpathSync(pathValue(raw.headCwd, "headCwd"));
   if (!lstatSync(headCwd).isDirectory()) throw new Error("headCwd must be a directory");
-  const command = resolveOmpCommand(raw.command as string[]);
+  const command = resolveOmpCommand(raw.command as string[], process.env.PATH, base);
   const maxHosts = integer(raw.maxHosts, "maxHosts", 2);
   const maxSubagents = integer(raw.maxSubagents, "maxSubagents", maxHosts);
   const discordChannels = discord ? ids(discord.allowedChannelIds, "discord.allowedChannelIds") : [];

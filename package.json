@@ -36,7 +36,6 @@
     "start": "bun --no-env-file src/cli.ts start",
     "setup": "bash scripts/setup.sh",
     "prepare:ulw": "bun scripts/prepare-ulw.ts",
-    "preinstall": "bun --no-env-file scripts/check-omp.ts",
     "postinstall": "bun scripts/prepare-ulw.ts"
   },
   "engines": {

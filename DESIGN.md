@@ -1,14 +1,21 @@
 # omp-superagent 설계
 
-이 문서는 **현재 구조와 안전·권한 계약**을 정의한다. 별도로 설치한 수정 없는
-OMP >= 19.0.0, < 20.0.0과 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
-하지 않는다. SDK/API 기준선은 stock OMP 19.0.0이며 upstream `v19.0.0` 커밋은
+이 문서는 **현재 구조와 안전·권한 계약**을 정의한다. 설치에는 OMP가 필요하지 않다.
+실행할 때는 별도로 설치한 수정 없는 OMP와 공개 확장/RPC API를 사용하며, OMP 소스 준비·코어
+패치·native 빌드는 하지 않는다. 실행 파일은 버전 범위가 아닌 CLI 기능과 실제 RPC/확장 초기화로
+확인한다. SDK/API 기준선은 stock OMP 19.0.0이며 upstream `v19.0.0` 커밋은
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
-로컬 `test:ci`는 현재 설치된 CLI를 검사한다. PR·릴리스 CI(`test:baseline`)는 SDK pin과
-같은 공식 CLI를 사용하고, 주간·수동 호환성 워크플로는 upstream 최신 릴리스를 검사한다.
-두 경로 모두 다운로드한 파일의 체크섬과 실행 파일 버전을 확인한다. 새 버전이 호환되지
+로컬 `test:ci`는 현재 설치된 CLI를 검사한다. PR·릴리스 CI는 SDK와 같은 공식 CLI(`test:baseline`)와
+공식 OMP 18.22.2([`e1ae2cc998efd1ca151b46ebefc0e0dab6c23c63`](https://github.com/can1357/oh-my-pi/commit/e1ae2cc998efd1ca151b46ebefc0e0dab6c23c63))
+양쪽에서 같은 회귀를 실행한다. Ubuntu CI는 이전 비동기 API를 쓰는 OMP 18.20.3도 검사한다.
+주간·수동 호환성 워크플로는 upstream 최신 릴리스를 검사한다.
+다운로드 경로는 모두 파일 체크섬과 배포 태그 일치를 확인한다. 새 버전이 호환되지
 않으면 호환성 검사만 실패하며, 과거 실행 파일로 우회하거나 SDK lockfile을 자동 변경하지 않는다.
-비동기 wake 여부는 native RPC와 동일하게 `session.wakeSources !== undefined`로 읽고,
+선택된 실행 파일의 `ps --help`로 OMP 18의 프로젝트 브로커와 OMP 19의 사용자 데몬을 구분한다.
+둘 다 읽기 전용으로 조회한다. 조회 실패를 다른 백엔드나 빈 목록으로 바꾸지 않으며,
+18의 기록에 없는 세대 ID를 만들어 19의 기록과 대조하지 않는다.
+비동기 wake 여부는 실행 중인 CLI의 native RPC와 동일하게 읽는다. `wakeSources`가 노출되면
+그 값을, OMP 18.20처럼 이전 인터페이스를 제공하면 `hasPendingAsyncWork()`를 사용한다.
 소유 서비스·하위 작업·미확인 delivery의 별도 해제 차단은 유지한다.
 설치·일상 제어는 [운영 가이드](docs/OPERATIONS.md), 날짜·환경별 실행 결과와 이전 패치된
 18.20.0의 제한된 증거는 [릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records)에 둔다.
@@ -124,7 +131,8 @@ Gateway를 모든 lane 실행을 소유하는 별도 manager로 확장하지 않
 | `src/telegram.ts` | grammY `Api` 기반 getMe/getWebhookInfo/getUpdates long polling·영속 offset·native forum topic·inline 승인·토큰 없는 file 참조 |
 | `src/slack.ts` | 공식 SocketModeClient/WebClient 기반 workspace 인증·메시지/Block Kit 수신·history·thread·외부 파일 업로드 |
 | `src/host.ts`와 관리 Host 확장 | 설치 OMP의 stdio RPC 시작·재연결·정확한 native identity 확인, 실제 AgentSession의 수명·저널 저장·종료 검사 |
-| `scripts/check-omp.ts`, `src/installed-omp.ts` | 별도 설치한 stock CLI의 버전·기능 확인. 소스 checkout·빌드·패치 없음 |
+| `src/installed-omp.ts` | 선택한 stock CLI의 경로·버전 보고와 실행 기능 확인. 소스 checkout·빌드·패치 없음 |
+| `src/host-services.ts`, `src/host-broker-services.ts` | 선택된 OMP의 서비스 목록을 읽기 전용으로 확인. 시작·교체·인수 없음 |
 | `upstream/ulw.json`, `.upstream/ulw/` | 공식 ULW 원격·1시간 갱신 간격과 프로젝트 소유 immutable revision package·원자적 활성 pointer·업데이트 상태 |
 
 설치·준비·doctor는 Gateway나 봇을 활성화하지 않는다. `start`만 Gateway를 백그라운드로
@@ -159,15 +167,15 @@ Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서
 
 `omp-ulw`는 선택적 사용자 checkout이 아니라 설치에 항상 포함되는 관리형 의존성이다.
 공식 원격은 `https://github.com/dbc-hbin/omp-ulw.git`이며 `upstream/ulw.json`에 기록한다.
-별도 설치한 OMP의 preinstall 검사 뒤 루트 postinstall 또는 명시적인
-`bun run prepare:ulw`로 ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
+OMP 실행 파일과 독립적으로 루트 postinstall 또는 명시적인 `bun run prepare:ulw`로
+ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-natives`, `pi-tui`, `pi-utils`
 19.0.0 패키지다.
 0.1.1부터 npm 패키지로 같은 소스·역할 스킬·설치 자원을 배포한다.
 `bun add --global --trust omp-superagent@0.1.1` 또는 Bun이 PATH에 있는 환경의
 `npm install --global omp-superagent@0.1.1`로 `omp-sa`를 설치한다. 이 고정 버전 예는
 OMP >= 18.20.2, < 19를 요구하는 기존 릴리즈를 설치하며 현재 소스를 설치하지 않는다.
-Bun의 `--trust`는 기존 OMP 검사·ULW 준비 lifecycle을 허용하며 별도의 실행 backend를 추가하지 않는다.
+Bun의 `--trust`는 패키지의 ULW 준비 lifecycle을 허용하며 별도의 실행 backend를 추가하지 않는다.
 설정·자격 증명·세션은 패키지에 포함하지 않고 사용자 지정 경로에 보존한다.
 설치 때 원격 기본 브랜치 HEAD를 확인한다. production Gateway 시작에는 이미 유효한
 active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startup 원격 확인은 백그라운드로

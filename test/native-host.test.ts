@@ -61,32 +61,27 @@ async function checkpoint(connection: HostConnection, token: string, id: string)
 }
 
 async function proveForeignServiceSurvives(options: HostOptions, connection: HostConnection): Promise<void> {
-  // A different client holds its own lease in this test's isolated daemon.
-  // Its exact live unit must still be present after stock Bash has been denied.
-  const foreign = Bun.spawn([process.execPath, "--no-env-file", "-e", `
-    import {probeDaemon} from "@oh-my-pi/pi-coding-agent/daemon/client";
-    const client = await probeDaemon();
-    if (!client) throw new Error("The isolated native daemon is not running");
-    try {
-      const dir = ${JSON.stringify(options.cwd)};
-      const { unit } = await client.open({
-        kind: "proc", scope: { kind: "project", dir }, key: "sa-host-foreign", owner: "independent-fixture-session",
-        proc: { application: process.execPath, args: ["-e", "await Bun.sleep(60000)"], env: {}, cwd: dir, pty: false },
-        awaitReady: false,
-      });
-      console.log("ready");
-      for await (const _ of process.stdin) break;
-      const current = (await client.request({ op: "describe", unit: unit.id })).unit;
-      if (current.generation !== unit.generation || current.state !== "running" || current.pids[0] !== unit.pids[0])
-        throw new Error("The independent service was replaced or stopped");
-    } finally { client.close(); }
-  `], { cwd: path.resolve(import.meta.dir, ".."), env: options.env, stdin: "pipe", stdout: "pipe", stderr: "inherit" });
-  const reader = foreign.stdout.getReader();
+  const root = path.dirname(options.socketPath);
+  const owner = { ...options, socketPath: path.join(root, "foreign.sock"), sessionFile: path.join(root, "foreign.jsonl") };
+  const host = await startHost(owner);
+  const foreign = await HostConnection.connect(owner.socketPath).catch(error => {
+    try { process.kill(host.pid, "SIGKILL"); } catch {}
+    throw error;
+  });
+  const release = path.join(options.cwd, ".sa-release-foreign");
+  const started = observe(foreign, frame => frame.type === "prompt_result" && frame.id === "foreign-start");
+  const completed = observe(foreign, frame => frame.type === "message_end"
+    && (frame.message as { customType?: string } | undefined)?.customType === "launch-completion");
   const refused = observe(connection, frame => frame.type === "message_end"
     && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "native-foreign-service");
   const settled = observe(connection, frame => frame.type === "prompt_result" && frame.id === "native-foreign-service-proof");
+  let stopped = false;
   try {
-    expect(new TextDecoder().decode((await reader.read()).value).trim()).toBe("ready");
+    const identity = await foreign.client.getState();
+    expect(await foreign.request({ type: "prompt", message: "[native-foreign-service-owner] Start the original service." },
+      "foreign-start")).toMatchObject({ success: true });
+    expect(await started.promise).toMatchObject({ status: "completed", agentInvoked: true });
+    expect((await foreign.client.getState()).hasOwnedRunningWork).toBe(true);
     expect(await connection.request({ type: "prompt", message: "[native-foreign-service-proof] Try the named-service collision fixture." },
       "native-foreign-service-proof")).toMatchObject({ success: true });
     const message = (await refused.promise).message as { isError: boolean; content: unknown };
@@ -94,12 +89,22 @@ async function proveForeignServiceSurvives(options: HostOptions, connection: Hos
     expect(JSON.stringify(message.content)).toContain("belongs to another session");
     expect(await settled.promise).toMatchObject({ status: "completed", agentInvoked: true });
     expect((await connection.client.getState()).hasOwnedRunningWork).toBe(false);
-  } finally {
-    refused.cancel(); settled.cancel(); reader.releaseLock();
-    foreign.stdin.end();
+    expect((await foreign.client.getState()).hasOwnedRunningWork).toBe(true);
+    await fs.writeFile(release, "");
+    expect((await completed.promise).message).toMatchObject({
+      details: { daemons: [expect.objectContaining({ owner: identity.sessionId, state: "exited", exitCode: 0 })] },
+    });
+    expect(await fs.readFile(path.join(options.cwd, ".sa-foreign-receipt"), "utf8")).toBe("original process exited\n");
+    await foreign.client.waitForSettled(30_000);
+    expect(await foreign.request({ type: "shutdown_host" })).toMatchObject({ success: true });
     await foreign.exited;
+    stopped = true;
+  } finally {
+    started.cancel(); completed.cancel(); refused.cancel(); settled.cancel();
+    await fs.writeFile(release, "");
+    await foreign.close();
+    if (!stopped) { try { process.kill(host.pid, "SIGKILL"); } catch {} }
   }
-  expect(await foreign.exited).toBe(0);
 }
 
 nativeTest("actual OMP preserves approvals and structured owner decisions across one persistent host", async () => {
@@ -261,9 +266,15 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
       second.uiResponse(dialog.id as string, { value: "Approve" });
       const completion = (await service.promise).message as { details: { daemons: Record<string, unknown>[] } };
       expect(completion.details.daemons).toEqual([expect.objectContaining({
-        kind: "proc", key: "sa-host-proof", owner: initial.sessionId, state: "exited", pids: [],
-        generation: expect.any(String), scope: { kind: "project", dir: await fs.realpath(cwd) },
+        id: expect.any(String), owner: initial.sessionId, state: "exited", exitCode: 0,
       })]);
+      const [reported] = completion.details.daemons;
+      if (reported && "generation" in reported) {
+        expect(reported).toMatchObject({ kind: "proc", key: "sa-host-proof", pids: [],
+          generation: expect.any(String), scope: { kind: "project", dir: await fs.realpath(cwd) } });
+      } else {
+        expect(reported).toMatchObject({ name: "sa-host-proof", restartCount: 0 });
+      }
       const refused = (await overlap.promise).message as { isError: boolean; content: unknown };
       expect(refused.isError).toBe(true);
       expect(JSON.stringify(refused.content)).toContain("already in progress");

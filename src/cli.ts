@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, requireMessengerCredentials } from "./config";
-import { inspectInstalledOmp, supportedOmp } from "./installed-omp";
+import { inspectInstalledOmp } from "./installed-omp";
 import { loadCredentials } from "./credentials";
 import type { Lane } from "./contracts";
 import { readLaneRows } from "./lane-rows";
@@ -61,7 +61,8 @@ discord-commands uses Discord REST only: dry-run by default, with no Gateway or 
 telegram-commands configures owner-scoped Telegram command menus; --language selects an optional Telegram language code.
 slack-commands configures /superagent-* commands through the app manifest; NAME identifies an app-configuration token environment variable, never a token argument.
 All command registration is read-only by default and requires --apply to change remote configuration. No polling, Socket Mode, or native model session is started.
-Requires an already installed stock OMP ${supportedOmp}. Same-process native TUI attach is not supported.
+Running a Host requires an installed stock OMP with stdio RPC (rpc-ui), session resume, and extensions.
+Same-process native TUI attach is not supported.
 
 Owner controls in chat (not shell commands):
   Send /help in Discord or Telegram. In Slack messages replace / with ! (e.g. !help, !status);

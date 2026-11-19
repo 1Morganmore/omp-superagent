@@ -26,7 +26,7 @@ async function confirmedOffline(): Promise<boolean> {
 }
 
 /** Called only by the Bun pipe owner, after profile bootstrap. Never spawns or upgrades the daemon. */
-export async function listServiceUnits(projectDir?: string): Promise<ServiceUnit[]> {
+export async function listServiceUnits(projectDir?: string, key?: string): Promise<ServiceUnit[]> {
   let units: UnitSnapshot[];
   const deadline = performance.now() + 2_000;
   for (;;) {
@@ -47,8 +47,8 @@ export async function listServiceUnits(projectDir?: string): Promise<ServiceUnit
       throw new Error("Cannot confirm native daemon service ownership");
     await Bun.sleep(25);
   }
-  return units.filter(unit => unit.kind === "proc"
+  return units.filter(unit => unit.kind === "proc" && (key === undefined || unit.key === key)
     && (projectDir === undefined || unit.scope.kind === "project" && unit.scope.dir === projectDir))
-    .map(({ id, scope, kind, key, owner, generation, startedAt, restartCount, state, exitedAt, pids, supervised }) =>
-      ({ id, scope, kind, key, owner, generation, startedAt, restartCount, state, exitedAt, pids, supervised }));
+    .map(({ id, key, owner, generation, startedAt, restartCount, state, exitedAt, pids, supervised }) =>
+      ({ id, key, owner, generation, startedAt, restartCount, state, exitedAt, pids, supervised }));
 }

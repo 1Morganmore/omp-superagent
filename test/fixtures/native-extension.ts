@@ -38,6 +38,13 @@ export default function nativeFixture(pi: ExtensionAPI): void {
           command: "printf 'must not replace the other session\\n'", name: "sa-host-foreign", pty: false,
         } }] };
       }
+      if (input?.includes("[native-foreign-service-owner]")
+        && !context.messages.some(message => message.role === "toolResult" && message.toolCallId === "native-foreign-owner")) {
+        return { content: [{ type: "toolCall", id: "native-foreign-owner", name: "bash", arguments: {
+          command: "while [ ! -f .sa-release-foreign ]; do sleep 0.05; done; printf 'original process exited\\n' > .sa-foreign-receipt",
+          name: "sa-host-foreign", pty: false,
+        } }] };
+      }
       if (input?.includes("[native-service-denial-proof]")
         && !context.messages.some(message => message.role === "toolResult" && message.toolCallId === "native-service-denied")) {
         return { content: [{ type: "toolCall", id: "native-service-denied", name: "bash", arguments: {

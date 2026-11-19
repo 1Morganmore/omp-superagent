@@ -332,12 +332,16 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## OMP: installed runtime and published SDK
 
-- SDK/API baseline: [can1357/oh-my-pi v18.22.0](https://github.com/can1357/oh-my-pi/tree/3e8cff3b7ce19a805c11a26a6dd1703066435851),
-  revision `3e8cff3b7ce19a805c11a26a6dd1703066435851`.
+- SDK/API baseline: [can1357/oh-my-pi v19.0.0](https://github.com/can1357/oh-my-pi/tree/57771ae562b9345e0579bceb2d68d585e3e6927e).
 - The operator installs OMP separately. This repository does not patch, build,
   or redistribute an OMP executable. Local native tests discover that installed
-  runtime by default. CI downloads the latest published upstream release binary
-  and verifies it against that release's checksum manifest.
+  runtime by default. CI verifies OMP release binaries against their checksum
+  manifests; PR and release runs cover OMP 18.22.2 and the SDK-matched release,
+  and also check OMP 18.20.3 on Ubuntu.
+- `src/host-broker-services.ts` implements a read-only subset of the
+  [stock OMP 18.22.2 launch broker protocol](https://github.com/can1357/oh-my-pi/tree/e1ae2cc998efd1ca151b46ebefc0e0dab6c23c63/packages/coding-agent/src/launch).
+  It uses the published native IPC and lock primitives without copying the broker
+  or starting one to observe it.
 - Published `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-tui`, and `pi-utils`
   dependencies are pinned in `package.json`; `bun.lock` records resolved packages
   and integrity data. Public SDK interfaces support this project's managed
@@ -345,12 +349,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 - `pi-tui` supplies native thinking-level helpers and the keyword matcher used by
   tests; no TUI implementation is copied into this project.
 - The live state projection in `src/host-extension.ts` adapts the `get_state`
-  object from [`rpc-mode.ts` at the baseline revision](https://github.com/can1357/oh-my-pi/blob/3e8cff3b7ce19a805c11a26a6dd1703066435851/packages/coding-agent/src/modes/rpc/rpc-mode.ts).
+  object from [`rpc-mode.ts` in v18.22.0](https://github.com/can1357/oh-my-pi/blob/3e8cff3b7ce19a805c11a26a6dd1703066435851/packages/coding-agent/src/modes/rpc/rpc-mode.ts).
   It reads the actual session through public getters so status remains observable
   during a serialized command. It conservatively reports unsettled while that
   command is pending; idle disposal still requires the stock RPC settlement check.
-  The async-work flag follows the public `wakeSources` getter, not the removed
-  `hasPendingAsyncWork()` method; separate owned-resource checks remain intact.
+  The async-work flag follows the running CLI's public `wakeSources` getter,
+  or `hasPendingAsyncWork()` on older CLIs that still use it for RPC. Separate
+  owned-resource checks remain intact.
   The upstream copyright and MIT terms below apply to this adapted projection.
 - The published SDK and the source artwork identified above retain the following
   MIT notice, also present in the installed package's `LICENSE` and the

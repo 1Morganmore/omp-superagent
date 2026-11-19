@@ -55,13 +55,15 @@ head; the head replies to the original conversation.
 
 ## Quick start
 
-Version **0.1.2** requires Git, **Bun >= 1.4.4**, a separately installed
-**OMP >= 19.0.0 and < 20.0.0**, and local Unix sockets. It pins the published SDK
-to **19.0.0**, from upstream `v19.0.0` commit
+This checkout requires Git, **Bun >= 1.4.4**, and local Unix sockets. Installing the
+package does not require OMP. To run a Host, install stock OMP separately; the
+CLI checks capabilities, not a version range. The tested releases are
+**OMP 18.20.3, 18.22.2, and 19.0.0**.
+The SDK stays pinned to **19.0.0**, from upstream `v19.0.0` commit
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e).
-`bun run test:ci` tests the installed OMP. To reproduce PR and release CI, run
-`bun run test:baseline`: it downloads the SDK-matched CLI into a temporary directory,
-checks its checksum and version, installs frozen dependencies, and runs the same suite.
+`bun run test:ci` tests the installed OMP. To reproduce CI, use
+`bun run test:baseline` for the SDK-matched CLI or `bash scripts/test-omp.sh v18.22.2`
+(or `v18.20.3`) for OMP 18. Each verifies the release binary and runs the same suite.
 The separate weekly/manual **OMP upstream compatibility** workflow tests the latest
 published CLI without falling back to the baseline or blocking releases.
 Windows is unsupported.
@@ -70,12 +72,13 @@ runtime/script wrappers are unsupported.
 
 ### 1. Install
 
-Upgrading from 0.1.1? Check any background services still owned by OMP 18 before
-switching to OMP 19; its daemon does not take over the previous broker's services.
+Before switching a Host from OMP 18 to 19, check its background services; the
+OMP 19 daemon does not take over the old broker's services.
 
-Install OMP using the
-[upstream instructions](https://github.com/can1357/oh-my-pi#installation) first,
-then install the CLI with Bun:
+The published **0.1.2** shown below predates this change and still requires OMP 19
+on `PATH` during install. To use the compatibility behavior above before a new
+release, use the source install below. To install OMP separately, see the
+[upstream instructions](https://github.com/can1357/oh-my-pi#installation).
 
 ```sh
 omp --version
@@ -83,15 +86,14 @@ bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
-`--trust` allows this package's OMP check and managed `omp-ulw` preparation scripts.
+`--trust` allows package lifecycle scripts, including managed `omp-ulw` preparation.
 Ensure `bun pm bin --global` is on `PATH`. Alternatively, with Bun on `PATH`:
 
 ```sh
 npm install --global omp-superagent@0.1.2
 ```
 
-Installation checks for a separately installed OMP before preparing the managed
-`omp-ulw` integration. Do not skip lifecycle scripts.
+Keep lifecycle scripts enabled for the managed `omp-ulw` integration.
 Published SDK packages and platform-native dependencies come from the package registry;
 no Rust toolchain, OMP source checkout, core patch, or native build is required.
 Dependency installation needs network access. It does not start a bot or replace OMP.

@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 const environment = { ...process.env };
 const manifest = JSON.parse(await fs.readFile(process.argv[2]!, "utf8")) as {
   options: Omit<HostOptions, "env">; args: string[]; configPath: string; nativeSocket: string;
+  processBackend: Awaited<ReturnType<typeof import("./installed-omp").inspectInstalledOmp>>["processBackend"];
 };
 const { options, args, configPath, nativeSocket } = manifest;
 // Select the same native profile before SDK imports initialize paths or stores.
@@ -124,11 +125,14 @@ control = new HostChannel(socket, socket, true);
 control.encoder.setProtocolVersion(2);
 // The standalone executable cannot load the npm daemon client's native addon in an
 // extension. Serve its read-only inventory over the already-connected private channel.
-const { listServiceUnits } = await import("./host-services");
+const listServiceUnits = manifest.processBackend === "broker"
+  ? (await import("./host-broker-services")).brokerServiceInventory(options.cwd)
+  : (await import("./host-services")).listServiceUnits;
 control.on("frame", (frame: Frame) => {
   if (frame.type !== "list_service_units" || typeof frame.id !== "string") return;
   const response = { type: "response", command: frame.type, id: frame.id };
-  void listServiceUnits(typeof frame.projectDir === "string" ? frame.projectDir : undefined)
+  void listServiceUnits(typeof frame.projectDir === "string" ? frame.projectDir : undefined,
+    typeof frame.serviceName === "string" ? frame.serviceName : undefined)
     .then(units => control.send({ ...response, success: true, data: { units } }),
       () => control.send({ ...response, success: false, error: "Native service ownership is unavailable" }))
     .catch(() => control.destroy());

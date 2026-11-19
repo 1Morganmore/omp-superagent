@@ -31,6 +31,6 @@ if [[ $actual != "omp/${tag#v}" ]]; then
   echo "OMP release $tag reported '$actual'; refusing to test a different version." >&2
   exit 1
 fi
-export PATH="$directory:$PATH"
+# Installing the package must not depend on the CLI under test.
 bun install --frozen-lockfile
-bun run test:ci
+PATH="$directory:$PATH" bun run test:ci
