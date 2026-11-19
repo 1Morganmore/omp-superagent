@@ -1,16 +1,17 @@
 # omp-superagent 설계
 
 이 문서는 **현재 구조와 안전·권한 계약**을 정의한다. 별도로 설치한 수정 없는
-OMP >= 18.22.0, < 19와 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
-하지 않는다. SDK/API 기준선은 stock OMP 18.22.0 소스 revision
-`3e8cff3b7ce19a805c11a26a6dd1703066435851`이다. native 테스트 실행 파일은 현재 설치에서
-발견하고 CI는 최신 공식 릴리즈를 checksum 검증 후 사용한다. 새 버전이 호환되지 않으면
-실패를 드러내며 과거 실행 파일로 우회하거나 테스트 중 SDK lockfile을 자동 변경하지 않는다.
+OMP >= 19.0.0, < 20.0.0과 공개 확장 API를 사용하며 OMP 소스 준비·코어 패치·native 빌드는
+하지 않는다. SDK/API 기준선은 stock OMP 19.0.0이며 upstream `v19.0.0` 커밋은
+[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
 비동기 wake 여부는 native RPC와 동일하게 `session.wakeSources !== undefined`로 읽고,
 소유 서비스·하위 작업·미확인 delivery의 별도 해제 차단은 유지한다.
 설치·일상 제어는 [운영 가이드](docs/OPERATIONS.md), 날짜·환경별 실행 결과와 이전 패치된
 18.20.0의 제한된 증거는 [릴리즈 검증 기록](docs/releases/0.1.0.md#verification-records)에 둔다.
-설계 계약이나 과거 통과 기록을 현재 운영 계정·제공자·attach 지원의 검증으로 해석하지 않는다.
+이전 SDK/API 기준선인 stock OMP 18.22.0의 소스 revision은
+`3e8cff3b7ce19a805c11a26a6dd1703066435851`이었다.
+이전 기준선의 기록은 OMP 19.0.0 런타임 검증이 아니며, 설계 계약이나 과거 통과 기록을
+현재 운영 계정·제공자·attach 지원의 검증으로 해석하지 않는다.
 
 ## 1. 목표와 기본 결정
 
@@ -156,12 +157,13 @@ Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서
 공식 원격은 `https://github.com/dbc-hbin/omp-ulw.git`이며 `upstream/ulw.json`에 기록한다.
 별도 설치한 OMP의 preinstall 검사 뒤 루트 postinstall 또는 명시적인
 `bun run prepare:ulw`로 ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
-SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-tui`, `pi-utils`
-18.22.0 패키지다.
+SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-natives`, `pi-tui`, `pi-utils`
+19.0.0 패키지다.
 0.1.1부터 npm 패키지로 같은 소스·역할 스킬·설치 자원을 배포한다.
 `bun add --global --trust omp-superagent@0.1.1` 또는 Bun이 PATH에 있는 환경의
-`npm install --global omp-superagent@0.1.1`로 `omp-sa`를 설치한다. Bun의 `--trust`는
-기존 OMP 검사·ULW 준비 lifecycle을 허용하며 별도의 실행 backend를 추가하지 않는다.
+`npm install --global omp-superagent@0.1.1`로 `omp-sa`를 설치한다. 이 고정 버전 예는
+OMP >= 18.20.2, < 19를 요구하는 기존 릴리즈를 설치하며 현재 소스를 설치하지 않는다.
+Bun의 `--trust`는 기존 OMP 검사·ULW 준비 lifecycle을 허용하며 별도의 실행 backend를 추가하지 않는다.
 설정·자격 증명·세션은 패키지에 포함하지 않고 사용자 지정 경로에 보존한다.
 설치 때 원격 기본 브랜치 HEAD를 확인한다. production Gateway 시작에는 이미 유효한
 active 설치가 필요하며 검증 뒤 IPC/head를 먼저 시작한다. startup 원격 확인은 백그라운드로
@@ -1188,10 +1190,15 @@ DSH의 활성 슬롯 개념을 참고하되, 슬롯 반환과 메모리 회수�
 확인하고 공개 `ensureOnDisk`로 journal을 materialize한다. 실제 세션의 미해결 UI·비동기 작업·
 admitted/post-prompt 작업·소유 서비스를 대조한 뒤 `beginDispose`와 shutdown을 진행한다.
 필수 `pendingUiRequests`·`hasOwnedRunningWork`가 없으면 유휴로 추측하지 않는다.
-서비스의 terminal broker 행만으로 완료 전달을 가정하지 않는다. 정확한 owner·daemon ID·
-시작 시각·재시작 횟수·종료 상태/시각에 대응하는 native 완료 기록과 비어 있는 yield queue를
-확인한다. 교체·인계된 세대의 전달 이력을 확인할 수 없으면 보류한다. stock 공개 API에는
-broker의 과거 미전달 완료 목록이 없으므로 최신 행 하나로 과거 세대까지 처리됐다고 판단하지 않는다.
+사용자별 OMP 데몬을 기동하지 않고 조회하며, 이 Host의 세션과 자식 세션이 소유한 `proc`만 대조한다.
+Bun stdio owner가 공개 SDK로 조회해 기존 비공개 제어 소켓으로 수명 정보만 반환한다. 데몬의 명령줄이나 로그를
+세션에 복사하지 않으며, 모델 변경·종료 여부는 여전히 관리 확장이 native 세션 기록과 대조해 판단한다.
+이름 있는 Bash 서비스는 실행 전에 같은 프로젝트·이름으로 실행 중인 다른 세션의 서비스가 있으면 거부한다.
+한 Host 안의 동시 실행은 예약으로 막지만, 별도 프로세스가 조회와 실행 사이에 같은 이름을 차지하는 것까지
+원자적으로 막지는 못한다. stock 데몬의 서비스 시작 API에는 기존 소유자를 조건으로 하는 교체 연산이 없다.
+데몬의 종료 행이나 오프라인 저장소만으로 완료 전달을 가정하지 않는다. owner·unit ID·generation·
+시작 시각·재시작 횟수·종료 상태/시각이 일치하는 native `launch-completion` 기록과 비어 있는
+yield queue를 확인한다. 같은 이름의 서비스가 교체돼 이전 세대의 완료를 입증할 수 없으면 회수를 보류한다.
 소유권 불명·오래된 socket은 자동 삭제하거나
 중복 Host로 대체하지 않고, 실제 소유권 대조 전까지 상주 예산에 남긴다.
 shutdown ACK는 native 프로세스 종료 증거가 아니다. unload/stop의 슬롯·소유권 해제는 실제

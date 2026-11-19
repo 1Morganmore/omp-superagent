@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
+import { parseSessionEntries, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { startHost, HostConnection, type HostFrame, type HostOptions } from "../src/host";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { serviceCompletionRecorded } from "../src/host-protocol";
@@ -60,6 +60,48 @@ async function checkpoint(connection: HostConnection, token: string, id: string)
   } finally { event.cancel(); completion.cancel(); }
 }
 
+async function proveForeignServiceSurvives(options: HostOptions, connection: HostConnection): Promise<void> {
+  // A different client holds its own lease in this test's isolated daemon.
+  // Its exact live unit must still be present after stock Bash has been denied.
+  const foreign = Bun.spawn([process.execPath, "--no-env-file", "-e", `
+    import {probeDaemon} from "@oh-my-pi/pi-coding-agent/daemon/client";
+    const client = await probeDaemon();
+    if (!client) throw new Error("The isolated native daemon is not running");
+    try {
+      const dir = ${JSON.stringify(options.cwd)};
+      const { unit } = await client.open({
+        kind: "proc", scope: { kind: "project", dir }, key: "sa-host-foreign", owner: "independent-fixture-session",
+        proc: { application: process.execPath, args: ["-e", "await Bun.sleep(60000)"], env: {}, cwd: dir, pty: false },
+        awaitReady: false,
+      });
+      console.log("ready");
+      for await (const _ of process.stdin) break;
+      const current = (await client.request({ op: "describe", unit: unit.id })).unit;
+      if (current.generation !== unit.generation || current.state !== "running" || current.pids[0] !== unit.pids[0])
+        throw new Error("The independent service was replaced or stopped");
+    } finally { client.close(); }
+  `], { cwd: path.resolve(import.meta.dir, ".."), env: options.env, stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+  const reader = foreign.stdout.getReader();
+  const refused = observe(connection, frame => frame.type === "message_end"
+    && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "native-foreign-service");
+  const settled = observe(connection, frame => frame.type === "prompt_result" && frame.id === "native-foreign-service-proof");
+  try {
+    expect(new TextDecoder().decode((await reader.read()).value).trim()).toBe("ready");
+    expect(await connection.request({ type: "prompt", message: "[native-foreign-service-proof] Try the named-service collision fixture." },
+      "native-foreign-service-proof")).toMatchObject({ success: true });
+    const message = (await refused.promise).message as { isError: boolean; content: unknown };
+    expect(message.isError).toBe(true);
+    expect(JSON.stringify(message.content)).toContain("belongs to another session");
+    expect(await settled.promise).toMatchObject({ status: "completed", agentInvoked: true });
+    expect((await connection.client.getState()).hasOwnedRunningWork).toBe(false);
+  } finally {
+    refused.cancel(); settled.cancel(); reader.releaseLock();
+    foreign.stdin.end();
+    await foreign.exited;
+  }
+  expect(await foreign.exited).toBe(0);
+}
+
 nativeTest("actual OMP preserves approvals and structured owner decisions across one persistent host", async () => {
   const command = await nativeTestCommand();
   const nativesDirectory = process.env.OMP_TEST_NATIVES_DIR;
@@ -74,6 +116,7 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
   for (const directory of [home, agentDirectory, cwd]) await fs.mkdir(directory, { mode: 0o700 });
   const configPath = path.join(agentDirectory, "config.yml");
   await fs.writeFile(configPath, JSON.stringify({ task: { maxConcurrency: 1 }, disabledProviders: nativeDisabledProviders,
+    bash: { patterns: [{ match: "printf 'superagent-service-completed\\n'", approval: "prompt" }] },
     eval: { js: false, py: false } }), { mode: 0o600 });
   const options: HostOptions = {
     command,
@@ -86,12 +129,14 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
       ...(nativesDirectory ? { PI_NATIVES_DIR: nativesDirectory } : {}),
       XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
       XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state"),
+      OMP_DAEMON_DIR: path.join(root, "daemon"),
       TMPDIR: root, TMP: root, TEMP: root,
     },
     managedUlwPath: path.resolve(import.meta.dir, "fixtures/managed-ulw"),
     model: "socket-host-smoke/local", subagentConcurrency: 1,
   };
   let child: { pid: number } | undefined;
+  let childExited = false;
   let succeeded = false;
   const connections = new Set<HostConnection>();
   try {
@@ -181,23 +226,61 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
     }
     expect(decisionProof).toHaveLength(2);
     await fs.writeFile(path.join(root, "native-decision-proof.json"), JSON.stringify(decisionProof, null, 2));
+    const isServiceApproval = (frame: HostFrame) => frame.type === "extension_ui_request" && frame.method === "select"
+      && Array.isArray(frame.options) && frame.options.includes("Deny") && String(frame.title).includes("superagent-service-completed");
+    const deniedDialog = observe(second, isServiceApproval);
+    const denial = observe(second, frame => frame.type === "message_end"
+      && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "native-service-denied");
+    const denialResult = observe(second, frame => frame.type === "prompt_result" && frame.id === "native-service-denial-proof");
+    try {
+      expect(await second.request({ type: "prompt", message: "[native-service-denial-proof] Request the named service once." },
+        "native-service-denial-proof")).toMatchObject({ success: true });
+      const dialog = await deniedDialog.promise;
+      expect(typeof dialog.id).toBe("string");
+      second.uiResponse(dialog.id as string, { value: "Deny" });
+      expect((await denial.promise).message).toMatchObject({ isError: true,
+        content: [{ type: "text", text: "Tool call denied by user: bash" }] });
+      expect(await denialResult.promise).toMatchObject({ status: "completed", agentInvoked: true });
+      await second.client.waitForSettled(30_000);
+      expect((await second.client.getState()).hasOwnedRunningWork).toBe(false);
+    } finally { deniedDialog.cancel(); denial.cancel(); denialResult.cancel(); }
+    const approvedDialog = observe(second, isServiceApproval);
     const service = observe(second, frame => frame.type === "message_end"
       && (frame.message as { customType?: string } | undefined)?.customType === "launch-completion");
+    const overlap = observe(second, frame => frame.type === "message_end"
+      && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "native-service-overlap");
+    const blank = observe(second, frame => frame.type === "message_end"
+      && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "native-service-blank");
     const serviceResult = observe(second, frame => frame.type === "prompt_result" && frame.id === "native-service-proof");
     try {
       expect(await second.request({ type: "prompt", message: "[native-service-proof] Run the local finite named-service fixture." },
         "native-service-proof")).toMatchObject({ success: true });
+      const dialog = await approvedDialog.promise;
+      expect(typeof dialog.id).toBe("string");
+      expect(dialog.options).toContain("Approve");
+      second.uiResponse(dialog.id as string, { value: "Approve" });
       const completion = (await service.promise).message as { details: { daemons: Record<string, unknown>[] } };
-      expect(completion.details.daemons).toHaveLength(1);
+      expect(completion.details.daemons).toEqual([expect.objectContaining({
+        kind: "proc", key: "sa-host-proof", owner: initial.sessionId, state: "exited", pids: [],
+        generation: expect.any(String), scope: { kind: "project", dir: await fs.realpath(cwd) },
+      })]);
+      const refused = (await overlap.promise).message as { isError: boolean; content: unknown };
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toContain("already in progress");
+      const finite = (await blank.promise).message as { isError?: boolean; content: unknown };
+      expect(finite.isError).not.toBe(true);
+      expect(JSON.stringify(finite.content)).toContain("ordinary finite Bash");
       expect(await serviceResult.promise).toMatchObject({ status: "completed", agentInvoked: true });
       await second.client.waitForSettled(30_000);
       expect((await second.client.getState()).hasOwnedRunningWork).toBe(false);
-    } finally { service.cancel(); serviceResult.cancel(); }
+    } finally { approvedDialog.cancel(); service.cancel(); overlap.cancel(); blank.cancel(); serviceResult.cancel(); }
+    await proveForeignServiceSurvives(options, second);
     const finalState = await second.client.getState();
     expect(finalState).toMatchObject({ sessionId: initial.sessionId, hostPid: child.pid, pendingUiRequests: [], isSettled: true, hasPendingAsyncWork: false, queuedMessageCount: 0 });
 
     expect(await second.request({ type: "shutdown_host" })).toMatchObject({ success: true });
     await second.exited;
+    childExited = true;
     expect(JSON.parse(await fs.readFile(`${options.socketPath}.exit.json`, "utf8"))).toMatchObject({
       pid: child.pid, sessionId: initial.sessionId, code: 0, signal: null, persisted: true, observationsFlushed: true,
     });
@@ -223,14 +306,34 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
     const daemon = completion?.type === "custom_message"
       ? (completion.details as { daemons: Record<string, unknown>[] }).daemons[0]! : {};
     expect(serviceCompletionRecorded(daemon, entries)).toBe(true);
+    expect(serviceCompletionRecorded({ ...daemon, generation: crypto.randomUUID() }, entries)).toBe(false);
+    const serviceRecords = entries.flatMap(entry => entry.type === "custom"
+      && entry.customType === "superagent_service_generation" ? [entry.data as HostFrame] : []);
+    expect(serviceRecords.filter(record => record.toolCallId === "native-service-denied")).toEqual([
+      expect.objectContaining({ phase: "attempt", owner: initial.sessionId, name: "sa-host-proof" }),
+      expect.objectContaining({ phase: "result", owner: initial.sessionId, name: "sa-host-proof", notLaunched: "approval_denied" }),
+    ]);
+    expect(serviceRecords.some(record => record.toolCallId === "native-service-blank" || record.name === "sa-host-foreign")).toBe(false);
     await expect(fs.lstat(options.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const legacyFile = path.join(root, "legacy.jsonl");
+    const legacy = SessionManager.create(cwd, root);
+    try {
+      await legacy.setSessionFile(legacyFile);
+      await legacy.ensureOnDisk();
+      legacy.appendCustomEntry("superagent_service_tracking", { rootSessionId: legacy.getSessionId(), known: false });
+      legacy.flushSync();
+    } finally { await legacy.close(); }
+    await expect(startHost({ ...options, sessionFile: legacyFile, socketPath: path.join(root, "legacy.sock"),
+      env: { ...options.env, OMP_DAEMON_DIR: path.join(root, "empty-daemon") } }))
+      .rejects.toThrow("Native owned work or durable observations cannot be authoritatively established; residency remains held");
     succeeded = true;
   } catch (cause) {
     const tail = await fs.readFile(options.logPath, "utf8").then(text => text.slice(-16_384), () => "<native log unavailable>");
     throw new Error(`${cause instanceof Error ? cause.message : String(cause)}\nNative artifacts retained: ${root}\nNative log tail:\n${tail}`, { cause });
   } finally {
     for (const connection of connections) await connection.close();
-    if (child?.pid) { try { process.kill(child.pid, "SIGKILL"); } catch {} }
+    if (child?.pid && !childExited) { try { process.kill(child.pid, "SIGKILL"); } catch {} }
     if (succeeded) await fs.rm(root, { recursive: true, force: true });
   }
 }, 90_000);

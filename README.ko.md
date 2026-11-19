@@ -43,12 +43,16 @@ Gateway는 메신저 연결·수신 장부·헤드 수명을 관리하는 데몬
 
 ## 빠른 시작
 
-Git, **Bun >= 1.4.4**, 미리 설치된 **OMP >= 18.22.0, < 19**, 로컬 Unix socket 지원 환경이 필요합니다.
-SDK 기준은 **18.22.0**입니다. native 테스트는 현재 설치된 OMP를 자동 선택하며,
+현재 소스에서 설치하려면 Git, **Bun >= 1.4.4**, 별도로 설치한 **OMP >= 19.0.0, < 20.0.0**,
+로컬 Unix socket 지원 환경이 필요합니다. 배포된 SDK **19.0.0**의 upstream `v19.0.0` 커밋은
+[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)입니다.
 CI는 최신 공식 릴리즈를 checksum 확인 후 사용합니다. 오래된 런타임으로 자동 우회하지 않습니다.
 Windows는 지원하지 않습니다.
 
 ### 1. 설치
+
+아래의 `omp-superagent@0.1.1` 명령은 현재 소스가 아닌 기존 릴리즈를 설치합니다.
+해당 릴리즈는 OMP >= 18.20.2, < 19가 필요합니다.
 
 [공식 설치 안내](https://github.com/can1357/oh-my-pi#installation)에 따라 OMP를 먼저 설치한 뒤,
 Bun으로 CLI를 설치합니다.
@@ -177,7 +181,8 @@ bun run test:ci
 
 오프라인 native/PTY 범위·필요 도구·로컬 패키징과 게시 경계는
 [개발자 검증·소스 릴리즈 절차](docs/OPERATIONS.md#6-개발자-검증)를 참고하세요.
-[실행 결과와 한계](docs/releases/0.1.0.md#verification-records)는 실계정·운영 준비 완료의 주장이 아닙니다.
+[실행 결과와 한계](docs/releases/0.1.0.md#verification-records)는 시험한 버전에만 적용됩니다.
+OMP 19.0.0 런타임·실계정·운영 준비 완료의 검증 근거가 아닙니다.
 
 ## 문서와 출처
 

@@ -1,15 +1,16 @@
 import * as fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import * as net from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { collectReports, collectScope, targetScope } from "@oh-my-pi/pi-coding-agent/cli/ps-data";
+import type { UnitScope } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { lookup as lookupSetting } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { HostChannel, serviceCompletionRecorded, type Frame } from "./host-protocol";
+import { HostChannel, serviceCompletionRecorded, type Frame, type ServiceUnit } from "./host-protocol";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -17,6 +18,28 @@ import type { RpcAbortAndRestoreQueueResult, RpcSessionState } from "@oh-my-pi/p
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { LanePresetSnapshot } from "./contracts";
+
+const terminalService = (state: ServiceUnit["state"]) => state === "exited" || state === "failed";
+const generationKey = (value: Frame | ServiceUnit) =>
+  JSON.stringify([value.owner, value.id, value.generation, value.startedAt, value.restartCount]);
+const serviceGeneration = ({ owner, id, generation, startedAt, restartCount }: ServiceUnit) =>
+  ({ owner, id, generation, startedAt, restartCount });
+const serviceName = (value: unknown) => typeof value === "string" ? value.trim() || undefined : undefined;
+const serviceOwner = ({ agent, sessionManager }: ExtensionContext) => {
+  const id = sessionManager.getSessionId();
+  return agent.kind === "sub" && agent.id === "advisor" ? `${id}-advisor` : id;
+};
+
+// Root and subagent extension factories in one native process share this pipe owner.
+let ownerChannel: HostChannel | undefined;
+const serviceReservations = new Set<string>();
+async function observeServices(scope?: UnitScope): Promise<ServiceUnit[]> {
+  if (!ownerChannel || scope && scope.kind !== "project") throw new Error("No native service observation channel");
+  const response = await ownerChannel.request({ type: "list_service_units", projectDir: scope?.dir });
+  const data = response.data as { units?: ServiceUnit[] } | undefined;
+  if (!response.success || !Array.isArray(data?.units)) throw new Error("Native service ownership is unavailable");
+  return data.units;
+}
 
 /** Runs inside the installed native host. All native objects come from injected pi.pi. */
 export default function hostExtension(pi: ExtensionAPI): void {
@@ -31,9 +54,13 @@ export default function hostExtension(pi: ExtensionAPI): void {
   let observationHeld = false;
   let runOrdinal = 0;
   let instanceKey: string | undefined;
-  const serviceStarts = new Map<string, { name: string; cwd: string; owner: string }>();
+  type ServiceStart = {
+    readonly name: string; readonly scope: UnitScope; readonly owner: string;
+    readonly sessionId: string; readonly toolCallId: string;
+    readonly previousIds: ReadonlySet<string>; readonly reservation: string;
+  };
+  const serviceStarts = new Map<string, ServiceStart>();
   const interrupts = new Map<string, Promise<PromiseSettledResult<void>[]>>();
-  const generationKey = (value: Frame) => JSON.stringify([value.owner, value.id, value.startedAt, value.restartCount]);
   const rootSession = () => {
     const root = pi.pi.AgentRegistry.global().get(pi.pi.MAIN_AGENT_ID)?.session;
     if (!(root instanceof pi.pi.AgentSession)) throw new Error("Native root session is unavailable");
@@ -45,6 +72,21 @@ export default function hostExtension(pi: ExtensionAPI): void {
       rootSessionId: root.sessionManager.getSessionId(), ...data,
     });
     root.sessionManager.flushSync();
+  };
+  const releaseServiceStart = (key: string, start: ServiceStart) => {
+    if (serviceStarts.get(key) !== start) return;
+    serviceStarts.delete(key);
+    serviceReservations.delete(start.reservation);
+  };
+  const finishWithoutServiceResult = (key: string, noLaunch?: "approval_denied" | "not_dispatched") => {
+    const start = serviceStarts.get(key);
+    if (!start) return;
+    try {
+      // An unclassified terminal result ends the in-process reservation but
+      // remains durably unknown, never "not launched".
+      serviceObservation({ phase: "result", toolCallId: start.toolCallId, owner: start.owner, name: start.name,
+        ...(noLaunch ? { notLaunched: noLaunch } : { uncertain: true }) });
+    } finally { releaseServiceStart(key, start); }
   };
   // Registry slots differ between the standalone executable and npm SDK.
   // Mirror native layers into this SDK before using any imported setting handle.
@@ -119,7 +161,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
         agents.add(row.agentId!); changed = true;
       }
     }
-    const owners = new Set<string>([identity.id, ...agents]);
+    const owners = new Set<string>([identity.id]);
     const ownerFiles = new Map<string, string>();
     if (identity.file) ownerFiles.set(identity.id, identity.file);
     for (const ref of refs) if (agents.has(ref.id) && ref.session)
@@ -142,17 +184,23 @@ export default function hostExtension(pi: ExtensionAPI): void {
       owners.add(id);
       ownerFiles.set(id, ref.sessionFile);
     }
-    const reports = await collectReports(true, {});
+    // Native advisor tools use the same transcript but an owner derived from its session ID.
+    for (const id of [...owners]) {
+      const advisor = `${id}-advisor`;
+      owners.add(advisor);
+      const file = ownerFiles.get(id);
+      if (file) ownerFiles.set(advisor, file);
+    }
+    const scopedServices = async () => (await observeServices()).filter(unit => unit.owner && owners.has(unit.owner));
+    const services = await scopedServices();
     const currentRefs = registry.list();
     if (exact().ref !== identity.ref || currentRefs.length !== refs.length
       || refs.some((ref, index) => currentRefs[index] !== ref))
       throw new Error("Native ownership tree changed during service observation");
-    const services = reports.flatMap(report => report.daemons
-      .filter(row => owners.has(row.snapshot.owner ?? ""))
-      .map(row => ({ ...row, brokerPid: report.scope.brokerPid })));
-    // An offline broker's persisted downgrade is not an authoritative live observation.
-    const servicesUnknown = services.some(row => !row.supervised || !row.brokerPid || !row.snapshot.owner);
-    const liveServices = services.some(row => !["exited", "failed"].includes(row.snapshot.state));
+    // Offline/unsupervised live rows are not authoritative; terminal rows still
+    // need their exact durable completion, which an offline downgrade cannot supply.
+    const servicesUnknown = services.some(unit => !unit.supervised && !terminalService(unit.state));
+    const liveServices = services.some(unit => !terminalService(unit.state));
     const deliveriesPending = (session: InstanceType<typeof pi.pi.AgentSession>) => {
       const delivery = session.getAsyncJobSnapshot({ recentLimit: 0 })?.delivery;
       return !!delivery && (delivery.delivering || delivery.queued > 0 || delivery.pendingJobIds.length > 0);
@@ -163,16 +211,20 @@ export default function hostExtension(pi: ExtensionAPI): void {
       && (registry.isRunning(ref) || ref.session instanceof pi.pi.AgentSession
         && (ref.session.wakeSources !== undefined || ref.session.hasAdmittedSubmission || ref.session.hasPostPromptWork
           || ref.session.isBusyForSnapshot || ref.session.yieldQueue.has() || deliveriesPending(ref.session))));
-    const trackingKnown = journal.some(entry => entry.type === "custom" && entry.customType === "superagent_service_tracking"
-      && (entry.data as Frame)?.rootSessionId === identity.id && (entry.data as Frame)?.known === true);
+    const tracking = journal.flatMap(entry => entry.type === "custom" && entry.customType === "superagent_service_tracking"
+      && (entry.data as Frame)?.rootSessionId === identity.id ? [(entry.data as Frame).known] : []);
+    const trackingKnown = tracking.length > 0 && tracking.every(known => known === true);
     const generations = journal.flatMap(entry => entry.type === "custom" && entry.customType === "superagent_service_generation"
       && (entry.data as Frame)?.rootSessionId === identity.id ? [entry.data as Frame] : []);
     const serviceEntries = new Map<string, readonly unknown[]>();
-    for (const owner of new Set(services.map(row => row.snapshot.owner!).concat(
+    for (const owner of new Set(services.map(unit => unit.owner!).concat(
       generations.map(row => (row.daemon as Frame | undefined)?.owner).filter((owner): owner is string => typeof owner === "string")))) {
       const file = ownerFiles.get(owner);
       if (!file) continue;
-      const live = refs.find(ref => ref.session?.sessionManager.getSessionId() === owner)?.session;
+      const live = refs.find(ref => {
+        const id = ref.session?.sessionManager.getSessionId();
+        return id !== undefined && (id === owner || `${id}-advisor` === owner);
+      })?.session;
       if (!drain && live instanceof pi.pi.AgentSession) {
         serviceEntries.set(owner, live.sessionManager.getEntries());
         continue;
@@ -187,16 +239,16 @@ export default function hostExtension(pi: ExtensionAPI): void {
     const recorded = (daemon: Frame) => serviceCompletionRecorded(daemon, serviceEntries.get(String(daemon.owner)) ?? []);
     const tracked = generations.filter(row => row.daemon && typeof row.daemon === "object").map(row => row.daemon as Frame);
     const knownKeys = new Set(tracked.map(generationKey));
-    const serviceDeliveryUnknown = generations.some(row => row.uncertain === true)
+    const serviceDeliveryUnknown = !trackingKnown || knownKeys.size !== tracked.length
+      || generations.some(row => row.uncertain === true)
       || generations.some(row => row.phase === "attempt" && !generations.some(result =>
-        result.phase === "result" && result.toolCallId === row.toolCallId))
+        result.phase === "result" && result.owner === row.owner && result.toolCallId === row.toolCallId))
       || generations.some(row => Array.isArray(row.previous) && row.previous.some(value => {
         const previous = value as Frame;
         return owners.has(String(previous.owner)) && !knownKeys.has(generationKey(previous));
       }))
       || tracked.some(daemon => {
-        if (services.some(row => generationKey(row.snapshot as unknown as Frame) === generationKey(daemon)
-          && !["exited", "failed"].includes(row.snapshot.state))) return false;
+        if (services.some(unit => generationKey(unit) === generationKey(daemon) && !terminalService(unit.state))) return false;
         const entries = serviceEntries.get(String(daemon.owner)) ?? [];
         // A recorded terminal completion supplies the final snapshot even when
         // the broker now exposes a replacement generation under the same name.
@@ -208,12 +260,11 @@ export default function hostExtension(pi: ExtensionAPI): void {
               && serviceCompletionRecorded(value as Frame, entries));
         });
       })
-      || services.some(row => !trackingKnown || !knownKeys.has(generationKey(row.snapshot as unknown as Frame))
-        || ["exited", "failed"].includes(row.snapshot.state) && !recorded(row.snapshot as unknown as Frame));
+      || services.some(unit => !knownKeys.has(generationKey(unit))
+        || terminalService(unit.state) && !recorded({ ...unit }));
     if (drain) {
-      const refreshed = (await collectReports(true, {})).flatMap(report => report.daemons
-        .filter(row => owners.has(row.snapshot.owner ?? "")).map(row => row.snapshot));
-      if (!isDeepStrictEqual(services.map(row => row.snapshot), refreshed))
+      const refreshed = await scopedServices();
+      if (!isDeepStrictEqual(services, refreshed))
         throw new Error("Native services changed while their durable completion evidence was drained");
     }
     if (!isDeepStrictEqual(refEpoch, registry.list().map(ref =>
@@ -372,24 +423,74 @@ export default function hostExtension(pi: ExtensionAPI): void {
   });
   pi.on("tool_call", async (event, ctx) => {
     const input = event.input as Frame;
-    if (event.toolName !== "bash" || typeof input.name !== "string") return;
-    const start = { name: input.name, cwd: ctx.cwd, owner: ctx.sessionManager.getSessionId() };
-    serviceStarts.set(event.toolCallId, start);
-    const report = await collectScope(await targetScope({ dir: ctx.cwd }));
-    serviceObservation({ phase: "attempt", toolCallId: event.toolCallId, ...start,
-      previous: report.daemons.filter(row => row.snapshot.name === start.name).map(row => row.snapshot) });
+    if (event.toolName !== "bash") return;
+    const name = serviceName(input.name);
+    if (!name) return;
+    const owner = serviceOwner(ctx);
+    let dir: string;
+    try { dir = realpathSync(ctx.cwd); }
+    catch { return { block: true, reason: "The named service's project scope could not be established" }; }
+    const scope = { kind: "project", dir } as const;
+    const reservation = JSON.stringify([socketPath, dir, name]);
+    const key = JSON.stringify([owner, event.toolCallId]);
+    if (serviceReservations.has(reservation) || serviceStarts.has(key))
+      return { block: true, reason: "A named service launch for this project and name is already in progress" };
+    serviceReservations.add(reservation);
+    let admitted = false;
+    try {
+      const previous = (await observeServices(scope)).filter(unit => unit.key === name);
+      if (previous.some(unit => !unit.supervised && (!terminalService(unit.state) || unit.exitedAt === undefined)))
+        return { block: true, reason: "The existing named service's live state could not be established" };
+      if (previous.some(unit => !terminalService(unit.state) && unit.owner !== owner))
+        return { block: true, reason: "A live named service in this project belongs to another session" };
+      serviceObservation({ phase: "attempt", toolCallId: event.toolCallId, name, cwd: dir, owner,
+        previous: previous.map(serviceGeneration) });
+      serviceStarts.set(key, { name, scope, owner, reservation, sessionId: ctx.sessionManager.getSessionId(),
+        toolCallId: event.toolCallId, previousIds: new Set(previous.map(unit => unit.id)) });
+      admitted = true;
+    } catch {
+      return { block: true, reason: "Named service ownership could not be established before launch" };
+    } finally {
+      if (!admitted) serviceReservations.delete(reservation);
+    }
+  });
+  pi.on("tool_approval_resolved", (event, ctx) => {
+    if (event.toolName !== "bash" || event.approved !== false) return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (event.sessionId && event.sessionId !== sessionId) return;
+    // Advisor calls share the primary runner for approval, which does not
+    // carry the advisor identity on this event. Require one exact session/call.
+    const starts = [...serviceStarts].filter(([, start]) =>
+      start.sessionId === sessionId && start.toolCallId === event.toolCallId);
+    const [matched] = starts;
+    if (starts.length === 1 && matched) finishWithoutServiceResult(matched[0], "approval_denied");
+  });
+  pi.on("message_end", (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "toolResult" || message.toolName !== "bash") return;
+    const details = message.details as Frame | undefined;
+    const notDispatched = message.isError && details?.__synthetic === true && details.executed === false;
+    finishWithoutServiceResult(JSON.stringify([serviceOwner(ctx), message.toolCallId]),
+      notDispatched ? "not_dispatched" : undefined);
   });
   pi.on("tool_result", async (event, ctx) => {
-    const start = serviceStarts.get(event.toolCallId);
+    const owner = serviceOwner(ctx);
+    const key = JSON.stringify([owner, event.toolCallId]);
+    const start = serviceStarts.get(key);
     if (!start) return;
-    serviceStarts.delete(event.toolCallId);
     const details = event.details as { service?: { name?: string; pid?: number } } | undefined;
-    const report = await collectScope(await targetScope({ dir: start.cwd }));
-    const row = report.daemons.find(row => row.snapshot.name === start.name && row.snapshot.owner === start.owner
-      && row.snapshot.pid === details?.service?.pid);
-    serviceObservation({ phase: "result", toolCallId: event.toolCallId, owner: ctx.sessionManager.getSessionId(),
-      name: start.name, uncertain: event.isError || !row?.supervised || !report.scope.brokerPid || !details?.service,
-      ...(row ? { daemon: row.snapshot } : {}) });
+    // An exited proc has no PID on the new board. A fresh unit can be tracked
+    // without that PID, but still needs its exact durable launch completion.
+    try {
+      const unit = details?.service?.name === start.name
+        ? (await observeServices(start.scope)).find(unit => unit.supervised && unit.key === start.name
+          && unit.owner === start.owner && unit.restartCount === 0 && !start.previousIds.has(unit.id)
+          && (terminalService(unit.state) || unit.pids[0] !== undefined && unit.pids[0] === details.service?.pid))
+        : undefined;
+      if (serviceStarts.get(key) !== start) return;
+      serviceObservation({ phase: "result", toolCallId: event.toolCallId, owner,
+        name: start.name, uncertain: event.isError || !unit, ...(unit ? { daemon: serviceGeneration(unit) } : {}) });
+    } finally { releaseServiceStart(key, start); }
   });
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.agent.kind !== "main") {
@@ -416,15 +517,18 @@ export default function hostExtension(pi: ExtensionAPI): void {
           entry.type === "custom_message" && entry.customType === "launch-completion"
           || entry.type === "message" && entry.message.role === "assistant" && Array.isArray(entry.message.content)
             && entry.message.content.some(part => part.type === "toolCall" && part.name === "bash"
-              && typeof (part.arguments as Frame).name === "string")),
+              && serviceName((part.arguments as Frame).name) !== undefined)),
       });
       identity.session.sessionManager.flushSync();
     }
     server = net.createServer(socket => {
+      if (ownerChannel) { socket.destroy(); return; }
       const channel = new HostChannel(socket, socket, true);
+      ownerChannel = channel;
+      void channel.exited.then(() => { if (ownerChannel === channel) ownerChannel = undefined; });
       channel.encoder.setProtocolVersion(2);
       channel.on("frame", (command: Frame) => {
-        if (typeof command.id !== "string") return;
+        if (command.type === "response" || typeof command.id !== "string") return;
         void handle(command).then(data => {
           channel.send(command.type === "interrupt_maintenance" && command.restoreQueue === true
             ? fitAbortAndRestoreQueueResponse(command.id as string, data as RpcAbortAndRestoreQueueResult, channel.encoder.maxResponseBytes)

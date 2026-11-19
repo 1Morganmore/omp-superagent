@@ -13,7 +13,7 @@ const session = SessionManager.create(cwd, path.dirname(original));
 await session.setSessionFile(original);
 session.appendMessage({ role: "user", content: "Existing lane evidence", timestamp: Date.now() });
 await session.ensureOnDisk();
-const artifact = await session.saveArtifact("Original nested evidence", "test");
+const artifact = await session.saveArtifact("Original nested evidence");
 assert(artifact);
 const id = session.getSessionId();
 await session.close();

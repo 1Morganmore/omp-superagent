@@ -159,12 +159,18 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 
 ## 1. 로컬 준비 — 봇은 시작하지 않음
 
-필요 조건은 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`), 별도 설치한 수정 없는
-OMP 18.22.0 이상·major 18, 로컬 Unix socket을 지원하는 환경이다. SDK/API 기준선은 OMP
-18.22.0 소스 revision `3e8cff3b7ce19a805c11a26a6dd1703066435851`이며 native 검증은 현재 설치된
-실행 파일을 사용한다.
+현재 소스에서 설치하려면 Git, **Bun >= 1.4.4**(`packageManager: bun@1.4.4`), 별도 설치한 수정 없는
+**OMP >= 19.0.0, < 20.0.0**, 로컬 Unix socket을 지원하는 환경이 필요하다. SDK/API 기준선은
+OMP 19.0.0이며 upstream `v19.0.0` 커밋은
+[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
+native 검증은 현재 설치된 실행 파일을 사용한다. 이 소스 기준선이나 이전 버전의 검증 결과는
+OMP 19.0.0 런타임에서 새로 실행한 검증을 뜻하지 않는다.
+18에서 19로 올리기 전에 기존 Host가 맡은 백그라운드 서비스를 확인한다. OMP 19의 사용자별
+데몬은 이전 브로커의 서비스를 인수하지 않는다. 새 데몬의 목록이 비어 있어도 이전 세션에서
+완료를 확인하지 못한 작업의 종료·회수를 승인하는 증거는 아니다.
 OMP 공식 설치를 먼저 완료해 `omp`가 PATH에 있어야 한다. 이 저장소는 OMP 소스 checkout이나
-native addon 빌드를 하지 않는다. npm 레지스트리에서 설치할 때는:
+native addon 빌드를 하지 않는다. 아래 npm 레지스트리 설치 예는 현재 소스가 아닌
+OMP >= 18.20.2, < 19를 요구하는 기존 `omp-superagent@0.1.1` 릴리즈를 대상으로 한다.
 
 ```sh
 bun add --global --trust omp-superagent@0.1.1
@@ -185,7 +191,7 @@ bun install --frozen-lockfile
 
 preinstall의 `scripts/check-omp.ts`가 설치된 CLI의 버전·필요 기능을 확인한다.
 루트 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-ai`,
-`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils` 18.22.0이다. 설치는 봇을 시작하지 않으며
+`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils` 19.0.0이다. 설치는 봇을 시작하지 않으며
 기존 OMP 실행 파일·전역 설정을 교체하지 않는다.
 
 시스템 Bun을 바꾸지 않으려면 선택적으로 격리된 로컬 도구를 사용한다.

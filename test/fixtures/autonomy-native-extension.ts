@@ -14,6 +14,7 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
   let completed = false;
   let held = false;
   let headTodoStep = 0;
+  const headTodoPhase = "Head reply retention";
   const progressStarted = new Set<string>();
   pi.on("agent_start", () => { run++; });
   pi.on("session_before_compact", async (event, ctx) => {
@@ -119,7 +120,7 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
             if (!context.tools?.some(tool => tool.name === "todo")) throw new Error("Head did not expose the native todo tool");
             headTodoStep = 1;
             return { content: [{ type: "toolCall", name: "todo", arguments: {
-              op: "init", list: [{ phase: "Head reply retention", items: [task] }],
+              op: "init", list: [{ phase: headTodoPhase, items: [task] }],
             } }] };
           }
           if (headTodoStep === 1) {
@@ -143,7 +144,7 @@ export default function autonomyFixture(pi: ExtensionAPI): void {
         // through the actual tool before returning its own, unrelated answer.
         if (headTodoStep === 3) {
           headTodoStep = 4;
-          return { content: [{ type: "toolCall", name: "todo", arguments: { op: "rm" } }] };
+          return { content: [{ type: "toolCall", name: "todo", arguments: { op: "rm", phase: headTodoPhase } }] };
         }
         if (headTodoStep === 4) {
           const result = context.messages.at(-1);

@@ -211,7 +211,7 @@ else process.exit(8);
     }
   });
 
-  test.each(["18.20.1", "18.20.2", "17.99.0", "19.0.0", "18.20.2-preview"])("rejects unsupported version %s", async version => {
+  test.each(["18.20.1", "18.20.2", "18.22.2", `${Number(testedVersion.split(".")[0]) + 1}.0.0`, `${testedVersion}-preview`])("rejects unsupported version %s", async version => {
     const f = await executable(version);
     await expect(inspectInstalledOmp([f.command])).rejects.toThrow("Install a supported stock OMP");
   });

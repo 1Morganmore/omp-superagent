@@ -122,6 +122,17 @@ requireSuccess(await native.request({ type: "set_ask_dialog", enabled: true }));
 const socket = net.createConnection(nativeSocket);
 control = new HostChannel(socket, socket, true);
 control.encoder.setProtocolVersion(2);
+// The standalone executable cannot load the npm daemon client's native addon in an
+// extension. Serve its read-only inventory over the already-connected private channel.
+const { listServiceUnits } = await import("./host-services");
+control.on("frame", (frame: Frame) => {
+  if (frame.type !== "list_service_units" || typeof frame.id !== "string") return;
+  const response = { type: "response", command: frame.type, id: frame.id };
+  void listServiceUnits(typeof frame.projectDir === "string" ? frame.projectDir : undefined)
+    .then(units => control.send({ ...response, success: true, data: { units } }),
+      () => control.send({ ...response, success: false, error: "Native service ownership is unavailable" }))
+    .catch(() => control.destroy());
+});
 await control.ready.promise;
 const identity = requireSuccess(await control.request({ type: "snapshot" }));
 if (identity.hostPid !== child.pid || identity.sessionFile !== options.sessionFile) throw new Error("Native launch identity mismatch");

@@ -55,14 +55,18 @@ head; the head replies to the original conversation.
 
 ## Quick start
 
-Requires Git, **Bun >= 1.4.4**, an installed **OMP >= 18.22.0 and < 19**, and local Unix
-sockets. The SDK baseline is **18.22.0**. Native tests use the currently installed OMP;
-CI installs the latest published release and verifies its checksum. Neither silently
-falls back to an older runtime. Windows is unsupported.
+The current source requires Git, **Bun >= 1.4.4**, a separately installed
+**OMP >= 19.0.0 and < 20.0.0**, and local Unix sockets. It pins the published SDK
+to **19.0.0**, from upstream `v19.0.0` commit
+[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e).
+Windows is unsupported.
 Configure `command` with the installed OMP executable followed by native CLI flags;
 runtime/script wrappers are unsupported.
 
 ### 1. Install
+
+The pinned `omp-superagent@0.1.1` commands below install the existing release, not
+the current source. That release requires OMP >= 18.20.2 and < 19.
 
 Install OMP using the
 [upstream instructions](https://github.com/can1357/oh-my-pi#installation) first,
@@ -197,8 +201,9 @@ bun run test:ci
 
 See [developer verification and source release steps](docs/OPERATIONS.md#6-개발자-검증)
 for offline native/PTY coverage, prerequisites, and local packaging/publication boundaries.
-[Recorded results and limitations](docs/releases/0.1.0.md#verification-records) are not a
-claim of live-account or production readiness.
+[Recorded results and limitations](docs/releases/0.1.0.md#verification-records) apply
+to the versions tested; they do not verify the OMP 19.0.0 runtime, live accounts,
+or production readiness.
 
 ## Documentation & credits
 

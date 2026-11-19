@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, RpcFrameEncoder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import type { RpcResponse, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import type { UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import type { LanePresetSnapshot } from "./contracts";
 
 /** Private adapter observations, not additions to the stock RPC protocol. */
@@ -16,6 +17,9 @@ export type HostState = RpcSessionState & {
   pendingUiRequests: Record<string, unknown>[];
 };
 export type Frame = Record<string, unknown>;
+/** Only lifecycle evidence crosses the private socket, never command lines or service logs. */
+export type ServiceUnit = Pick<UnitSnapshot, "id" | "scope" | "kind" | "key" | "owner" | "generation" |
+  "startedAt" | "restartCount" | "state" | "exitedAt" | "pids" | "supervised">;
 export type Response = Frame & { success: boolean; data?: unknown; error?: string };
 export type HostResponse = RpcResponse | {
   type: "response"; id?: string; command: "shutdown_host" | "set_model_preset" | "get_host_admission"; success: true; data: Frame;
@@ -30,6 +34,7 @@ export class HostRequestTimeout extends Error {
 export function serviceCompletionRecorded(daemon: Frame, entries: readonly unknown[]): boolean {
   if (typeof daemon.owner !== "string" || typeof daemon.id !== "string" || typeof daemon.startedAt !== "number"
     || typeof daemon.restartCount !== "number" || typeof daemon.exitedAt !== "number"
+    || ("generation" in daemon && (typeof daemon.generation !== "string" || !daemon.generation))
     || !["exited", "failed"].includes(String(daemon.state))) return false;
   return entries.some(value => {
     if (!value || typeof value !== "object") return false;
@@ -39,7 +44,8 @@ export function serviceCompletionRecorded(daemon: Frame, entries: readonly unkno
       && Array.isArray(details?.daemons) && details.daemons.some(value => {
         if (!value || typeof value !== "object") return false;
         const observed = value as Frame;
-        return ["owner", "id", "startedAt", "restartCount", "state", "exitedAt"]
+        // Legacy journal rows had no generation field; never match them to a new daemon generation.
+        return ["owner", "id", "generation", "startedAt", "restartCount", "state", "exitedAt"]
           .every(field => daemon[field] === observed[field]);
       });
   });

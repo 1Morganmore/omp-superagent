@@ -32,12 +32,32 @@ export default function nativeFixture(pi: ExtensionAPI): void {
         }
         return { content: ["Native decision tool finished"] };
       }
+      if (input?.includes("[native-foreign-service-proof]")
+        && !context.messages.some(message => message.role === "toolResult" && message.toolCallId === "native-foreign-service")) {
+        return { content: [{ type: "toolCall", id: "native-foreign-service", name: "bash", arguments: {
+          command: "printf 'must not replace the other session\\n'", name: "sa-host-foreign", pty: false,
+        } }] };
+      }
+      if (input?.includes("[native-service-denial-proof]")
+        && !context.messages.some(message => message.role === "toolResult" && message.toolCallId === "native-service-denied")) {
+        return { content: [{ type: "toolCall", id: "native-service-denied", name: "bash", arguments: {
+          command: "printf 'superagent-service-completed\\n'", name: "sa-host-proof", pty: false,
+        } }] };
+      }
       const service = context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("[native-service-proof]"));
       if (service && !serviceRequested) {
         serviceRequested = true;
-        return { content: [{ type: "toolCall", name: "bash", arguments: {
-          command: "printf 'superagent-service-completed\\n'", name: "sa-host-proof", pty: false,
-        } }] };
+        return { content: [
+          { type: "toolCall", id: "native-service-first", name: "bash", arguments: {
+            command: "printf 'superagent-service-completed\\n'", name: "sa-host-proof", pty: false,
+          } },
+          { type: "toolCall", id: "native-service-overlap", name: "bash", arguments: {
+            command: "printf 'must not replace the first launch\\n'", name: "sa-host-proof", pty: false,
+          } },
+          { type: "toolCall", id: "native-service-blank", name: "bash", arguments: {
+            command: "printf 'ordinary finite Bash\\n'", name: " \t ", pty: false,
+          } },
+        ] };
       }
       return { content: ["Socket host smoke response"] };
     } });
