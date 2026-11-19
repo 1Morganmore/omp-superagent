@@ -59,16 +59,14 @@ export default function restartNativeProvider(pi: ExtensionAPI): void {
     };
   }
   const waitForFile = async (name: string, signal: AbortSignal): Promise<void> => {
-    const done = Promise.withResolvers<void>();
-    const check = () => { if (existsSync(join(root, name)) || existsSync(join(root, "cleanup"))) done.resolve(); };
-    const watcher = watch(root, check);
-    const abort = () => done.reject(signal.reason ?? new DOMException("Native fixture interrupted", "AbortError"));
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      check();
+    const gate = join(root, name);
+    const cleanup = join(root, "cleanup");
+    // Cross-process file gates must not depend on delivery of a watch event.
+    for (;;) {
       signal.throwIfAborted();
-      await done.promise;
-    } finally { watcher.close(); signal.removeEventListener("abort", abort); }
+      if (existsSync(gate) || existsSync(cleanup)) return;
+      await Bun.sleep(25);
+    }
   };
   if (role === "head" && recoveryWindow) {
     // Correlate actual controller reads and delivered native events. Observer

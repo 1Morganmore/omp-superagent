@@ -1,456 +1,369 @@
 import { afterEach, expect, test } from "bun:test";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { appendFile, chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { Database } from "bun:sqlite";
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { appendFile, chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { hostPaths, loadConfig } from "../src/config";
-import type { GatewayRestartRecord, GatewayRestartRequest, Inbound, Messenger, Route } from "../src/contracts";
-import { launchGateway, startGateway, stopGateway, type GatewayOptions, type GatewayService } from "../src/gateway";
-import { gatewayPaths, gatewayStatus } from "../src/gateway-protocol";
-import { processAlive, runGatewayRestart } from "../src/gateway-restart";
-import { connect } from "../src/host";
+import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { main } from "../src/cli";
-import { Store } from "../src/store";
+import { hostPaths, type Config } from "../src/config";
+import type { GatewayRestartRecord, GatewayRestartRequest, Inbound } from "../src/contracts";
+import { launchGateway } from "../src/gateway";
+import { gatewayPaths } from "../src/gateway-protocol";
+import { processAlive, restartConfigHash, runGatewayRestart, type RestartPlan } from "../src/gateway-restart";
+import { GatewayStore } from "../src/gateway-store";
 import type { ManagedUlwStatus } from "../src/managed-ulw";
-import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
-import { writeStockHostExecutable } from "./fixtures/stock-host";
+import { Store } from "../src/store";
+import {
+  cleanups, configFixture, detachedFixture, fixture, LIFECYCLE_PHASE_MS, metadata,
+  route, RPC_MS, STARTUP_MS, token, until, waitStatus, withFixtureToken,
+} from "./fixtures/gateway-lifecycle";
 
-function fixtureSessionId(root: string): string {
-  const header = parseSessionEntries(readFileSync(join(root, "sessions", "main", "session.jsonl"), "utf8"))
-    .find(entry => entry.type === "session");
-  if (!header) throw new Error("Actual native session header is missing");
-  return header.id;
-}
+const RESTART_SHUTDOWN_MS = 2 * LIFECYCLE_PHASE_MS + RPC_MS; // runner preparation, shutdown RPC, then owner exit
 
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 12_000;
-  while (!await predicate()) {
-    if (Date.now() > deadline) throw new Error("Gateway lifecycle fixture timed out");
-    await Bun.sleep(10);
+afterEach(async () => {
+  const failures: unknown[] = [];
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    try { await cleanup(); } catch (error) { failures.push(error); }
   }
+  if (failures.length) throw new AggregateError(failures, "Gateway lifecycle fixture cleanup failed");
+}, { timeout: STARTUP_MS + RPC_MS + 2 * LIFECYCLE_PHASE_MS });
+
+const input = (id: string, text = id): Inbound => ({ id, route, messageId: id, text, receivedAt: Date.now(), attachments: [] });
+const restartRecord = (root: string, requestId: string) => metadata<GatewayRestartRecord>(root, `gateway:restart:${requestId}`);
+const restartPlan = (root: string, requestId: string) => metadata<RestartPlan>(root, `gateway:restart-plan:${requestId}`);
+const lines = async <T>(root: string, name: string): Promise<T[]> =>
+  (await readFile(join(root, name), "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+type Launch = { pid: number; args: string[]; config: unknown; credentialPresent: boolean };
+const launches = (root: string) => lines<Launch>(root, "launches.jsonl");
+async function sessionId(file: string): Promise<string> {
+  const id = await readSessionHeaderId(file);
+  if (!id) throw new Error("Missing native session header");
+  return id;
 }
-const route: Route = { platform: "discord", accountId: "1", authorityId: "2", guildId: null, channelId: "3", threadId: null };
-async function fixture(updateManagedUlw?: () => Promise<ManagedUlwStatus>, options: Pick<GatewayOptions, "launchRestartRunner"> = {}) {
-  const root = await mkdtemp(join(await realpath("/tmp"), "ogl-"));
-  await chmod(root, 0o700);
-  cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const path = join(root, "config.json");
-  const executable = join(root, "omp.ts");
-  await writeStockHostExecutable(executable, `import ${JSON.stringify(fileURLToPath(new URL("./fixtures/gateway-host.ts", import.meta.url)))};\n`);
-  await writeFile(path, JSON.stringify({ stateDir: root, headCwd: root, maxHosts: 2, maxSubagents: 4, idleMs: 1000,
-    command: [executable],
-    model: "provider/initial-model", discord: { tokenEnv: "GATEWAY_TEST_BOT_TOKEN", ownerId: "2", allowedGuildIds: [], allowedChannelIds: [] } }));
-  await writeFile(`${path}.env`, "GATEWAY_TEST_BOT_TOKEN=isolated-test-secret\n", { mode: 0o600 });
-  const config = await loadConfig(path);
-  let handlers: Parameters<Messenger["start"]>[0] | undefined;
-  let stopped = false;
-  const messenger: Messenger = {
-    async start(value) { handlers = value; }, async stop() { stopped = true; },
-    async send() { return "remote"; }, async showApproval() { return "approval"; }, async dismissApproval() {},
-    async createThread(destination) { return destination; }, async fetchAfter() { return null; },
-    async openAttachment() { return new Response("fixture"); },
-  };
-  const saved = process.env.GATEWAY_TEST_BOT_TOKEN;
-  process.env.GATEWAY_TEST_BOT_TOKEN = "isolated-test-secret";
-  const errors: unknown[] = [];
-  let service: GatewayService;
-  try { service = await startGateway(config, { messenger, onError: error => errors.push(error),
-    managedUlwPath: fileURLToPath(new URL("./fixtures/managed-ulw", import.meta.url)), updateManagedUlw, ...options }); }
-  finally {
-    if (saved === undefined) delete process.env.GATEWAY_TEST_BOT_TOKEN;
-    else process.env.GATEWAY_TEST_BOT_TOKEN = saved;
-  }
+async function deadHead(config: Config) {
+  const sessionFile = hostPaths(config, "main").sessionFile;
+  const id = crypto.randomUUID();
+  await mkdir(dirname(sessionFile), { recursive: true, mode: 0o700 });
+  await writeFile(sessionFile, `${JSON.stringify({ type: "session", id, cwd: config.headCwd, timestamp: new Date().toISOString() })}\n`);
+  const child = Bun.spawn([process.execPath, "--no-env-file", "-e", ""], { stdout: "ignore", stderr: "ignore" });
   cleanups.push(async () => {
-    await rm(join(root, "busy"), { force: true });
-    await rm(join(root, "busy-shutdown"), { force: true });
-    await rm(join(root, "ambiguous-shutdown"), { force: true });
-    try { await service.stop(); }
-    catch {
-      const pid = service.status().head.pid;
-      if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
-      await service.close();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      await child.exited;
     }
   });
-  await until(() => service.status().head.ready);
-  expect(service.status().head.initialization).toMatchObject({ sessionId: fixtureSessionId(root), state: "complete" });
-  return { root, config, service, messenger, errors, get stopped() { return stopped; },
-    async emit(id: string) {
-      const input: Inbound = { id, route, messageId: id, text: id, receivedAt: Date.now(), attachments: [] };
-      await handlers!.ready;
-      await handlers!.message(input);
-    } };
+  await until("known predecessor PID to exit", 5_000, () => child.exitCode !== null);
+  return { pid: child.pid, sessionId: id, sessionFile };
+}
+function seedRestart(root: string, source: Inbound, head: { pid: number; sessionId: string; sessionFile: string }): GatewayRestartRequest {
+  const request = { requestId: crypto.randomUUID(), inputId: source.id, ackOutputId: `ack-${source.id}` };
+  const store = new Store(join(root, "coordination.sqlite"));
+  try {
+    store.receive(source, "main", { [`user-source:${request.inputId}`]: "true" });
+    store.settle(request.inputId, "done");
+    store.queueOutput({ id: request.ackOutputId, sourceId: request.inputId, route, text: "Restart acknowledged" });
+    store.claimOutput(request.ackOutputId);
+    store.finishOutput(request.ackOutputId, "sent", "remote-ack");
+    store.setMeta("head:restart-fence", JSON.stringify({ ...request, ownerPid: head.pid,
+      sessionId: head.sessionId, sessionFile: head.sessionFile, state: "accepted",
+      stopBoundary: store.getMeta("gateway:operator-stop") }));
+  } finally { store.close(); }
+  return request;
 }
 
-test("prepared Gateway starts its head while a source check is pending; failed check does not restart that host", async () => {
-  const pending = Promise.withResolvers<ManagedUlwStatus>();
-  const f = await fixture(() => pending.promise);
-  const pid = f.service.status().head.pid;
-  try {
-    expect(f.service.status().gateway.ready).toBe(true);
-    expect(f.service.status().head.ready).toBe(true);
-    expect(f.service.status().ulw?.updating).toBe(true);
-    pending.reject(new Error("isolated slow upstream failed"));
-    await until(() => f.service.status().ulw?.updating === false);
-    expect(f.service.status().ulw?.error).toBe("isolated slow upstream failed");
-    expect(f.service.status().head.pid).toBe(pid);
-    expect(f.service.status().head.ready).toBe(true);
-  } finally {
-    pending.resolve({ revision: null, packagePath: null, upstreamRevision: null, checkedAt: null, error: null, updating: false });
-  }
-});
-
-test("Gateway owns one credential-free native head; busy CLI stop refuses, explicit stop cannot resurrect", async () => {
+test("a busy owned HEAD refuses shutdown, and explicit stop cancels an accepted restart", async () => {
   const f = await fixture();
-  const headStore = new Store(join(f.root, "coordination.sqlite"));
-  headStore.close();
-  const launches = (await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  expect(launches).toHaveLength(1);
-  expect(launches[0].credentialPresent).toBe(false);
-  expect(launches[0].args).not.toContain("--session-settings");
-  expect(launches[0].args).not.toContain("--rpc-socket");
-  expect(launches[0].config.modelRoles.default).toBe("provider/initial-model");
-  const pid = f.service.status().head.pid;
+  const [initial] = await launches(f.root);
+  expect(initial).toMatchObject({ credentialPresent: false, config: { modelRoles: { default: "provider/initial-model" } } });
+  const pid = initial!.pid;
+  expect(initial!.args).not.toContain("--session-settings");
+  expect(initial!.args).not.toContain("--rpc-socket");
+  const sessionFile = hostPaths(f.config, "main").sessionFile;
+  const head = { pid, sessionFile, sessionId: await sessionId(sessionFile) };
+  expect(f.service.status().head.initialization).toMatchObject({ sessionId: head.sessionId, state: "complete" });
+
   await writeFile(join(f.root, "busy"), "busy");
-  await expect(main(["stop", "main", "--config", f.config.path])).rejects.toThrow("session_busy");
-  expect(f.service.status().gateway.stopping).toBe(false);
-  expect(f.service.status().head.pid).toBe(pid);
-  expect(f.stopped).toBe(false);
-  await rm(join(f.root, "busy"));
-  await main(["stop", "main", "--config", f.config.path]);
-  await until(() => f.stopped);
-  await Bun.sleep(1100);
-  expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-  expect(existsSync(join(f.root, "run", "gateway.sock"))).toBe(false);
-}, 30_000);
+  const busy = seedRestart(f.root, input("busy-restart", "/restart"), head);
+  const refused = await f.service.restart(busy);
+  expect(refused.state).toBe("refused");
+  expect(await f.service.restart(busy)).toEqual(refused);
+  f.service.runRestart(busy.requestId);
+  expect(restartRecord(f.root, busy.requestId)).toEqual(refused);
+  await until("busy restart outcome at the original HEAD", RPC_MS, async () =>
+    existsSync(join(f.root, "restart-notices.jsonl")) &&
+    (await lines<{ requestId: string; outcome: string }>(f.root, "restart-notices.jsonl")).some(
+      notice => notice.requestId === busy.requestId && notice.outcome === "refused"));
 
-test("confirmed-dead owned head restarts, offline input stays durable, and existing native model is not reset", async () => {
-  const f = await fixture();
-  const coordination = new Store(join(f.root, "coordination.sqlite"));
-  const snapshot = { modelRoles: { default: "provider/preset-model", smol: "provider/small-model" }, defaultThinkingLevel: "low" };
+  const superseded = seedRestart(f.root, input("superseded-restart", "/restart"), head);
+  await expect(main(["stop", "main", "--config", f.config.path])).rejects.toThrow("Host is busy (session_busy)");
+  expect(f.service.status()).toMatchObject({ gateway: { stopping: false }, head: { pid, ready: true } });
+  expect(f.stopped).toBe(false);
+  expect(restartRecord(f.root, superseded.requestId)).toBeNull();
+  await rm(join(f.root, "busy"));
+  expect(await f.service.restart(superseded)).toMatchObject({ state: "refused", reason: expect.stringContaining("operator stop") });
+  f.service.runRestart(superseded.requestId);
+  expect(processAlive(pid)).toBe(true);
+  // Neither the pipe owner's busy refusal nor either stale restart reached native disposal.
+  expect(existsSync(join(f.root, "shutdowns.jsonl"))).toBe(false);
+
+  const current = seedRestart(f.root, input("current-restart", "/restart"), head);
+  const accepted = await f.service.restart(current);
+  expect(accepted.state).toBe("accepted");
+  expect(await f.service.restart(current)).toEqual(accepted);
+  await expect(launchGateway(f.config, current.requestId)).rejects.toThrow();
+  f.service.runRestart(current.requestId);
+  await f.service.stop();
+  f.service.runRestart(current.requestId);
+  expect(restartRecord(f.root, current.requestId)).toMatchObject({ state: "refused", reason: expect.stringContaining("operator stop") });
+  expect(processAlive(pid)).toBe(false);
+  expect(f.stopped).toBe(true);
+  expect(existsSync(gatewayPaths(f.config).socketPath)).toBe(false);
+  expect(await launches(f.root)).toHaveLength(1);
+}, STARTUP_MS + 2 * RPC_MS + 25_000 + LIFECYCLE_PHASE_MS); // startup, notice, CLI refusal, supervised stop
+
+test("a prepared Gateway stays ready during a source check and restores the confirmed-dead HEAD with its durable input and settings", async () => {
+  const pending = new AbortController();
+  const gate = AbortSignal.any([pending.signal, AbortSignal.timeout(STARTUP_MS)]);
+  const f = await fixture({ updateManagedUlw: () => new Promise<ManagedUlwStatus>((_, reject) => {
+    if (gate.aborted) reject(gate.reason);
+    else gate.addEventListener("abort", () => reject(gate.reason), { once: true });
+  }) });
+  const old = f.service.status().head.pid!;
   try {
-    coordination.setMeta("main:sessionId", fixtureSessionId(f.root));
-    coordination.setMeta(`head:model-settings:${fixtureSessionId(f.root)}`, JSON.stringify({ settings: snapshot, clearedRoles: ["slow"] }));
+    expect(f.service.status()).toMatchObject({ gateway: { ready: true }, head: { ready: true }, ulw: { updating: true } });
+  } finally { pending.abort(new Error("isolated slow upstream failed")); }
+  await until("failed source check to settle", 5_000, () => f.service.status().ulw?.updating === false);
+  expect(f.service.status()).toMatchObject({
+    head: { pid: old, ready: true }, ulw: { error: "isolated slow upstream failed" },
+  });
+  expect(f.errors).toEqual([new Error("isolated slow upstream failed")]);
+  f.errors.length = 0;
+
+  const id = await sessionId(hostPaths(f.config, "main").sessionFile);
+  const snapshot = { modelRoles: { default: "provider/preset-model", smol: "provider/small-model" }, defaultThinkingLevel: "low" };
+  const coordination = new Store(join(f.root, "coordination.sqlite"));
+  try {
+    coordination.setMeta("main:sessionId", id);
+    coordination.setMeta(`head:model-settings:${id}`, JSON.stringify({ settings: snapshot, clearedRoles: ["slow"] }));
     coordination.setMeta("head:model-settings:unrelated-session", JSON.stringify({
       settings: { modelRoles: { default: "provider/wrong-session" } }, clearedRoles: [],
     }));
   } finally { coordination.close(); }
-  const old = f.service.status().head.pid!;
   process.kill(old, "SIGKILL");
-  await f.emit("offline-original-source");
+  const offline = input("offline-original-source");
+  await f.emit(offline);
   expect(f.service.status().gateway.pendingEvents).toBeGreaterThan(0);
-  await until(() => f.service.status().head.pid !== old && f.service.status().head.ready);
-  await until(async () => existsSync(join(f.root, "received.jsonl")) &&
-    (await readFile(join(f.root, "received.jsonl"), "utf8")).includes("offline-original-source"));
-  const launches = (await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  expect(launches).toHaveLength(2);
-  expect(launches[1].args).not.toContain("--model");
-  expect(launches[1].args).not.toContain("--model-preset");
-  expect(launches[1].config).toMatchObject({
-    ...snapshot, modelRoles: { ...snapshot.modelRoles, slow: null },
+  await until("replacement HEAD with drained ingress", LIFECYCLE_PHASE_MS + STARTUP_MS, () => {
+    const { head, gateway } = f.service.status();
+    return head.ready && head.pid !== old && gateway.pendingEvents === 0;
   });
-  const messages = (await readFile(join(f.root, "received.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  expect(messages.map(message => message.id)).toEqual(["offline-original-source"]);
+  const started = await launches(f.root);
+  expect(started).toHaveLength(2);
+  expect(started[1]!.args).not.toContain("--model");
+  expect(started[1]!.args).not.toContain("--model-preset");
+  expect(started[1]!.config).toMatchObject({ ...snapshot, modelRoles: { ...snapshot.modelRoles, slow: null } });
+  expect(await lines<Inbound>(f.root, "received.jsonl")).toEqual([offline]);
   expect(f.errors).toEqual([]);
-}, 30_000);
+  const replacement = f.service.status().head.pid!;
+  await main(["stop", "main", "--config", f.config.path]);
+  await until("CLI stop detached the messenger and closed the Gateway endpoint", 5_000,
+    () => f.stopped && !existsSync(gatewayPaths(f.config).socketPath));
+  expect(processAlive(replacement)).toBe(false);
+  expect(await launches(f.root)).toHaveLength(2);
+}, 2 * STARTUP_MS + LIFECYCLE_PHASE_MS + 25_000 + 10_000);
 
-test("Gateway waits for the recorded adapter owner after native death and socket removal before replacing the head", async () => {
-  const f = await fixture();
-  const connection = await connect(hostPaths(f.config, "main").socketPath);
-  const previous = await connection.client.getState();
-  await connection.close();
-  await f.service.stop();
+test("Gateway waits for the recorded adapter owner even after its native process and socket are gone", async () => {
+  const f = await configFixture();
+  const previous = await deadHead(f.config);
   const socketPath = hostPaths(f.config, "main").socketPath;
+  await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   const server = createServer();
+  const close = () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  cleanups.push(async () => { if (server.listening) await close(); });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, resolve);
   });
   await chmod(socketPath, 0o600);
   const stat = await lstat(socketPath);
-  const owner = Bun.spawn([process.execPath, "--no-env-file", "-e",
-    "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));"], {
-    stdin: "pipe", stdout: "ignore", stderr: "ignore",
+  const owner = Bun.spawn([process.execPath, "--no-env-file", "-e", "process.stdin.resume();"],
+    { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+  cleanups.push(async () => {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill();
+    await owner.exited;
   });
   const saved = new Store(join(f.root, "coordination.sqlite"));
-  saved.setMeta("gateway:head", JSON.stringify({ pid: previous.hostPid, ownerPid: owner.pid,
-    sessionId: previous.sessionId, sessionFile: previous.sessionFile, dev: stat.dev, ino: stat.ino }));
-  saved.close();
-  const errors: unknown[] = [];
-  const starting = startGateway(f.config, { messenger: f.messenger, onError: error => errors.push(error),
-    managedUlwPath: fileURLToPath(new URL("./fixtures/managed-ulw", import.meta.url)) })
-    .then(service => ({ service }), (error: unknown) => { errors.push(error); return { error }; });
   try {
-    await until(() => {
-      if (errors.length) throw errors[0];
-      return existsSync(gatewayPaths(f.config).socketPath);
-    });
-    expect((await gatewayStatus(f.config))?.head).toMatchObject({ pid: previous.hostPid, ready: false });
-    expect((await lstat(socketPath)).ino).toBe(stat.ino);
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    expect((await gatewayStatus(f.config))?.head).toMatchObject({ pid: previous.hostPid, ready: false });
-    expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-    owner.stdin.end();
-    await owner.exited;
-    const result = await starting;
-    if ("error" in result) throw result.error;
-    const replacement = result.service;
-    await until(() => replacement.status().head.ready);
-    expect(replacement.status().head.pid).not.toBe(previous.hostPid);
-    expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(2);
-    expect(errors).toEqual([]);
-  } finally {
-    if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    if (owner.exitCode === null) owner.stdin.end();
-    await owner.exited;
-    const result = await starting;
-    if ("service" in result) await result.service.stop();
-  }
-}, 30_000);
+    saved.setMeta("gateway:head", JSON.stringify({ ...previous, ownerPid: owner.pid, dev: stat.dev, ino: stat.ino }));
+  } finally { saved.close(); }
+  const starting = fixture({}, f);
+  void starting.catch(() => {}); // The joined startup is asserted after releasing the prior owner.
+  const bound = (status: { gateway: { ready: boolean } } | null) => status?.gateway.ready === true;
+  const old = await waitStatus(f.config, "Gateway bound while the prior owner lives", LIFECYCLE_PHASE_MS, bound);
+  expect(old.head).toMatchObject({ pid: previous.pid, ready: false });
+  expect((await lstat(socketPath)).ino).toBe(stat.ino);
+  await close();
+  const waiting = await waitStatus(f.config, "Gateway status after prior endpoint close", 5_000, bound);
+  expect(waiting.head).toMatchObject({ pid: previous.pid, ready: false });
+  expect(existsSync(join(f.root, "launches.jsonl"))).toBe(false);
+  owner.stdin.end();
+  await owner.exited;
+  const replacement = await starting;
+  expect(replacement.service.status().head.pid).not.toBe(previous.pid);
+  expect(replacement.service.status().head.initialization).toMatchObject({ sessionId: previous.sessionId, state: "complete" });
+  expect(await launches(f.root)).toHaveLength(1);
+  expect(replacement.errors).toEqual([]);
+}, LIFECYCLE_PHASE_MS + STARTUP_MS + 5_000);
 
-function seedRestart(root: string, pid: number, id = crypto.randomUUID()): GatewayRestartRequest {
-  const request = { requestId: id, inputId: `input-${id}`, ackOutputId: `ack-${id}` };
-  const store = new Store(join(root, "coordination.sqlite"));
-  try {
-    store.receive({ id: request.inputId, route, messageId: request.inputId, text: "/restart", receivedAt: Date.now(), attachments: [] },
-      "main", { [`user-source:${request.inputId}`]: "true" });
-    store.settle(request.inputId, "done");
-    store.queueOutput({ id: request.ackOutputId, sourceId: request.inputId, route, text: "Restart acknowledged" });
-    store.claimOutput(request.ackOutputId);
-    store.finishOutput(request.ackOutputId, "sent", "remote-ack");
-    store.setMeta("head:restart-fence", JSON.stringify({ ...request, ownerPid: pid,
-      sessionId: fixtureSessionId(root), sessionFile: join(root, "sessions", "main", "session.jsonl"), state: "accepted",
-      stopBoundary: store.getMeta("gateway:operator-stop") }));
-  } finally { store.close(); }
-  return request;
-}
-function restartRecord(root: string, requestId: string): GatewayRestartRecord | null {
-  const db = new Database(join(root, "coordination.sqlite"), { readonly: true });
-  try {
-    const row = db.query("SELECT value FROM metadata WHERE key=?").get(`gateway:restart:${requestId}`) as { value: string } | null;
-    return row ? JSON.parse(row.value) : null;
-  } finally { db.close(); }
-}
-async function restartDiagnostics(root: string, requestId: string): Promise<string> {
-  const db = new Database(join(root, "coordination.sqlite"), { readonly: true });
-  let state: Array<{ key: string; value: string | null }>;
-  try {
-    state = ["gateway:head", "gateway:socket", "gateway:restart-active", `gateway:restart:${requestId}`,
-      `gateway:restart-plan:${requestId}`, "head:preset-bootstrap"].map(key => ({ key,
-        value: (db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null)?.value ?? null }));
-  } finally { db.close(); }
-  const log = await readFile(join(root, "logs", "gateway.log"), "utf8").catch(() => "No successor Gateway log was created.");
-  return `${JSON.stringify(state)}\nSuccessor Gateway log:\n${log.slice(-16_000)}`;
-}
-
-test("restart refuses native busy work before shutdown and preserves exact sent source dedupe", async () => {
-  const f = await fixture();
-  const pid = f.service.status().head.pid!;
-  const request = seedRestart(f.root, pid);
-  await writeFile(join(f.root, "busy"), "busy");
-  const refused = await f.service.restart(request);
-  expect(refused.state).toBe("refused");
-  expect(await f.service.restart(request)).toEqual(refused);
-  f.service.runRestart(request.requestId);
-  expect(processAlive(pid)).toBe(true);
-  expect(f.service.status().gateway.stopping).toBe(false);
-  expect(existsSync(join(f.root, "shutdowns.jsonl"))).toBe(false);
-  expect(restartRecord(f.root, request.requestId)).toEqual(refused);
-  await until(async () => existsSync(join(f.root, "restart-notices.jsonl")) &&
-    (await readFile(join(f.root, "restart-notices.jsonl"), "utf8")).includes(request.requestId));
-});
-
-test("a refused busy CLI stop still supersedes restart intent captured before lifecycle acceptance", async () => {
-  const f = await fixture();
-  const pid = f.service.status().head.pid!;
-  const request = seedRestart(f.root, pid);
-  await writeFile(join(f.root, "busy"), "busy");
-  await expect(main(["stop", "main", "--config", f.config.path])).rejects.toThrow("Host is busy");
-  expect(f.service.status().gateway.stopping).toBe(false);
-  expect(restartRecord(f.root, request.requestId)).toBeNull();
-  await rm(join(f.root, "busy"));
-  const refused = await f.service.restart(request);
-  expect(refused.state).toBe("refused");
-  expect(refused.reason).toContain("operator stop");
-  f.service.runRestart(request.requestId);
-  expect(f.service.status().head.pid).toBe(pid);
-  expect(processAlive(pid)).toBe(true);
-  // The pipe owner rejects busy stop before native disposal; neither that
-  // refusal nor the superseded restart may reach the native shutdown callback.
-  expect(existsSync(join(f.root, "shutdowns.jsonl"))).toBe(false);
-});
-
-test("duplicate accepted restart cannot adopt the old endpoint and explicit stop cancels successor authority", async () => {
-  const f = await fixture();
-  const pid = f.service.status().head.pid!;
-  const request = seedRestart(f.root, pid);
-  const accepted = await f.service.restart(request);
-  expect(accepted.state).toBe("accepted");
-  expect(await f.service.restart(request)).toEqual(accepted);
-  await expect(launchGateway(f.config, request.requestId)).rejects.toThrow();
-  f.service.runRestart(request.requestId);
-  await f.service.stop();
-  f.service.runRestart(request.requestId);
-  expect(restartRecord(f.root, request.requestId)).toMatchObject({ state: "refused", reason: expect.stringContaining("operator stop") });
-  expect(processAlive(pid)).toBe(false);
-  expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-});
-
-test.each(["busy-shutdown", "ambiguous-shutdown"])("%s preserves intake state without launching or reviving a HEAD", async mode => {
-  const f = await fixture();
-  const pid = f.service.status().head.pid!;
-  const request = seedRestart(f.root, pid);
-  expect((await f.service.restart(request)).state).toBe("accepted");
-  await writeFile(join(f.root, mode), mode);
-  f.service.runRestart(request.requestId);
-  f.service.runRestart(request.requestId);
-  await until(() => restartRecord(f.root, request.requestId)?.state === (mode === "busy-shutdown" ? "refused" : "uncertain"));
-  expect(processAlive(pid)).toBe(true);
-  expect(f.service.status().gateway.stopping).toBe(mode === "ambiguous-shutdown");
-  expect((await readFile(join(f.root, "shutdowns.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-  expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-});
-
-test("definite successor spawn failure refuses while the original HEAD remains able to deliver the outcome", async () => {
-  const f = await fixture(undefined, { launchRestartRunner: () => spawn("/nonexistent/omp-superagent-restart-runner", [], { stdio: "ignore" }) });
-  const pid = f.service.status().head.pid!;
-  const request = seedRestart(f.root, pid);
-  expect((await f.service.restart(request)).state).toBe("accepted");
-  f.service.runRestart(request.requestId);
-  await until(() => restartRecord(f.root, request.requestId)?.state === "refused");
-  expect(processAlive(pid)).toBe(true);
-  expect(f.service.status().gateway.stopping).toBe(false);
-  expect(existsSync(join(f.root, "shutdowns.jsonl"))).toBe(false);
-});
-
-test("one-shot successor records sanitized predecessor timeout without relaunch or kill", async () => {
-  const f = await fixture();
-  const request = seedRestart(f.root, f.service.status().head.pid!);
-  const accepted = await f.service.restart(request);
-  const head = await connect(hostPaths(f.config, "main").socketPath);
-  try { await head.request({ type: "shutdown_host" }); } finally { await head.close(); }
-  await until(() => !processAlive(accepted.headPid));
-  const db = new Database(join(f.root, "coordination.sqlite"));
-  try {
-    const row = db.query("SELECT value FROM metadata WHERE key=?").get(`gateway:restart-plan:${request.requestId}`) as { value: string };
-    const plan = JSON.parse(row.value);
-    for (const key of [`gateway:restart:${request.requestId}`, "gateway:restart"])
-      db.query("UPDATE metadata SET value=? WHERE key=?").run(JSON.stringify({ ...accepted, state: "head-stopped" }), key);
-    db.query("UPDATE metadata SET value=? WHERE key=?").run(JSON.stringify({ ...plan, runnerPid: process.pid, runnerReady: true }),
-      `gateway:restart-plan:${request.requestId}`);
-  } finally { db.close(); }
-  const saved = process.env.GATEWAY_TEST_BOT_TOKEN;
-  process.env.GATEWAY_TEST_BOT_TOKEN = "isolated-test-secret";
-  try { await runGatewayRestart(f.config.path, request.requestId, { timeoutMs: 30, launch: async () => { throw new Error("must not launch"); } }); }
-  finally { if (saved === undefined) delete process.env.GATEWAY_TEST_BOT_TOKEN; else process.env.GATEWAY_TEST_BOT_TOKEN = saved; }
-  expect(restartRecord(f.root, request.requestId)).toMatchObject({ state: "failed", reason: expect.stringContaining("no retry or forced kill") });
-  expect(restartRecord(f.root, request.requestId)?.reason).not.toContain("isolated-test-secret");
-  expect(processAlive(process.pid)).toBe(true);
-  expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-});
-
-test("successor records sanitized failure in the original store when configuration disappears and no adapter remains", async () => {
-  const f = await fixture();
-  const request = seedRestart(f.root, f.service.status().head.pid!);
-  const accepted = await f.service.restart(request);
-  await f.service.stop();
-  expect(f.stopped).toBe(true);
-  const db = new Database(join(f.root, "coordination.sqlite"));
-  try {
-    const row = db.query("SELECT value FROM metadata WHERE key=?").get(`gateway:restart-plan:${request.requestId}`) as { value: string };
-    for (const key of [`gateway:restart:${request.requestId}`, "gateway:restart"])
-      db.query("UPDATE metadata SET value=? WHERE key=?").run(JSON.stringify({ ...accepted, state: "head-stopped" }), key);
-    db.query("UPDATE metadata SET value=? WHERE key=?").run(JSON.stringify({ ...JSON.parse(row.value), runnerPid: process.pid }),
-      `gateway:restart-plan:${request.requestId}`);
-  } finally { db.close(); }
-  await rm(f.config.path);
-  await runGatewayRestart(f.config.path, request.requestId, { stateDir: f.root });
-  const failed = restartRecord(f.root, request.requestId)!;
-  expect(failed.state).toBe("failed");
-  expect(failed.reason).not.toContain(f.root);
-  expect(failed.reason).not.toContain("isolated-test-secret");
-  expect((await readFile(join(f.root, "launches.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
-});
-
-test("detached restart replaces both processes, preserves native session/settings and durable handoff input", async () => {
-  const root = await mkdtemp(join(await realpath("/tmp"), "oglr-"));
-  await chmod(root, 0o700);
-  cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const configPath = join(root, "config.json");
-  const executable = join(root, "omp.ts");
-  await writeStockHostExecutable(executable, `import ${JSON.stringify(fileURLToPath(new URL("./fixtures/gateway-host.ts", import.meta.url)))};\n`);
-  await writeFile(configPath, JSON.stringify({ stateDir: root, headCwd: root, maxHosts: 2, maxSubagents: 4, idleMs: 1000,
-    command: [executable],
-    model: "provider/initial-model", discord: { tokenEnv: "GATEWAY_TEST_BOT_TOKEN", ownerId: "2", allowedGuildIds: [], allowedChannelIds: [] } }));
-  await writeFile(`${configPath}.env`, "GATEWAY_TEST_BOT_TOKEN=isolated-test-secret\n", { mode: 0o600 });
-  const config = await loadConfig(configPath);
-  const child = spawn(process.execPath, ["--no-env-file", fileURLToPath(new URL("./fixtures/gateway-lifecycle-process.ts", import.meta.url)),
-    "--config", configPath], { cwd: root, stdio: "ignore" });
+test("restart execution distinguishes spawn failure, native refusal and ambiguous native shutdown without replacement", async () => {
+  let spawnFails = true;
+  const liveRunners = new Set<ChildProcess>();
+  const f = await fixture({ launchRestartRunner(path, requestId, fd) {
+    if (spawnFails) return spawn("/nonexistent/omp-superagent-restart-runner", [], { stdio: "ignore" });
+    const runner = spawn(process.execPath, ["--no-env-file", fileURLToPath(new URL("../src/gateway-restart.ts", import.meta.url)),
+      "--config", path, "--state-dir", dirname(path), "--request", requestId], { cwd: dirname(path), stdio: ["ignore", fd, fd] });
+    liveRunners.add(runner);
+    runner.once("exit", () => liveRunners.delete(runner));
+    runner.once("error", () => liveRunners.delete(runner));
+    return runner;
+  } });
   cleanups.push(async () => {
-    try { await stopGateway(config); } catch {}
-    const db = new Database(join(root, "coordination.sqlite"), { readonly: true });
-    try {
-      for (const key of ["gateway:head", "gateway:socket"]) {
-        const row = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
-        const pid = row ? (JSON.parse(row.value) as { pid?: number } | null)?.pid : undefined;
-        if (pid && processAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
-      }
-    } finally { db.close(); }
-    if (child.pid && processAlive(child.pid)) child.kill("SIGKILL");
+    for (const runner of liveRunners) runner.kill();
+    await until("fixture runner cleanup", 5_000, () => liveRunners.size === 0);
   });
-  await until(async () => { try { return Boolean((await gatewayStatus(config))?.head.ready); } catch { return false; } });
-  const before = (await gatewayStatus(config))!;
-  const transcript = await readFile(hostPaths(config, "main").sessionFile, "utf8");
-  const request = seedRestart(root, before.head.pid!);
-  const coordination = new Store(join(root, "coordination.sqlite"));
+  const sessionFile = hostPaths(f.config, "main").sessionFile;
+  const pid = f.service.status().head.pid!;
+  const head = { pid, sessionFile, sessionId: await sessionId(sessionFile) };
+  for (const [mode, state, shutdowns] of [
+    ["spawn-failure", "refused", 0], ["busy-shutdown", "refused", 1], ["ambiguous-shutdown", "uncertain", 2],
+  ] as const) {
+    const request = seedRestart(f.root, input(mode, "/restart"), head);
+    expect((await f.service.restart(request)).state).toBe("accepted");
+    if (!spawnFails) await writeFile(join(f.root, mode), mode);
+    f.service.runRestart(request.requestId);
+    f.service.runRestart(request.requestId);
+    await until(`${mode} lifecycle outcome`, spawnFails ? RPC_MS : RESTART_SHUTDOWN_MS, () => {
+      const record = restartRecord(f.root, request.requestId);
+      if (record && !["accepted", "head-stopped"].includes(record.state)) expect(record.state).toBe(state);
+      return record?.state === state;
+    });
+    const log = join(f.root, "shutdowns.jsonl");
+    expect(existsSync(log) ? await lines(f.root, "shutdowns.jsonl") : []).toHaveLength(shutdowns);
+    expect(processAlive(pid)).toBe(true);
+    expect(f.service.status().gateway.stopping).toBe(state === "uncertain");
+    expect(await launches(f.root)).toHaveLength(1);
+    await until(`${mode} one-shot runner exit`, 5_000, () => liveRunners.size === 0);
+    spawnFails = false;
+  }
+}, STARTUP_MS + RPC_MS + 2 * RESTART_SHUTDOWN_MS + 15_000);
+
+for (const failure of ["live predecessor", "missing configuration"] as const) {
+  test(`one-shot runner records a sanitized failure without launch or kill: ${failure}`, async () => {
+    const { config, root } = await configFixture();
+    const previous = await deadHead(config);
+    const socket = { pid: process.pid, dev: 0, ino: 0 };
+    const head = { ...previous, ownerPid: previous.pid, dev: 0, ino: 0 };
+    const request = seedRestart(root, input(failure, "/restart"), head);
+    const plan = { configPath: config.path, stateDir: root, configHash: await restartConfigHash(config.path),
+      socket, head, runnerPid: process.pid, runnerReady: true } satisfies RestartPlan;
+    const gateway = new GatewayStore(root);
+    try {
+      gateway.setRestart({ ...request, sessionId: head.sessionId, sessionFile: head.sessionFile,
+        gatewayPid: socket.pid, headPid: head.pid, state: "head-stopped" });
+      gateway.setMeta("gateway:restart-active", request.requestId);
+      gateway.setMeta(`gateway:restart-plan:${request.requestId}`, JSON.stringify(plan));
+    } finally { gateway.close(); }
+    if (failure === "missing configuration") await rm(config.path);
+    let launchAttempts = 0;
+    await withFixtureToken(() => runGatewayRestart(config.path, request.requestId, { stateDir: root, timeoutMs: 30,
+      async launch() { launchAttempts++; throw new Error("Unexpected successor launch"); },
+    }));
+    const failed = restartRecord(root, request.requestId);
+    expect(failed?.state).toBe("failed");
+    expect(failed?.reason).toContain("no retry or forced kill");
+    expect(failed?.reason).not.toContain(root);
+    expect(failed?.reason).not.toContain(token);
+    expect(launchAttempts).toBe(0);
+    expect(processAlive(socket.pid)).toBe(true);
+  }, 10_000);
+}
+
+test("detached restart replaces both processes, preserving the native session and exactly one handoff input", async () => {
+  const f = await detachedFixture();
+  const before = await waitStatus(f.config, "original detached HEAD readiness", STARTUP_MS, status => {
+    f.checkIngress();
+    const outcome = f.childExited();
+    if (outcome) throw new Error(`Original detached Gateway ${outcome}`);
+    return status?.head.ready === true;
+  });
+  const pid = before.head.pid!;
+  const sessionFile = hostPaths(f.config, "main").sessionFile;
+  const transcript = await readFile(sessionFile, "utf8");
+  const id = await sessionId(sessionFile);
+  const source = input("restart-original-source", "/restart");
+  const request = seedRestart(f.root, source, { pid, sessionFile, sessionId: id });
+  const coordination = new Store(join(f.root, "coordination.sqlite"));
   try {
-    coordination.setMeta("main:sessionId", fixtureSessionId(root));
-    coordination.setMeta(`head:model-settings:${fixtureSessionId(root)}`, JSON.stringify({
+    coordination.setMeta("main:sessionId", id);
+    coordination.setMeta(`head:model-settings:${id}`, JSON.stringify({
       settings: { modelRoles: { default: "provider/preserved" }, defaultThinkingLevel: "low" }, clearedRoles: ["slow"],
     }));
   } finally { coordination.close(); }
-  // The actual head requests replacement from its messenger callback, not
-  // from a fabricated in-flight native RPC command that would make it busy.
-  const restartInput: Inbound = { id: request.inputId, messageId: request.inputId,
-    route, text: "/restart", receivedAt: Date.now(), attachments: [] };
-  await writeFile(join(root, "ingress.jsonl"), `${JSON.stringify(restartInput)}\n`);
-  try { await until(() => restartRecord(root, request.requestId) !== null); }
-  catch (error) {
-    throw new Error(`Restart transport failed before acceptance: ${String(error)}\n${await restartDiagnostics(root, request.requestId)}`);
-  }
-  const accepted = restartRecord(root, request.requestId);
-  if (!accepted) throw new Error("Restart returned without a durable lifecycle receipt");
-  expect(["accepted", "head-stopped", "started"]).toContain(accepted.state);
-  // This source remains on the transport's disk through endpoint/lifetime-lock handoff.
-  const input: Inbound = { id: "handoff-original-source", route, messageId: "handoff-original-source", text: "handoff",
-    receivedAt: Date.now(), attachments: [] };
-  await appendFile(join(root, "ingress.jsonl"), `${JSON.stringify(input)}\n`);
+  const ingress = join(f.root, "ingress.jsonl");
+  const handoff = input("handoff-original-source", "handoff");
+  const receipt = () => {
+    f.checkIngress();
+    const record = restartRecord(f.root, request.requestId);
+    if (record && !["accepted", "head-stopped", "started"].includes(record.state))
+      throw new Error(`Unexpected durable restart outcome: ${JSON.stringify(record)}`);
+    return record;
+  };
   try {
-    await until(async () => {
-      try { const status = await gatewayStatus(config); return Boolean(status?.head.ready && status.gateway.pid !== before.gateway.pid &&
-        status.head.pid !== before.head.pid && restartRecord(root, request.requestId)?.state === "started"); } catch { return false; }
+    await writeFile(ingress, `${JSON.stringify(source)}\n`);
+    await until("durable restart acceptance", RPC_MS, receipt);
+    await until("predecessor shutdown and lifetime handoff", RESTART_SHUTDOWN_MS, () =>
+      receipt()?.state === "head-stopped" && !processAlive(before.gateway.pid) && !processAlive(pid));
+    // The runner is still live but no Gateway owns intake; queue input on the
+    // isolated transport disk before allowing the successor to start.
+    await appendFile(ingress, `${JSON.stringify(handoff)}\n`.repeat(2));
+    await writeFile(join(f.root, "handoff-queued"), "");
+    const started = await until("successor launch receipt", STARTUP_MS, () => {
+      const record = receipt();
+      return record?.state === "started" && record;
     });
-  } catch (error) {
-    throw new Error(`${String(error)}\n${await restartDiagnostics(root, request.requestId)}`);
+    const admissions = "ingress-admissions.jsonl";
+    type Admission = { id: string; position: number; pid: number };
+    const received = join(f.root, "received.jsonl");
+    let returned: Admission[] | undefined;
+    const after = await waitStatus(f.config, "replacement HEAD ready and both handoff offers returned", RPC_MS, async status => {
+      f.checkIngress();
+      if (!returned) {
+        if (!existsSync(join(f.root, admissions))) return false;
+        const observed = (await lines<Admission>(f.root, admissions)).filter(event => event.id === handoff.id);
+        if (observed.length < 2) return false;
+        returned = observed;
+        return false; // Only a status probe after both callbacks can prove the queue drained.
+      }
+      if (!status?.head.ready || status.gateway.pid === before.gateway.pid || status.head.pid === pid ||
+          status.gateway.pendingEvents !== 0 || !existsSync(received) ||
+          !(await readFile(received, "utf8")).includes(`${JSON.stringify(handoff)}\n`)) return false;
+      expect(returned).toEqual([2, 3].map(position => ({ id: handoff.id, position, pid: status.gateway.pid })));
+      return true;
+    });
+    expect(started).toMatchObject({ successorPid: after.gateway.pid, replacementPid: after.head.pid, sessionId: id, sessionFile });
+    expect(await readFile(sessionFile, "utf8")).toBe(transcript);
+    const startedHosts = await launches(f.root);
+    expect(startedHosts).toHaveLength(2);
+    expect(startedHosts.every(launch => !launch.credentialPresent)).toBe(true);
+    expect(startedHosts[1]!.config).toMatchObject({ modelRoles: { default: "provider/preserved", slow: null }, defaultThinkingLevel: "low" });
+    expect((await lines<Inbound>(f.root, "received.jsonl")).filter(message => message.id === handoff.id)).toEqual([handoff]);
+  } catch (cause) {
+    const { logPath } = gatewayPaths(f.config);
+    const log = existsSync(logPath) ? await readFile(logPath, "utf8") : "(no successor log)";
+    const state = { restart: restartRecord(f.root, request.requestId), plan: restartPlan(f.root, request.requestId),
+      head: metadata(f.root, "gateway:head"), socket: metadata(f.root, "gateway:socket"), predecessor: f.childExited() };
+    throw new Error(`${String(cause)}\n${JSON.stringify(state)}\nSuccessor Gateway log:\n${log.slice(-16_000)}`, { cause });
   }
-  const after = (await gatewayStatus(config))!;
-  expect(processAlive(before.gateway.pid)).toBe(false);
-  expect(processAlive(before.head.pid!)).toBe(false);
-  expect(after.gateway.pid).not.toBe(before.gateway.pid);
-  expect(after.head.pid).not.toBe(before.head.pid);
-  expect(restartRecord(root, request.requestId)).toMatchObject({ state: "started", successorPid: after.gateway.pid,
-    replacementPid: after.head.pid, sessionId: fixtureSessionId(root), sessionFile: hostPaths(config, "main").sessionFile });
-  expect(await readFile(hostPaths(config, "main").sessionFile, "utf8")).toBe(transcript);
-  await until(async () => existsSync(join(root, "received.jsonl")) &&
-    (await readFile(join(root, "received.jsonl"), "utf8")).includes(input.id));
-  const launches = (await readFile(join(root, "launches.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  expect(launches).toHaveLength(2);
-  expect(launches.every(launch => !launch.credentialPresent)).toBe(true);
-  expect(launches[1].config).toMatchObject({ modelRoles: { default: "provider/preserved", slow: null }, defaultThinkingLevel: "low" });
-  const delivered = (await readFile(join(root, "received.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  expect(delivered.filter(message => message.id === input.id)).toHaveLength(1);
-}, 30_000);
+}, 2 * STARTUP_MS + 2 * RPC_MS + RESTART_SHUTDOWN_MS + 5_000);

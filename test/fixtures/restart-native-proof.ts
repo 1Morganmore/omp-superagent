@@ -15,7 +15,7 @@ import { DeliveryError } from "../../src/delivery";
 import { HostConnection } from "../../src/host";
 import { nativeDisabledProviders } from "./native-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
-import { nativeTestCommand } from "./native-command";
+import { nativeTestArgv } from "./native-command";
 
 interface Event {
   readonly kind: string;
@@ -60,7 +60,8 @@ assert(scenario === "busy" || scenario === "approval" || scenario === "lane" || 
 const recoveryWindow = scenario === "lane-failure-recovery-window" || scenario === "lane-abort-recovery-window";
 const abortedLane = scenario === "lane-abort" || scenario === "lane-abort-recovery-window";
 const detachedLane = scenario === "lane-failure" || scenario === "lane-abort" || recoveryWindow;
-const command = await nativeTestCommand();
+// Each real Host launch probes the selected executable before starting it.
+const command = nativeTestArgv();
 const interrupted = new AbortController();
 const terminate = () => { interrupted.abort(new Error("Owned native restart proof interrupted")); };
 process.on("SIGTERM", terminate);
@@ -77,7 +78,8 @@ async function until(predicate: () => boolean | Promise<boolean>, label: string,
   while (!await predicate()) {
     if (!cleanup) interrupted.signal.throwIfAborted();
     assert(Date.now() < deadline, `Native restart did not reach ${label}; retained ${root}`);
-    await new Promise<void>(resolve => setImmediate(resolve));
+    // Poll real state without competing with the native owner for the CPU.
+    await Bun.sleep(25);
   }
 }
 const events = async (name: string): Promise<Event[]> => {
@@ -96,10 +98,9 @@ await fs.writeFile(path.join(root, "agent/models.yml"), "providers: {}\n", { mod
 const settingsBytes = await fs.readFile(path.join(root, "agent/config.yml"));
 const configPath = path.join(root, "config.json");
 const providerPath = path.resolve(import.meta.dir, "restart-native-provider.ts");
-const nativeCommand = command;
 await fs.writeFile(configPath, JSON.stringify({
   stateDir: root, headCwd: path.join(root, "head"),
-  command: [...nativeCommand, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e", providerPath],
+  command: [...command, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e", providerPath],
   maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model,
   discord: { tokenEnv: "OMP_RESTART_NATIVE_DUMMY_TOKEN", ownerId: "1", allowedGuildIds: ["3"], allowedChannelIds: ["4", "5"] },
 }), { mode: 0o600 });
@@ -121,13 +122,14 @@ const input = (id: string, text: string, destination: Route): Inbound => ({ id, 
 const original = input("901", "Finish the entrusted native goal, keeping the completed file effect exactly once across my restart.", route);
 const restart = input("902", "/restart", restartRoute);
 const queued = input("903", "Deliver this never-submitted queued request exactly once after the native goal finishes.", queuedRoute);
-const deliver = async (message: Inbound): Promise<void> => {
+const deliver = async (message: Inbound, expectedPid?: number): Promise<void> => {
   const ingress = path.join(root, "ingress.jsonl");
   // Count actual log positions, including raw answers and duplicate source IDs.
   const index = (await fs.readFile(ingress, "utf8")).split("\n").filter(Boolean).length + 1;
   await fs.appendFile(ingress, `${JSON.stringify({ kind: "message", input: message })}\n`);
-  await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "ingress-admitted" && event.index === index),
-    `Messenger admission of ${message.id} at ingress position ${index}`);
+  await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "ingress-admitted" && event.index === index
+    && (expectedPid === undefined || event.pid === expectedPid)),
+    `Messenger admission of ${message.id} at ingress position ${index}${expectedPid === undefined ? "" : ` by Gateway ${expectedPid}`}`);
 };
 const stateOf = (id: string): InputRow | null => {
   assert(ledger);
@@ -163,7 +165,7 @@ async function cleanup() {
   await fs.writeFile(path.join(root, "release-resume"), "cleanup\n", { mode: 0o600 });
   await fs.writeFile(path.join(root, "release-lane"), "cleanup\n", { mode: 0o600 });
   await fs.writeFile(path.join(root, "release-reconnect"), "cleanup\n", { mode: 0o600 });
-  await fs.writeFile(path.join(root, "release-successor-attach"), "cleanup\n", { mode: 0o600 });
+  await fs.writeFile(path.join(root, "release-successor-launch"), "cleanup\n", { mode: 0o600 });
   await fs.writeFile(path.join(root, "release-lane-outcome"), "cleanup\n", { mode: 0o600 });
   await fs.writeFile(path.join(root, "release-lane-recovery-entries"), "cleanup\n", { mode: 0o600 });
   await until(async () => {
@@ -201,7 +203,7 @@ async function cleanup() {
   }, "all fixture-owned detached processes exited", true);
   ledger?.close();
   ledger = undefined;
-  for (const name of ["release-ack", "release-resume", "release-lane", "release-reconnect", "release-successor-attach", "release-lane-outcome",
+  for (const name of ["release-ack", "release-resume", "release-lane", "release-reconnect", "release-successor-launch", "release-lane-outcome",
     "arm-lane-recovery-entries", "release-lane-recovery-entries"])
     await fs.rm(path.join(root, name), { force: true });
   return { startedAt, completedAt: Date.now(), remainingProcessCount: remainingProcesses.length, remainingProcesses, gateFilesRemoved: true };
@@ -341,8 +343,9 @@ try {
   if (detachedLane) {
     assert(survivingLane);
     const lane = survivingLane;
-    await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "wire-successor-attach-held"),
-      "successor HEAD is held at actual authenticated transport attachment before it can restore the surviving lane");
+    await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "successor-launch-held"),
+      "one-shot runner holds the replacement launch after the predecessors exit");
+    assert.equal(processAlive(beforeGateway.gateway.pid), false);
     assert.equal(processAlive(beforeGateway.head.pid), false);
     const checkpoint = metadata<{ checkpoint?: { residents: readonly { id: string; inputId?: string; requestIds: readonly string[];
       result?: unknown; ownedRuns: number; entryId?: string }[] } }>("head:restart:902")?.checkpoint;
@@ -389,7 +392,7 @@ try {
       assert.equal(active.isStreaming, true);
       assert.equal(active.isSettled, false);
       await fs.writeFile(path.join(root, "arm-lane-recovery-entries"), "Hold only the next real HEAD restoration journal response.\n", { mode: 0o600 });
-      await fs.writeFile(path.join(root, "release-successor-attach"), "Attach replacement HEAD while the real lane continuation remains active.\n", { mode: 0o600 });
+      await fs.writeFile(path.join(root, "release-successor-launch"), "Launch replacement HEAD while the real lane continuation remains active.\n", { mode: 0o600 });
       await until(async () => (await events("native-events.jsonl")).some(event => event.kind === "head-recovery-snapshot-held" && event.producerPid === lane.pid),
         "actual replacement restoration snapshot held before the HEAD controller consumes it");
       heldResponse = (await events("native-events.jsonl")).find(event => event.kind === "head-recovery-snapshot-held" && event.producerPid === lane.pid);
@@ -495,7 +498,7 @@ try {
     detachedLaneReceipt = { checkpoint: saved, originalAdmission: admission, nativeStartsAfterCheckpoint: starts,
       nativeEntriesBeforeReattach: recoveryWindow ? undefined : entries,
       nativeStateBeforeReattach: recoveryWindow ? undefined : await observer.client.getState(), recoveryWindow: recoveryWindowReceipt };
-    if (!recoveryWindow) await fs.writeFile(path.join(root, "release-successor-attach"), "Restore actual HEAD attachment only after the lane's later native terminal outcome is durable.\n", { mode: 0o600 });
+    if (!recoveryWindow) await fs.writeFile(path.join(root, "release-successor-launch"), "Launch the replacement only after the lane's later native terminal outcome is durable.\n", { mode: 0o600 });
   }
   if (scenario === "quarantine") {
     await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "process-start" && event.role === "runner"),
@@ -547,9 +550,7 @@ try {
       assert.equal((await events("native-events.jsonl")).filter(event => event.kind === "native-aborted").length, 0);
       assert.equal(stateOf(queued.id)?.state, "pending");
     }
-    await deliver(restart);
-    await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "ingress-admitted" && event.index === (scenario === "stop" ? 6 : 5)),
-      "original restart duplicate processed without another lifecycle effect");
+    await deliver(restart, beforeGateway.gateway.pid);
     const unchanged = await status();
     assert.equal(unchanged?.gateway.pid, beforeGateway.gateway.pid);
     assert.equal(unchanged?.head.pid, beforeGateway.head.pid);
@@ -639,10 +640,8 @@ try {
       "SELECT delivery_error FROM gateway_events WHERE identity=?").get(`answer:${approval.id}`)?.delivery_error === "rejected", "stale original-route question answer rejected without native effect");
     assert.deepEqual((await successor.client.getState()).pendingUiRequests, []);
   }
-  await deliver(restart); // Replay again through the actual successor's Messenger intake.
-  const expectedIngress = scenario === "quarantine" ? 7 : scenario === "approval" || survivingLane ? 6 : 5;
-  await until(async () => (await events("transport-events.jsonl")).some(event => event.kind === "ingress-admitted"
-    && event.pid === afterGateway.gateway.pid && event.index === expectedIngress), "duplicate restart intake processed by successor without another handoff");
+  // Replay again through the actual successor's Messenger intake.
+  await deliver(restart, afterGateway.gateway.pid);
   let laneReadback: Record<string, unknown> | undefined;
   if (survivingLane) {
     const laneConnection = await HostConnection.connect(survivingLane.socketPath);

@@ -199,7 +199,7 @@ try {
   const { writeStockHostExecutable } = await import("./stock-host");
   await writeStockHostExecutable(executable, `import ${JSON.stringify(hostFixture)};\n`);
   const { startGateway } = await import("../../src/gateway");
-  const { gatewayStatus } = await import("../../src/gateway-protocol");
+  const { gatewayPaths, gatewayStatus } = await import("../../src/gateway-protocol");
   const absent = await cli("status");
   assert.equal(absent.gateway, null);
   assert.equal(absent.autostart.installed, false);
@@ -267,7 +267,10 @@ try {
   await bootstrap();
   await fs.rm(path.join(root, "busy"));
   await checked([process.execPath, "--no-env-file", cliPath, "stop", "--config", configPath]);
-  await until(async () => (await gatewayStatus(config)) === null && messengerStopped, "Explicit CLI stop completes");
+  // The stop receipt precedes listener teardown. Do not open a status request
+  // on a socket the Gateway is closing; verify its removal and adapter stop.
+  const { socketPath } = gatewayPaths(config);
+  await until(() => messengerStopped && !existsSync(socketPath), "Explicit CLI stop closes the Gateway and Messenger");
   // Observe multiple real Gateway supervision ticks with the one-shot job STILL
   // loaded: no KeepAlive recovery, launchctl kickstart, or replacement is allowed.
   await Bun.sleep(2_200);

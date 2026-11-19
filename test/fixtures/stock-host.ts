@@ -4,21 +4,16 @@ import { HostChannel, type Frame } from "../../src/host-protocol";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { dependencies } from "../../package.json";
 
-// Metadata belongs to this explicit fake executable, not production detection.
-if (process.argv.includes("--version")) {
-  console.log(`omp/${dependencies["@oh-my-pi/pi-coding-agent"]}`);
-  process.exit(0);
-}
-if (process.argv.includes("--help")) {
-  console.log("--mode rpc rpc-ui --resume FILE --extension PATH --model MODEL");
-  process.exit(0);
-}
-
 /** Materialize a directly executable CLI with the same metadata and native argv boundary. */
 export async function writeStockHostExecutable(file: string, source: string): Promise<void> {
+  // Metadata probes must not load the fake RPC peer, its SDK, or the Gateway.
+  const peer = `${file}.peer.ts`;
+  await writeFile(peer, source);
   await writeFile(file, `#!${await realpath(process.execPath)} --no-env-file
-import ${JSON.stringify(import.meta.path)};
-${source}`, { mode: 0o700 });
+if (process.argv[2] === "--version") console.log(${JSON.stringify(`omp/${dependencies["@oh-my-pi/pi-coding-agent"]}`)});
+else if (process.argv[2] === "--help") console.log("--mode rpc rpc-ui --resume FILE --extension PATH --model MODEL");
+else await import(${JSON.stringify(peer)});
+`, { mode: 0o700 });
 }
 
 /** Explicit fake native process boundary for transport tests, never a production fallback. */

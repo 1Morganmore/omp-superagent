@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { buildHostArgs, connect, HostConnection, HostStartError, startHost, type HostFrame, type HostOptions } from "../src/host";
@@ -67,7 +68,7 @@ async function directory(): Promise<string> {
   const result = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osh-"));
   await fs.chmod(result, 0o700);
   await fs.writeFile(path.join(result, "extension.ts"), "export default function () {}\n");
-  cleanups.push(() => fs.rm(result, { recursive: true, force: true }));
+  cleanups.push(async () => { rmSync(result, { recursive: true, force: true }); });
   return result;
 }
 
@@ -360,7 +361,7 @@ test("startup failures are named and never include host log contents", async () 
   expect(error.message).not.toContain("credential-secret");
 });
 
-test("startHost launches a detached argv process with exact child environment, identity, and concurrency config", async () => {
+test("detached Host preserves launch configuration and reconnects to the same private, ready peer", async () => {
   const root = await directory();
   const launch = options(root);
   const credentialNames = ["TEST_HOST_DISCORD_TOKEN", "TEST_HOST_TELEGRAM_TOKEN", "TEST_HOST_SLACK_BOT_TOKEN", "TEST_HOST_SLACK_APP_TOKEN"];
@@ -372,8 +373,22 @@ import { stockHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, 
 const args = process.argv.slice(2);
 const value = flag => args[args.indexOf(flag) + 1];
 const sessionFile = value("--session");
+fs.watch(process.cwd(), { persistent: false }, (_, name) => {
+  if (name === "end-test-peer") process.exit(0);
+});
 fs.writeFileSync(${JSON.stringify(path.join(root, "observed.json"))}, JSON.stringify({ args, config: JSON.parse(fs.readFileSync(value("--config"), "utf8")), cwd: process.cwd(), credentialPresent: ${JSON.stringify(credentialNames)}.map(name => Object.hasOwn(process.env, name)), providerAuth: process.env.TEST_HOST_PROVIDER_AUTH, explicit: process.env.TEST_HOST_EXPLICIT, managedUlwPath: process.env.OMP_SUPERAGENT_MANAGED_ULW_PATH, fixtureUlwPath: process.env.OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH }));
-await stockHostFixture({ sessionFile });
+const socketPath = process.env.OMP_SUPERAGENT_NATIVE_SOCKET;
+let beforeInode;
+await stockHostFixture({ sessionFile, beforeReady: async () => {
+  fs.chmodSync(socketPath, 0o644);
+  beforeInode = fs.lstatSync(socketPath).ino;
+  await Bun.sleep(250);
+  fs.chmodSync(socketPath, 0o600);
+}, connected: () => {
+  const { ino, mode } = fs.lstatSync(socketPath);
+  fs.appendFileSync(${JSON.stringify(path.join(root, "connections.jsonl"))},
+    JSON.stringify({ beforeInode, ino, mode: mode & 0o777, pid: process.pid }) + "\\n");
+} });
 `);
   let pid: number;
   try {
@@ -385,7 +400,17 @@ await stockHostFixture({ sessionFile });
       else process.env[name] = value;
     }
   }
-  cleanups.push(async () => { try { process.kill(pid, "SIGKILL"); } catch {} });
+  const receipt = Bun.file(`${launch.socketPath}.exit.json`);
+  cleanups.push(async () => {
+    if (await receipt.exists()) return;
+    // Independent of the shutdown RPC under test; only this fixture watches the marker.
+    await fs.writeFile(path.join(root, "end-test-peer"), "");
+    const signal = AbortSignal.timeout(5_000);
+    while (!await receipt.exists()) {
+      signal.throwIfAborted();
+      await Bun.sleep(25);
+    }
+  });
   const observed = await Bun.file(path.join(root, "observed.json")).json();
   expect(observed.credentialPresent).toEqual([false, false, false, false]);
   expect(observed.providerAuth).toBe("preserved-model-auth");
@@ -398,54 +423,19 @@ await stockHostFixture({ sessionFile });
   expect(observed.cwd).toBe(root);
   expect(observed.args).toContain("rpc-ui");
   expect(observed.args).not.toContain("--auto-approve");
+  const connections = (await fs.readFile(path.join(root, "connections.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  expect(connections.length).toBeGreaterThan(0);
+  for (const peer of connections) expect(peer).toMatchObject({ beforeInode: peer.ino, mode: 0o600, pid });
   const attached = await connect(launch.socketPath);
-  expect((await attached.client.getState()).hostPid).toBe(pid);
-  await attached.close();
-  process.kill(pid, 0);
+  try { expect((await attached.client.getState()).hostPid).toBe(pid); }
+  finally { await attached.close(); }
   const reattached = await connect(launch.socketPath);
-  process.kill(pid, 0);
-  expect(await reattached.request({ type: "shutdown_host" })).toMatchObject({ success: true });
-  await reattached.exited;
-  expect(JSON.parse(await fs.readFile(`${launch.socketPath}.exit.json`, "utf8"))).toMatchObject({
-    pid, code: 0, signal: null, persisted: true, observationsFlushed: true,
-  });
-  await reattached.close();
-});
-
-test("owner waits for native control readiness after chmod on its unchanged endpoint", async () => {
-  const root = await directory();
-  const launch = options(root);
-  const observations = path.join(root, "permissions.json");
-  await writeStockHostExecutable(launch.command[0]!, `
-import * as fs from "node:fs";
-import { stockHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/stock-host.ts"))};
-const args = process.argv.slice(2);
-const value = flag => args[args.indexOf(flag) + 1];
-const socketPath = process.env.OMP_SUPERAGENT_NATIVE_SOCKET;
-const sessionFile = value("--session");
-let insecureConnections = 0;
-let beforeInode;
-let afterInode;
-await stockHostFixture({ sessionFile, connected: () => {
-  if ((fs.lstatSync(socketPath).mode & 0o777) !== 0o600) insecureConnections++;
-  fs.writeFileSync(${JSON.stringify(observations)}, JSON.stringify({
-    insecureConnections, beforeInode, afterInode, pid: process.pid
-  }));
-}, beforeReady: async () => {
-  fs.chmodSync(socketPath, 0o644);
-  beforeInode = fs.lstatSync(socketPath).ino;
-  await Bun.sleep(250);
-  fs.chmodSync(socketPath, 0o600);
-  afterInode = fs.lstatSync(socketPath).ino;
-} });
-`);
-  const { pid } = await startHost(launch);
-  cleanups.push(async () => { try { process.kill(pid, "SIGKILL"); } catch {} });
-  const observed = JSON.parse(await fs.readFile(observations, "utf8"));
-  expect(observed.insecureConnections).toBe(0);
-  expect(observed.beforeInode).toBe(observed.afterInode);
-  expect(observed.pid).toBe(pid);
-  const connection = await connect(launch.socketPath);
-  try { expect((await connection.client.getState()).hostPid).toBe(pid); }
-  finally { await connection.close(); }
-});
+  try {
+    expect((await reattached.client.getState()).hostPid).toBe(pid);
+    expect(await reattached.request({ type: "shutdown_host" })).toMatchObject({ success: true });
+    await Promise.race([reattached.exited, once(AbortSignal.timeout(5_000), "abort").then(() => {
+      throw new Error("Host acknowledged shutdown but did not disconnect");
+    })]);
+    expect(await receipt.json()).toMatchObject({ pid, code: 0, signal: null, persisted: true, observationsFlushed: true });
+  } finally { await reattached.close(); }
+}, 60_000);

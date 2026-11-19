@@ -27,6 +27,14 @@ requireMessengerCredentials(config);
 const { launchGateway, startGateway } = await import("../../src/gateway");
 const self = fileURLToPath(import.meta.url);
 const runnerRequest = arg("--runner");
+const scenario = process.env.OMP_RESTART_NATIVE_SCENARIO;
+const detachedLane = scenario === "lane-failure" || scenario === "lane-abort"
+  || scenario === "lane-failure-recovery-window" || scenario === "lane-abort-recovery-window";
+const waitForGate = async (name: string): Promise<void> => {
+  const gate = join(root, name);
+  const cleanup = join(root, "cleanup");
+  while (!existsSync(gate) && !existsSync(cleanup)) await Bun.sleep(25);
+};
 const record = (kind: string, fields: Record<string, unknown> = {}) => {
   appendFileSync(join(root, "transport-events.jsonl"), `${JSON.stringify({ kind, at: Date.now(), pid: process.pid, ...fields })}\n`, { mode: 0o600 });
 };
@@ -34,7 +42,13 @@ record("process-start", { role: runnerRequest ? "runner" : "gateway", requestId:
 if (runnerRequest) {
   try {
     await runGatewayRestart(config.path, runnerRequest, {
-      launch: (configuration, requestId) => {
+      launch: async (configuration, requestId) => {
+        if (detachedLane) {
+          // The runner has confirmed both predecessors exited. Hold before
+          // starting the replacement, not inside its first timed HTTP request.
+          record("successor-launch-held", { requestId });
+          await waitForGate("release-successor-launch");
+        }
         assert(!existsSync(join(root, "cleanup")), "Fixture cleanup cancels its isolated successor launch");
         return launchGateway(configuration, requestId, [process.execPath, "--no-env-file", self]);
       },
@@ -51,20 +65,10 @@ if (runnerRequest) {
   let draining: Promise<void> | undefined;
   let watcher: FSWatcher | undefined;
   let starting: Promise<GatewayService> | undefined;
-  const waitForGate = async (name: string): Promise<void> => {
-    const done = Promise.withResolvers<void>();
-    const check = () => {
-      if (existsSync(join(root, name)) || existsSync(join(root, "cleanup"))) done.resolve();
-    };
-    const gate = watch(root, check);
-    try { check(); await done.promise; } finally { gate.close(); }
-  };
   let activeEvents: ServerResponse | undefined;
   let streamIndex = 0;
   let holdReconnect = false;
-  const detachedLane = process.env.OMP_RESTART_NATIVE_SCENARIO === "lane-failure" || process.env.OMP_RESTART_NATIVE_SCENARIO === "lane-abort"
-    || process.env.OMP_RESTART_NATIVE_SCENARIO === "lane-failure-recovery-window" || process.env.OMP_RESTART_NATIVE_SCENARIO === "lane-abort-recovery-window";
-  if (process.env.OMP_RESTART_NATIVE_SCENARIO === "quarantine" || detachedLane) {
+  if (scenario === "quarantine" || detachedLane) {
     // Control raw HTTP delivery in this private process. Production still owns
     // authentication, PID authorization, native reconciliation and every receipt.
     const emit = Server.prototype.emit;
@@ -72,15 +76,6 @@ if (runnerRequest) {
       const [request, response] = args;
       if (event !== "request" || this.address() !== join(root, "run/gateway.sock")
         || !(request instanceof IncomingMessage) || !(response instanceof ServerResponse)) return emit.call(this, event, ...args);
-      if (request.url === "/attach" && detachedLane && arg("--restart-request") && !existsSync(join(root, "release-successor-attach"))) {
-        record("wire-successor-attach-held", { clientId: request.headers["x-gateway-client"] });
-        void waitForGate("release-successor-attach").then(() => {
-          record("wire-successor-attach-released", { destroyed: response.destroyed });
-          if (!request.destroyed && !response.destroyed) emit.call(this, event, ...args);
-          else response.destroy();
-        }).catch(error => { record("fixture-error", { error: String(error) }); response.destroy(); });
-        return true;
-      }
       if (request.url === "/attach" && holdReconnect && !existsSync(join(root, "release-reconnect"))) {
         record("wire-attach-held", { clientId: request.headers["x-gateway-client"] });
         void waitForGate("release-reconnect").then(() => {
