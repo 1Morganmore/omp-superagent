@@ -38,6 +38,8 @@ export async function until<T>(label: string, timeoutMs: number, probe: () => T 
 export function metadata<T>(root: string, key: string): T | null {
   const db = new Database(join(root, "coordination.sqlite"), { readonly: true });
   try {
+    // The successor may be writing or closing the WAL during a receipt probe.
+    db.run("PRAGMA busy_timeout = 5000");
     const row = db.query<{ value: string }, [string]>("SELECT value FROM metadata WHERE key=?").get(key);
     return row ? JSON.parse(row.value) : null;
   } finally { db.close(); }
