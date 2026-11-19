@@ -134,7 +134,7 @@ describe("setup mascot profiles", () => {
       signal: abort.signal,
       createRest(options, token) {
         const rest = discord.createRest(options, token);
-        return { get: rest.get, async patch(...args) { abort.abort(); throw new Error("Cancelled"); } };
+        return { get: rest.get, async patch() { abort.abort(); throw new Error("Cancelled"); } };
       },
       createApi() { throw new Error("Cancelled setup must not reach Telegram"); },
     });

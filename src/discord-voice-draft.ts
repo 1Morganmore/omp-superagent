@@ -27,7 +27,7 @@ export class VoiceDrafts {
   private sending = false;
 
   /** The caller supplies the session's already allowlisted, bound guild text channel. */
-  async propose(channel: TextChannel, ownerId: string, text: string, signal: AbortSignal): Promise<string> {
+  async propose(channel: TextChannel, ownerId: string, text: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     if (this.sending || this.current()) {
       throw new DeliveryError("A voice work proposal is already outstanding.", "rejected");
@@ -81,7 +81,6 @@ export class VoiceDrafts {
         signal, startedAt: Date.now(),
         posted: { id: sent.id, createdTimestamp: sent.createdTimestamp, accountId, ownerId, guildId, channelId, work },
       };
-      return sent.id;
     } finally {
       this.sending = false;
     }

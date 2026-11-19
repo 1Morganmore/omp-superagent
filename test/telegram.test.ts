@@ -786,13 +786,15 @@ describe("Telegram approvals and exact-card interaction", () => {
     expect(resumed.answers).toEqual([{ id: a.id, response: { confirmed: true }, route: a.route }]);
     expect(ledger.getMeta("telegram:900:offset")).toBe("2");
   });
-  test("a pending queue row cannot reopen a closed native tombstone without a final-answer attempt", async () => {
+  test("a card closed from durable state without an in-memory card cannot reopen for a queued answer", async () => {
     const http = new TelegramHttp(); const ledger = store();
     const first = await fixture({ http, ledger, hasPendingAnswer: () => true });
     const a = approval();
     const id = await first.messenger.showApproval(a);
-    await first.messenger.dismissApproval({ ...a, remoteId: id });
     await first.messenger.stop();
+    const closer = await fixture({ http, ledger });
+    await closer.messenger.dismissApproval(a);
+    await closer.messenger.stop();
     const restarted = await fixture({ http, ledger, hasPendingAnswer: () => true });
     await expect(restarted.messenger.showApproval({ ...a, remoteId: id })).rejects.toThrow("already been answered");
     expect(http.calls.filter(call => call.method === "sendMessage")).toHaveLength(1);

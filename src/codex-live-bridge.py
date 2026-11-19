@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#     "aiortc==1.16.0",
-#     "anyio==4.16.0",
-#     "httpx2[http2,brotli,zstd]==2.16.2",
-#     "pydantic==2.14.3",
-#     "websockets==17.4",
-# ]
-# ///
-# Run through the optional Python environment documented for subscription voice.
+# The Gateway runs this with the Python environment installed from codex-voice-requirements.txt.
 # The Bun adapter owns the private stdin/stdout pipes; the bridge is not a CLI.
 
 from __future__ import annotations

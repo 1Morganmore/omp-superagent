@@ -255,8 +255,10 @@ export interface StorePort {
   input(id: string): InputRecord | null;
   ownerSource(id: string): InputRecord | null;
   inputs(target?: string): InputRecord[];
-  /** Actual authorized user messages, including settled records, in durable admission order. */
-  admittedMessages(route: Route): InputRecord[];
+  /** The first authorized revision on the physical route, even after settlement. */
+  firstAdmittedMessage(route: Route, messageId: string): InputRecord | null;
+  /** Actual authorized message IDs in durable admission order; not invocation or edit IDs. */
+  admittedMessageIds(route: Route): Iterable<string>;
   bindInput(id: string, target: string): void;
   submit(id: string, requestId: string, generation: number): boolean;
   /** Nonterminal native assistant observation; never settles or dispatches its owner. */

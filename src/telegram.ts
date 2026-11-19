@@ -3,10 +3,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Api, InputFile } from "grammy";
 import { AbortController as ApiAbortController, type AbortSignal as ApiAbortSignal } from "abort-controller";
 import type { CallbackQuery, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, UserFromGetMe } from "grammy/types";
-import { physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort } from "./contracts.ts";
+import { physicalRouteKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type ReplyContext, type Route, type StorePort } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { validateDecisionAnswer, validateDecisionResponse } from "./decisions";
-import { DeliveryError } from "./delivery.ts";
+import { approvalCardToken, DeliveryError } from "./delivery.ts";
 import { MESSENGER_COMMANDS } from "./messenger-commands.ts";
 
 // grammY Api has no retry transformer installed. Only getUpdates is retried.
@@ -122,7 +122,6 @@ export class TelegramMessenger implements Messenger {
     return JSON.stringify({ id: file.id, name: file.name, url: file.url, size: file.size,
       ...(file.contentType ? { contentType: file.contentType } : {}) });
   }
-  private approvalToken(approval: Approval): string { return hash(JSON.stringify([approval.id, approval.generation, approval.target, approval.requestId, routeKey(approval.route)])); }
 
   async start(handlers: Handlers): Promise<void> {
     if (this.handlers) throw new DeliveryError("Telegram messenger is already started", "rejected");
@@ -255,8 +254,11 @@ export class TelegramMessenger implements Messenger {
     const reply = this.replyContext(message, route);
     // Preserve the existing owner-edit identity when optional context appears
     // after an adapter upgrade or an independently edited referenced message.
-    const fileIdentity = files.map(({ voice: _voice, durationSeconds: _duration, ...file }) => file);
-    const revision = message.edit_date === undefined ? "original" : `edit:${message.edit_date}:${hash(JSON.stringify([originalText, fileIdentity]))}`;
+    let revision = "original";
+    if (message.edit_date !== undefined) {
+      const fileIdentity = files.map(({ voice: _voice, durationSeconds: _duration, ...file }) => file);
+      revision = `edit:${message.edit_date}:${hash(JSON.stringify([originalText, fileIdentity]))}`;
+    }
     return { id: `telegram:${route.accountId}:${route.channelId}:${message.message_id}:${revision}`, route,
       messageId: String(message.message_id), text, receivedAt: (message.edit_date ?? message.date) * 1000, attachments: files,
       ...(reply ? { reply } : {}) };
@@ -408,7 +410,7 @@ export class TelegramMessenger implements Messenger {
   }
 
   async showApproval(approval: Approval): Promise<string> {
-    const token = this.approvalToken(approval);
+    const token = approvalCardToken(approval);
     const existing = this.approvalFlights.get(token);
     if (existing) return existing;
     const flight = this.approvalCard(approval);
@@ -420,7 +422,7 @@ export class TelegramMessenger implements Messenger {
   private async approvalCard(approval: Approval): Promise<string> {
     this.assertRoute(approval.route);
     if (!this.handlers || approval.state !== "pending") throw new DeliveryError("Telegram approval is not pending on an active messenger", "rejected");
-    const token = this.approvalToken(approval);
+    const token = approvalCardToken(approval);
     const existing = this.pending.get(token);
     if (existing?.active && existing.verified && existing.messageId) {
       if (approval.remoteId && approval.remoteId !== existing.messageId) throw new DeliveryError("Telegram approval receipt conflict", "rejected");
@@ -585,10 +587,11 @@ export class TelegramMessenger implements Messenger {
 
   async dismissApproval(approval: Approval): Promise<void> {
     this.assertRoute(approval.route);
-    const token = this.approvalToken(approval);
+    const token = approvalCardToken(approval);
     const pending = this.pending.get(token);
     if (pending) { pending.active = false; this.save(pending); }
-    const saved = this.options.store.getMeta(this.stateKey(token));
+    // save() already erased partial answers for the in-memory card.
+    const saved = pending ? null : this.options.store.getMeta(this.stateKey(token));
     const progress = saved ? JSON.parse(saved) as Progress : undefined;
     const id = approval.remoteId ?? pending?.messageId ?? progress?.messageId;
     if (id) this.options.store.setMeta(this.cardKey(approval.route, id), "closed");

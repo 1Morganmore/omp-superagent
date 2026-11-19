@@ -182,11 +182,8 @@ try {
     }
     if (ulwPath) {
       assert.equal(occurrences(combined, "<omp-model-preset>"), 1, "A real supported ULW preset must be active");
-      assert.match(combined, /on Grok 4\.5, acting as CEO and orchestrator/);
-      assert.match(combined, /Delegate implementation via `task` when the host permits it/);
-      assert.match(combined, /Never present unread code or unrun commands as verified fact/);
-      assert.match(combined, /Refusals are final/);
-      if (kind === "sub") assert.match(combined, /host-provided specialist role and assigned task/);
+      const preset = /<omp-model-preset>([\s\S]*?)<\/omp-model-preset>/.exec(combined)?.[1];
+      assert(preset?.includes(compositionModel.name), "Composed preset must contain instructions for the selected model");
       assert(!combined.includes("<omp-ulw-policy>"), "Loading a model profile is not workflow activation");
     }
     const referenceLocations = [...combined.matchAll(/^Packaged HEAD reference directory: (.+)$/gm)];

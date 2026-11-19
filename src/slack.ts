@@ -4,8 +4,9 @@ import { SocketModeClient } from "@slack/socket-mode";
 import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type Messenger, type OutputRecord, type Route } from "./contracts.ts";
 import { parseDialog, type Dialog } from "./dialog.ts";
 import { validateDecisionAnswer, validateDecisionResponse } from "./decisions";
-import { DeliveryError } from "./delivery.ts";
+import { approvalCardToken, DeliveryError } from "./delivery.ts";
 import { compareMessageIds } from "./message-order.ts";
+import { MESSENGER_COMMANDS } from "./messenger-commands.ts";
 import { parseSlackCommand } from "./slack-commands.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -46,13 +47,11 @@ const slackId = (value: unknown): value is string => string(value) && /^[A-Z][A-
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex").slice(0, 24);
 const plain = (value: string) => ({ type: "plain_text", text: value || "(empty)", emoji: false });
 const escapeText = (value: string): string => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-// Slack reserves leading slash commands in its composer. These are ordinary
-// authenticated owner messages, sharing the runtime's existing command parser,
-// including the head's bare query and argument forms of /model, /effort, /stop,
-// /compact, and the rest of the ordinary-text command surface.
-// Only an exact first token converts; lookalikes such as "!models" stay plain text.
-const controlText = (value: string): string => value.replace(/^!(new|main|stop|restart|resume|resolve|model|effort|help|status|context|compact|usage)(?=$|\s)/, "/$1");
-const tokenFor = (approval: Approval): string => hash(JSON.stringify([approval.id, approval.generation, approval.target, approval.requestId, routeKey(approval.route)]));
+// Slack reserves slash commands in its composer. Convert only an exact leading
+// owner command, preserving argument whitespace and ignoring lookalikes.
+const commandNames = new Set<string>(MESSENGER_COMMANDS.map(command => command.name));
+const controlText = (value: string): string => value.replace(/^!(\S+)/, (token, name: string) =>
+  commandNames.has(name) ? `/${name}` : token);
 const compare = (left: string, right: string): number => {
   const result = compareMessageIds("slack", left, right);
   if (result === null) throw new DeliveryError("Invalid Slack message timestamp", "rejected");
@@ -446,7 +445,7 @@ export class SlackMessenger implements Messenger {
   async showApproval(approval: Approval): Promise<string> {
     await this.destination(approval.route);
     if (!this.handlers || approval.state !== "pending") throw new DeliveryError("Slack approval is not pending on a started messenger", "rejected");
-    const token = tokenFor(approval);
+    const token = approvalCardToken(approval);
     const existing = this.pending.get(token);
     if (existing?.active && existing.messageId) {
       if (approval.remoteId && approval.remoteId !== existing.messageId) throw new DeliveryError("Slack approval receipt does not match its active card", "rejected");
@@ -483,7 +482,7 @@ export class SlackMessenger implements Messenger {
 
   async dismissApproval(approval: Approval): Promise<void> {
     this.assertRoute(approval.route);
-    const token = tokenFor(approval);
+    const token = approvalCardToken(approval);
     let pending = this.pending.get(token);
     if (!pending && approval.remoteId) {
       let dialog: Dialog;

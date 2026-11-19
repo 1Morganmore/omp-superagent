@@ -44,14 +44,15 @@ function reply(patch: Partial<ReplyFixture> = {}): Message {
 }
 
 function fixture(delivery?: Promise<void>, receiptChannelId = channelId) {
-  const sent: MessageCreateOptions[] = [];
+  const sent: Array<MessageCreateOptions & { id: string }> = [];
   const channel = {
     id: channelId, guildId, type: ChannelType.GuildText, client: { user: { id: botId } },
     async send(payload: MessageCreateOptions) {
-      sent.push(payload);
+      const id = String(Number(cardId) + sent.length);
+      sent.push({ ...payload, id });
       await delivery;
       return {
-        id: String(Number(cardId) + sent.length - 1), author: { id: botId, bot: true },
+        id, author: { id: botId, bot: true },
         channelId: receiptChannelId, guildId, content: payload.content, createdTimestamp: postedAt,
       };
     },
@@ -64,7 +65,7 @@ function fixture(delivery?: Promise<void>, receiptChannelId = channelId) {
 
 test("uses the sent card identity and turns the owner's written reply into ordinary one-shot work", async () => {
   const { drafts, propose } = fixture();
-  expect(await propose()).toBe(cardId);
+  await propose();
 
   const input = drafts.consume(reply());
 
@@ -110,13 +111,14 @@ for (const [violation, patch] of invalidReplies) {
 }
 
 test("rejects a replay of the old confirmation even after a new card is posted", async () => {
-  const { drafts, propose } = fixture();
+  const { drafts, propose, sent } = fixture();
   await propose();
   drafts.consume(reply());
-  const nextCard = await propose("Inspect the build state");
+  await propose("Inspect the build state");
 
   expect(drafts.consume(reply())).toBeNull();
-  expect(drafts.consume(reply({ id: "701", reference: { ...replyReference, messageId: nextCard } }))).toContain("Inspect the build state");
+  expect(sent).toHaveLength(2);
+  expect(drafts.consume(reply({ id: "701", reference: { ...replyReference, messageId: sent[1].id } }))).toContain("Inspect the build state");
 });
 
 test("allows only one unconfirmed card both during send and after Discord returns", async () => {
@@ -158,13 +160,14 @@ test("does not bind a Discord receipt from outside the original channel", async 
 test("a card cannot be confirmed at its expiry even though the session remains active", async () => {
   const clock = spyOn(Date, "now").mockReturnValue(500);
   try {
-    const { drafts, session, propose } = fixture();
+    const { drafts, session, propose, sent } = fixture();
     await propose();
     clock.mockReturnValue(500 + 5 * 60 * 1000);
 
     expect(drafts.consume(reply())).toBeNull();
     expect(session.signal.aborted).toBe(false);
-    expect(await propose()).not.toBe(cardId);
+    await propose();
+    expect(sent).toHaveLength(2);
   } finally {
     clock.mockRestore();
   }

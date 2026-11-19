@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { Approval, DialogResponse, Inbound, LaneModel, Messenger, OutputRecord, Route } from "../src/contracts";
-import { physicalRoute, physicalRouteKey, routeKey } from "../src/contracts";
+import { physicalRoute, physicalRouteKey } from "../src/contracts";
 import { type Config, hostPaths } from "../src/config";
 import { Superagent, type RuntimeAdapters, type RuntimeHost, type RuntimeState } from "../src/runtime";
 import { Store } from "../src/store";

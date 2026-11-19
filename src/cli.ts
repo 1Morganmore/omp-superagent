@@ -6,6 +6,7 @@ import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, require
 import { inspectInstalledOmp, supportedOmp } from "./installed-omp";
 import { loadCredentials } from "./credentials";
 import type { Lane } from "./contracts";
+import { readLaneRows } from "./lane-rows";
 import { setup } from "./setup";
 
 // Lifecycle imports below must stay lazy: static Gateway/Host imports execute
@@ -127,8 +128,7 @@ function laneRows(stateDir: string): Lane[] {
   if (!existsSync(path)) return [];
   const db = new Database(path, { readonly: true });
   try {
-    return (db.query("SELECT data FROM lanes ORDER BY rowid").all() as { data: string }[])
-      .map(row => JSON.parse(row.data) as Lane);
+    return readLaneRows(db);
   } finally { db.close(); }
 }
 
@@ -207,7 +207,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       main: { socketPath: hostPaths(config, "main").socketPath },
       lanes: laneRows(config.stateDir).map(l => ({
         id: l.id, title: l.title, cwd: l.cwd, workState: l.workState,
-        model: l.model ?? null, modelReason: l.modelReason ?? null, modelPreset: l.modelPreset ?? null,
+        model: l.model, modelReason: l.modelReason, modelPreset: l.modelPreset,
         recordedRuntimeState: l.runtimeState, sessionId: l.sessionId, socketPath: l.socketPath,
       })),
       note: "Gateway/head readiness is live when the Gateway is reachable; lane records are not a completion guarantee.",

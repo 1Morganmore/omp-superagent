@@ -1317,17 +1317,12 @@ export class Superagent {
   }
 
   private rememberThread(route: Route): void {
-    const physical = physicalRoute(route);
-    const routes = this.knownRoutes();
-    if (!routes.some(known => physicalRouteKey(known) === physicalRouteKey(physical))) {
-      routes.push(physical);
-      this.store.setMeta("messenger:routes", JSON.stringify(routes));
-    }
+    const identity = this.rememberRoute(route);
     // These platforms use the actual starter's identity as a history boundary.
     // Telegram history is adapter-owned; a topic ID is not a history cursor.
     if ((route.platform === "slack" || route.platform === "discord") && route.threadId
       && compareMessageIds(route.platform, route.threadId, route.threadId) !== null) {
-      const cursor = `cursor:${physicalRouteKey(route)}`;
+      const cursor = `cursor:${identity}`;
       if (!this.store.getMeta(cursor)) this.store.setMeta(cursor, route.threadId);
     }
   }
@@ -1365,7 +1360,7 @@ export class Superagent {
     });
   }
 
-  private slackAnchor(input: Inbound, messages?: InputRecord[]): string | null {
+  private slackAnchor(input: Inbound): string | null {
     const stored = this.store.getMeta(`dm:invocation-anchor:${input.id}`);
     if (stored !== null) {
       const anchor = JSON.parse(stored) as { invocationId: string; anchorMessageId: string | null };
@@ -1373,24 +1368,23 @@ export class Superagent {
       return anchor.anchorMessageId;
     }
     let latest: string | null = null;
-    for (const message of messages ?? this.store.admittedMessages(input.route)) {
-      const order = compareMessageIds("slack", message.messageId!, latest ?? message.messageId!);
+    for (const messageId of this.store.admittedMessageIds(input.route)) {
+      const order = compareMessageIds("slack", messageId, latest ?? messageId);
       if (order === null) throw new Error("Cannot order durable Slack owner messages");
-      if (latest === null || order > 0) latest = message.messageId;
+      if (latest === null || order > 0) latest = messageId;
     }
     return latest;
   }
 
   private slackDmAdmission(input: Inbound): { input: Inbound; metadata: Record<string, string> } {
     const physical = physicalRoute(input.route);
-    const messages = this.store.admittedMessages(physical);
     const command = input.text.trim();
     const control = /^\/new(?:\s|$)/.test(command) || command === "/main";
-    const original = input.messageId === null ? undefined : messages.find(message => message.messageId === input.messageId);
+    const original = input.messageId === null ? null : this.store.firstAdmittedMessage(physical, input.messageId);
+    const anchorMessageId = input.messageId === null ? this.slackAnchor(input) : undefined;
     let metadata: Record<string, string> = {};
     let topicId: string | null;
-    if (input.messageId === null) {
-      const anchorMessageId = this.slackAnchor(input, messages);
+    if (anchorMessageId !== undefined) {
       metadata[`dm:invocation-anchor:${input.id}`] = JSON.stringify({ invocationId: input.invocationId, anchorMessageId });
     }
     if (original) {
@@ -1402,7 +1396,7 @@ export class Superagent {
       }
     } else if (control) {
       topicId = command === "/main" ? null : `topic-${key(input.id)}`;
-      metadata = { ...metadata, ...this.topicMetadata(input, topicId) };
+      metadata = { ...metadata, ...this.topicMetadata(input, topicId, anchorMessageId) };
     } else if (input.messageId === null) {
       topicId = this.store.getMeta(`dm:active:${physicalRouteKey(physical)}`) || null;
     } else {
@@ -1419,7 +1413,7 @@ export class Superagent {
     return { input: { ...input, route: topicId ? { ...physical, topicId } : physical }, metadata };
   }
 
-  private topicMetadata(input: Inbound, topicId: string | null): Record<string, string> {
+  private topicMetadata(input: Inbound, topicId: string | null, anchorMessageId?: string | null): Record<string, string> {
     const eventId = this.eventOrderId(input);
     if (eventId === null) {
       const boundaries = this.commandBoundaries(input.route);
@@ -1430,7 +1424,8 @@ export class Superagent {
       }
       // Slack has no slash clock. This is observed-admission order after the
       // latest durable real owner message, not cross-connection chronology.
-      boundaries.push({ eventId: input.id, invocationId: input.invocationId!, anchorMessageId: this.slackAnchor(input),
+      boundaries.push({ eventId: input.id, invocationId: input.invocationId!,
+        anchorMessageId: anchorMessageId === undefined ? this.slackAnchor(input) : anchorMessageId,
         insertionOrder: (boundaries[boundaries.length - 1]?.insertionOrder ?? 0) + 1, topicId });
       const timeline = this.slackTimeline(input.route, undefined, boundaries);
       const identity = physicalRouteKey(input.route);
@@ -1494,17 +1489,23 @@ export class Superagent {
   }
 
   private remember(input: Inbound): void {
-    const destination = physicalRoute(input.route);
+    const identity = this.rememberRoute(input.route);
+    if (input.messageId === null) return;
+    const cursor = `cursor:${identity}`;
+    const previous = this.store.getMeta(cursor);
+    const order = compareMessageIds(input.route.platform, input.messageId, previous ?? input.messageId);
+    if (order !== null && (!previous || order > 0)) this.store.setMeta(cursor, input.messageId);
+  }
+
+  private rememberRoute(route: Route): string {
+    const physical = physicalRoute(route);
+    const identity = routeKey(physical);
     const routes = this.knownRoutes();
-    if (!routes.some(route => physicalRouteKey(route) === physicalRouteKey(destination))) {
-      routes.push(destination);
+    if (!routes.some(known => physicalRouteKey(known) === identity)) {
+      routes.push(physical);
       this.store.setMeta("messenger:routes", JSON.stringify(routes));
     }
-    if (input.messageId === null) return;
-    const cursor = `cursor:${physicalRouteKey(destination)}`;
-    const previous = this.store.getMeta(cursor);
-    const order = compareMessageIds(destination.platform, input.messageId, previous ?? input.messageId);
-    if (order !== null && (!previous || order > 0)) this.store.setMeta(cursor, input.messageId);
+    return identity;
   }
 
   private knownRoutes(): Route[] {

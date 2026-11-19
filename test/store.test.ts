@@ -428,7 +428,7 @@ describe("durable coordination store", () => {
     }
     expect(() => reopened.receive({ ...original, messageId: "1750000000.000001" }, "main")).toThrow("requires a real message ID");
     expect(() => reopened.receive({ ...original, invocationId: "opaque-trigger-capability" }, "main")).toThrow("requires a real message ID");
-    expect(reopened.admittedMessages(destination)).toEqual([]);
+    expect([...reopened.admittedMessageIds(destination)]).toEqual([]);
     for (const id of [original.id, handoff.id, reportId]) expect(reopened.input(id)).toMatchObject({ messageId: null, invocationId: original.invocationId });
   });
 
@@ -437,17 +437,20 @@ describe("durable coordination store", () => {
     const physical = route({ platform: "slack", accountId: "TTEAM:UBOT", authorityId: "UOWNER", guildId: null, channelId: "DOWNER", threadId: null });
     const first = { ...inbound("first-actual", { ...physical, topicId: "first-topic" }), messageId: "1750000000.000001" };
     const edit = { ...first, id: "edit-actual", route: physical, text: "edited" };
-    for (const input of [first, edit]) {
-      store.receive(input, "main", { [`user-source:${input.id}`]: "true" });
-      store.settle(input.id, "done");
-    }
     store.receive({ ...first, id: "internal-handoff" }, "main");
-    for (const [index, patch] of [{ accountId: "OTHER:UBOT" }, { authorityId: "UOTHER" }, { channelId: "DOTHER" }, { threadId: "1750000000.000001" }, { guildId: "TTEAM" }].entries()) {
+    for (const [index, patch] of [{ platform: "discord" } as const, { accountId: "OTHER:UBOT" }, { authorityId: "UOTHER" }, { channelId: "DOTHER" }, { threadId: "1750000000.000001" }, { guildId: "TTEAM" }].entries()) {
       const input = { ...first, id: `unrelated-${index}`, route: { ...physical, ...patch } };
       store.receive(input, "main", { [`user-source:${input.id}`]: "true" });
     }
-    expect(store.admittedMessages(physical).map(input => input.id)).toEqual([first.id, edit.id]);
-    expect(store.admittedMessages({ ...physical, topicId: "another-logical-topic" }).map(input => input.id)).toEqual([first.id, edit.id]);
+    const otherId = { ...first, id: "other-message", messageId: "1750000000.000002" };
+    for (const input of [otherId, first, edit]) {
+      store.receive(input, "main", { [`user-source:${input.id}`]: "true" });
+      store.settle(input.id, "done");
+    }
+    const logical = { ...physical, topicId: "another-logical-topic" };
+    expect(store.firstAdmittedMessage(logical, first.messageId)).toMatchObject({ id: first.id, route: first.route, state: "done" });
+    expect(store.firstAdmittedMessage(physical, "1750000000.000003")).toBeNull();
+    expect([...store.admittedMessageIds(physical)]).toEqual([otherId.messageId, first.messageId, edit.messageId]);
   });
 
   test("interaction origin survives handoffs, reports and reopen and participates in dedupe identity", () => {

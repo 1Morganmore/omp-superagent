@@ -9,7 +9,7 @@ import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachme
 import { changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "./discord-context";
 import { validateDecisionAnswer, validateDecisionResponse } from "./decisions";
 import { parseDialog, type Dialog } from "./dialog.ts";
-import { DeliveryError } from "./delivery.ts";
+import { approvalCardToken, DeliveryError } from "./delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
 import { renderDiscordMarkdown } from "./discord-markdown.ts";
 import { DiscordVoice } from "./discord-voice";
@@ -231,7 +231,7 @@ export class DiscordMessenger implements Messenger {
       if (!this.route(message.channel) || (message.author && (message.author.bot || message.author.id !== this.options.ownerId))) return;
       if (!message.guildId && "recipientId" in message.channel && message.channel.recipientId !== this.options.ownerId) return;
       const full = message.partial ? await message.fetch() : message;
-      const inbound = this.normalize(full);
+      const inbound = this.normalize(full, "pointer");
       if (inbound) {
         if (this.isVoiceControl(inbound)) {
           if (!fresh || message.partial || voiceEpoch !== this.voiceEpoch || !this.voiceConnected) return;
@@ -245,8 +245,8 @@ export class DiscordMessenger implements Messenger {
     }).catch(this.report);
   }
 
-  /** Normalize an already fetched Discord message with cached context; no attachment downloads. */
-  normalize(message: Message): Inbound | null {
+  /** Use only a reply pointer when the caller will resolve cache and API together. */
+  normalize(message: Message, replyContext: "cached" | "pointer" = "cached"): Inbound | null {
     if (message.author.bot || message.author.id !== this.options.ownerId || message.webhookId) return null;
     const route = this.route(message.channel);
     if (!route || (message.type !== 0 && message.type !== 19)) return null;
@@ -262,12 +262,16 @@ export class DiscordMessenger implements Messenger {
     // also ignores contentless edits instead of replacing an admitted intent.
     if (!message.content.trim() && attachments.length === 0) return null;
     const reply = this.replyPointer(message);
-    if (reply) this.snapshotReply(message, message.channel.messages.cache?.get(reply.messageId), reply);
+    if (reply && replyContext === "cached") this.snapshotReply(message, message.channel.messages.cache?.get(reply.messageId), reply);
     // CDN URLs carry expiring signatures; refreshing one must not create a new
     // input revision for an unchanged Discord edit.
     // Reply/voice snapshots are context, not a new edit or download identity.
-    const attachmentIdentity = attachments.map(file => [file.id, file.name, file.size, file.contentType]).sort((left, right) => String(left[0]).localeCompare(String(right[0])));
-    const revision = message.editedTimestamp === null ? "original" : `edit:${message.editedTimestamp}:${hash(JSON.stringify([message.content, attachmentIdentity]))}`;
+    let revision = "original";
+    if (message.editedTimestamp !== null) {
+      const attachmentIdentity = attachments.map(file => [file.id, file.name, file.size, file.contentType])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+      revision = `edit:${message.editedTimestamp}:${hash(JSON.stringify([message.content, attachmentIdentity]))}`;
+    }
     return {
       id: `discord:${route.accountId}:${message.id}:${revision}`, route, messageId: message.id,
       text: message.content, receivedAt: message.editedTimestamp ?? message.createdTimestamp, attachments,
@@ -522,7 +526,7 @@ export class DiscordMessenger implements Messenger {
     this.assertRoute(approval.route);
     if (!this.handlers) throw new DeliveryError("Discord messenger is not started", "rejected");
     if (approval.state !== "pending") throw new DeliveryError("Discord approval is no longer pending", "rejected");
-    const token = hash(JSON.stringify([approval.id, approval.generation, approval.target, approval.requestId, routeKey(approval.route)]));
+    const token = approvalCardToken(approval);
     const existing = this.pending.get(token);
     if (existing?.active && existing.messageId) {
       if (approval.remoteId && approval.remoteId !== existing.messageId) throw new DeliveryError("Discord approval receipt does not match its active control", "rejected");
@@ -599,12 +603,12 @@ export class DiscordMessenger implements Messenger {
     const matches = [...this.pending.values()].filter(pending => pending.approval.id === approval.id && pending.approval.generation === approval.generation && routeKey(pending.approval.route) === routeKey(approval.route));
     for (const pending of matches) pending.active = false;
     const messageIds = new Set([approval.remoteId, ...matches.map(pending => pending.messageId)].filter((id): id is string => !!id));
+    const token = approvalCardToken(approval);
     try {
       const channel = await this.destination(approval.route);
       for (const id of messageIds) {
         try {
           const message = await channel.messages.fetch(id);
-          const token = hash(JSON.stringify([approval.id, approval.generation, approval.target, approval.requestId, routeKey(approval.route)]));
           this.assertApprovalMessage(message, approval, token);
           await message.edit({ components: [], allowedMentions: NO_MENTIONS });
         }
@@ -801,7 +805,7 @@ export class DiscordMessenger implements Messenger {
       const messages = [...page.values()].sort((left, right) => BigInt(left.id) < BigInt(right.id) ? -1 : 1);
       if (!messages.length) break;
       for (const message of messages) {
-        const input = this.normalize(message);
+        const input = this.normalize(message, "pointer");
         if (input && !this.isVoiceControl(input) && physicalRouteKey(input.route) === physicalRouteKey(route)) {
           await this.resolveReply(message, input);
           inputs.push(input);

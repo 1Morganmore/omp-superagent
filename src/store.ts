@@ -31,6 +31,7 @@ import {
 import type { ApprovalResolution } from "./contracts";
 import { captureDecision, resolveDecision } from "./decisions";
 import { isLaneModel, laneModelArgument, sameLaneModel } from "./lane-models";
+import { readLaneRows, toLane } from "./lane-rows";
 import { workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
 
@@ -47,6 +48,8 @@ const SCHEMA = `
     UNIQUE(target, generation, request_id)
   );
   CREATE INDEX IF NOT EXISTS inputs_queue ON inputs(target, state, sequence);
+  CREATE INDEX IF NOT EXISTS inputs_message_id ON inputs(json_extract(data, '$.messageId'))
+    WHERE json_type(data, '$.messageId') = 'text';
   CREATE TABLE IF NOT EXISTS lane_sources (
     source_id TEXT PRIMARY KEY REFERENCES inputs(id),
     lane_id TEXT NOT NULL REFERENCES lanes(id)
@@ -67,6 +70,16 @@ const SCHEMA = `
   );
   CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
+
+const ADMITTED_MESSAGE_SCOPE = `FROM inputs
+  JOIN metadata ON metadata.key = 'user-source:' || inputs.id AND metadata.value = 'true'
+  WHERE json_type(inputs.data, '$.messageId') = 'text'
+    AND json_extract(inputs.data, '$.route.platform') = ?
+    AND json_extract(inputs.data, '$.route.channelId') = ?
+    AND json_extract(inputs.data, '$.route.accountId') = ?
+    AND json_extract(inputs.data, '$.route.authorityId') = ?
+    AND json_extract(inputs.data, '$.route.guildId') IS ?
+    AND json_extract(inputs.data, '$.route.threadId') IS ?`;
 
 interface InputRow {
   data: string;
@@ -100,11 +113,6 @@ const toOutput = (row: OutputRow): OutputRecord => ({
 const toApproval = (row: ApprovalRow): Approval => ({
   ...JSON.parse(row.data) as Approval, state: row.state, remoteId: row.remote_id,
 });
-const toLane = (row: { data: string }): Lane => {
-  const lane = JSON.parse(row.data) as Lane;
-  return { ...lane, model: lane.model ?? null, modelReason: lane.modelReason ?? null,
-    modelPreset: lane.modelPreset ?? null, modelPresetSnapshot: lane.modelPresetSnapshot ?? null };
-};
 const inboundData = (input: Inbound): Inbound => ({
   id: input.id, route: input.route, messageId: input.messageId, text: input.text,
   ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
@@ -256,19 +264,21 @@ export class Store implements StorePort {
     return rows.map(toInput);
   }
 
-  admittedMessages(route: Route): InputRecord[] {
-    const rows = this.db.query(`SELECT inputs.* FROM inputs
-      JOIN metadata ON metadata.key = 'user-source:' || inputs.id AND metadata.value = 'true'
-      WHERE json_type(inputs.data, '$.messageId') = 'text'
-        AND json_extract(inputs.data, '$.route.platform') = ?
-        AND json_extract(inputs.data, '$.route.channelId') = ?
-        AND json_extract(inputs.data, '$.route.accountId') = ?
-        AND json_extract(inputs.data, '$.route.authorityId') = ?
-        AND json_extract(inputs.data, '$.route.guildId') IS ?
-        AND json_extract(inputs.data, '$.route.threadId') IS ?
-      ORDER BY inputs.sequence`).all(route.platform, route.channelId, route.accountId, route.authorityId, route.guildId, route.threadId) as InputRow[];
-    const identity = physicalRouteKey(route);
-    return rows.map(toInput).filter(input => physicalRouteKey(input.route) === identity);
+  firstAdmittedMessage(route: Route, messageId: string): InputRecord | null {
+    const row = this.db.query<InputRow, [string, string, string, string, string | null, string | null, string]>(
+      `SELECT inputs.* ${ADMITTED_MESSAGE_SCOPE}
+        AND json_extract(inputs.data, '$.messageId') = ?
+        ORDER BY inputs.sequence LIMIT 1`,
+    ).get(route.platform, route.channelId, route.accountId, route.authorityId, route.guildId, route.threadId, messageId);
+    return row ? toInput(row) : null;
+  }
+
+  *admittedMessageIds(route: Route): Iterable<string> {
+    const rows = this.db.query<{ messageId: string }, [string, string, string, string, string | null, string | null]>(
+      `SELECT json_extract(inputs.data, '$.messageId') AS messageId ${ADMITTED_MESSAGE_SCOPE}
+        ORDER BY inputs.sequence`,
+    ).iterate(route.platform, route.channelId, route.accountId, route.authorityId, route.guildId, route.threadId);
+    for (const { messageId } of rows) yield messageId;
   }
 
   bindInput(id: string, target: string): void {
@@ -691,8 +701,7 @@ export class Store implements StorePort {
   }
 
   lanes(): Lane[] {
-    return (this.db.query("SELECT data FROM lanes ORDER BY rowid").all() as { data: string }[])
-      .map(toLane);
+    return readLaneRows(this.db);
   }
 
   updateLane(id: string, generation: number, patch: Partial<Pick<Lane,
