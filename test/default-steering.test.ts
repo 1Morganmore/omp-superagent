@@ -351,6 +351,8 @@ describe("native topic binding", () => {
     const lane = await runtime.startLane(select(original.id));
     expect(messenger.creations).toEqual(supported ? [{ route: destination, sourceMessageId: undefined }] : []);
     expect(lane.route.threadId).toBe(supported ? "900" : null);
+    expect(messenger.sent.find(output => output.id === `${original.id}:topic-bound`)?.text)
+      .toBe(supported ? "작업 스레드: <#900>" : undefined);
     expect(store.input(`handoff:${original.id}:lane`)).toMatchObject({ messageId: null, interactionId: original.interactionId });
     await runtime.messageLane(lane.id, "Explicit additional bounded work", original.id);
     expect(store.input(`handoff:${original.id}:${lane.id}`)).toMatchObject({ messageId: null, interactionId: original.interactionId });
@@ -375,6 +377,7 @@ describe("native topic binding", () => {
     expect(first.runtimeState).toBe("unloaded");
     expect(messenger.sent).toHaveLength(2);
     expect(messenger.sent.map(output => output.route)).toEqual([original.route, first.route]);
+    expect(messenger.sent[0]?.text).toBe(destination.platform === "telegram" ? "작업 주제: Independent task" : "작업 스레드: Independent task");
     expect(JSON.parse(store.getMeta(`head-delivery:${original.id}`)!)).toEqual({ source: original.route, destination: first.route, laneId: first.id });
     await runtime.startLane(select(original.id));
     await runtime.kick();

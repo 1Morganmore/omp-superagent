@@ -286,7 +286,7 @@ export async function nativeAutonomyRuntime(): Promise<void> {
     expect(laneFramesBeforeRelease.some(event => event.frame.type === "session_settled")).toBe(false);
     expect(messenger.sent.slice(laneProgressStart).filter(output => output.id !== "500:kickoff")).toEqual([
       expect.objectContaining({ id: "500:topic-bound", sourceId: "500", route,
-        text: expect.stringContaining("독립 작업 주제를 연결했습니다.") }),
+        text: expect.stringContaining(`<#${progressLane.route.threadId}>`) }),
       expect.objectContaining({ id: `${receipt.id}:answer`, route: progressLane.route, text: "HEAD_RELAYED_LANE_PROGRESS 500" }),
     ]);
     await fs.writeFile(path.join(root, "lane-progress.release"), "release\n", { mode: 0o600 });
@@ -299,7 +299,7 @@ export async function nativeAutonomyRuntime(): Promise<void> {
     expect(store.input("report:handoff:500:lane")?.text).not.toContain("LANE_PROGRESS 500");
     expect(messenger.sent.slice(laneProgressStart).filter(output => output.id !== "500:kickoff")).toEqual([
       expect.objectContaining({ id: "500:topic-bound", sourceId: "500", route,
-        text: expect.stringContaining("독립 작업 주제를 연결했습니다.") }),
+        text: expect.stringContaining(`<#${progressLane.route.threadId}>`) }),
       expect.objectContaining({ id: `${receipt.id}:answer`, route: progressLane.route, text: "HEAD_RELAYED_LANE_PROGRESS 500" }),
       expect.objectContaining({ id: "report:handoff:500:lane:answer", route: progressLane.route, text: "HEAD_RELAYED_LANE_FINAL 500" }),
     ]);

@@ -1744,9 +1744,11 @@ export class Superagent {
         for (const [name, value] of Object.entries(this.topicMetadata(original, logical.topicId!))) this.store.setMeta(name, value);
       }
       this.rememberThread(lane.route);
+      const topicLabel = lane.route.platform === "telegram" ? "작업 주제" : "작업 스레드";
+      const thread = lane.route.platform === "discord" && lane.route.threadId ? `<#${lane.route.threadId}>` : lane.title;
       this.store.queueOutput({
         id: `${original.id}:topic-bound`, sourceId: original.id, route: original.route,
-        text: `독립 작업 주제를 연결했습니다. 목적지: ${routeKey(lane.route)}\n레인: ${lane.id}\n독립 세션 기록: ${lane.sessionFile}\n호스트 실행은 예산과 대기 상태에 따라 시작됩니다. 연결만으로 실행 또는 완료를 주장하지 않습니다.`,
+        text: `${topicLabel}: ${thread}`,
       });
     }
     this.store.queueOutput({ id: kickoffId, sourceId: source.id, route: lane.route, text: input.kickoff });
