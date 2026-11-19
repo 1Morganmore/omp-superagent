@@ -40,7 +40,9 @@ export async function inspectInstalledOmp(
     // Require the CLI itself, not a runtime/script wrapper with an ambiguous
     // native argv boundary. Metadata inspection never loads launch extensions.
     const child = Bun.spawn([argv[0]!, flag], {
-      env, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 10_000,
+      // Unlike --version, root help loads the CLI's bundled native addon.
+      // Its first extraction and load on macOS can take more than ten seconds.
+      env, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: flag === "--help" ? 30_000 : 10_000,
     });
     const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     if (code !== 0) throw new Error(`Installed OMP ${flag} failed (${code}); diagnostic output suppressed to protect credentials`);

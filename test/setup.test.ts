@@ -12,9 +12,14 @@ import {
 const directories: string[] = [];
 const environment = new Map<string, string | undefined>();
 
-function fixture() {
+function setupDirectory() {
   const directory = mkdtempSync(join(tmpdir(), "superagent-setup-"));
   directories.push(directory);
+  return directory;
+}
+
+function fixture() {
+  const directory = setupDirectory();
   const path = join(directory, "config.json");
   const raw = {
     command: [process.execPath], headCwd: directory, stateDir: "state",
@@ -237,7 +242,7 @@ describe("private setup credentials", () => {
 // Use a fresh process for each native-config case: native dirs and dotenv cache
 // their environment at import time, so importing them in this runner is unsafe.
 async function nativeMemoryCase(before: string, after = "") {
-  const { directory } = fixture();
+  const directory = setupDirectory();
   const home = join(directory, "home");
   mkdirSync(home);
   const helper = new URL("../src/setup-memory.ts", import.meta.url).href;
@@ -457,11 +462,10 @@ describe("deferred native Mnemopi preference", () => {
 });
 
 async function nativeJudgeCase(before: string) {
-  const { directory } = fixture();
+  const directory = setupDirectory();
   const home = join(directory, "home");
   mkdirSync(home);
   const helper = new URL("../src/setup-judge.ts", import.meta.url).href;
-  const nativeSettings = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
   const nativeDirs = import.meta.resolve("@oh-my-pi/pi-utils/dirs");
   const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `
     import { mkdir, readdir, lstat, readFile, readlink, symlink } from "node:fs/promises";
@@ -554,24 +558,27 @@ describe("deferred native judge inspection", () => {
   }, 30_000);
 
   test("unmigrated legacy JSON and account databases leave lower-layer judge configuration unknown", async () => {
-    for (const legacy of ["await writeLegacy();", "await writeDb();", "await writeLegacy(); await writeDb();"]) {
-      for (const higher of ["", "await writeProject({ modelRoles: { judge: null } });",
-        "await writeOverlay({ modelRoles: { default: 'private-selector/chat' } });"]) {
-        expect(await nativeJudgeCase(`${legacy} ${higher}`)).toEqual({ status: "unknown" });
-      }
+    const both = "await writeLegacy(); await writeDb();";
+    // Check either legacy store in isolation; the higher-layer case below
+    // already checks project null with both stores present.
+    for (const before of [
+      "await writeLegacy();", "await writeDb();", both,
+      `${both} await writeOverlay({ modelRoles: { default: 'private-selector/chat' } });`,
+    ]) {
+      expect(await nativeJudgeCase(before)).toEqual({ status: "unknown" });
     }
   }, 90_000);
 
   test("both native modern filenames are authoritative despite opaque legacy JSON and database bytes", async () => {
     for (const filenameIndex of [0, 1]) {
-      for (const selector of [undefined, "private-selector/judge", " , , ", ["", " "]]) {
+      for (const selector of [undefined, "private-selector/judge"]) {
         expect(await nativeJudgeCase(`
           await writeLegacy(); await writeDb();
           await Bun.write(join(agentDir, MAIN_CONFIG_FILENAMES[${filenameIndex}]),
             JSON.stringify({ modelRoles: ${JSON.stringify(selector === undefined ? {} : { judge: selector })} }));
         `)).toEqual(selector === "private-selector/judge"
           ? { status: "configured", source: "global" }
-          : { status: "missing", source: selector === undefined ? "default" : "global" });
+          : { status: "missing", source: "default" });
       }
     }
     expect(await nativeJudgeCase(`

@@ -1084,6 +1084,8 @@ ULW entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선�
 standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
 선택한 OMP 버전·실행 경로를 출력하고 지원 범위·공개 RPC 기능을 metadata로 확인한다.
 로컬 테스트 runner는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
+`test:ci`는 설치된 CLI가 추출한 네이티브 바이너리만 실행별 임시 캐시에 공유한다. 각 fixture의 HOME·설정·인증은 계속 격리한다.
+`OMP_TEST_NATIVES_DIR`에 신뢰하는 절대 경로를 직접 지정하면 임시 캐시 대신 사용하며, 이 경로는 실행 후 삭제하지 않는다.
 
 PR과 `main`의 GitHub Actions는 Ubuntu 24.04와 macOS 15 Intel에서 실행한다. GitHub의 ARM64 러너
 배정 지연이 일반 검사를 막지 않도록 풀을 분리했다. 수동 실행과 `v*` 릴리스 태그는 macOS 15 ARM64도

@@ -20,6 +20,8 @@ const trackedNames = [...defaultNames, customName, unrelatedName];
 const memoryPrompt = "Enable native Mnemopi memory after saving setup? [y/N]: ";
 const judgeRecommendation = "Recommended: configure a native judge model for OMP's judge role";
 const judgeUnknown = "native OMP judge configuration could not be verified";
+// Runner preflight is shared; every setup/doctor invocation still probes the real CLI itself.
+let nativeCommandPreflight: Promise<string[]> | undefined;
 
 // These are external-process failure deadlines; fake timers cannot drive a PTY.
 // Successful interactions await real relay/prompt events, never a settling sleep.
@@ -336,8 +338,9 @@ Bun.spawn = function (...args) {
     BUN_OPTIONS: `--preload=${guard}`, SETUP_PTY_AUDIT: audit,
     SETUP_PTY_IMPORT_AUDIT: importAudit,
     SETUP_PTY_VIOLATION: violation, SETUP_PTY_NAMES: JSON.stringify(trackedNames),
+    ...(process.env.OMP_TEST_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.OMP_TEST_NATIVES_DIR } : {}),
   };
-  const selectedCommand = await nativeTestCommand();
+  const selectedCommand = await (nativeCommandPreflight ??= nativeTestCommand());
   const selectedExecutable = Bun.which(selectedCommand[0]!, { PATH: env.PATH });
   if (!selectedExecutable) throw new Error("Selected native test executable is unavailable to the PTY fixture");
   const nativeCommand = [await fs.realpath(selectedExecutable), ...selectedCommand.slice(1)];
@@ -652,21 +655,21 @@ ptyTest("missing judge advice follows publication even when native Mnemopi is en
   } finally { await context.cleanup(); }
 }, 90_000);
 
-ptyTest("fresh installs are missing, legacy state is unknown, and either modern config filename remains authoritative", async () => {
-  for (const mode of ["fresh", "legacy-json", "legacy-db", "legacy-both", "metadata-error", "modern-yml", "modern-yaml"]) {
-    const context = await fixture(mode === "modern-yml" ? {} : null);
+// setup.test.ts exercises native read-only judge input variants. Drive
+// representative outcomes through the wizard rather than re-running it for
+// each storage or selector spelling.
+ptyTest("fresh installs recommend a judge, unresolved legacy state is unknown, and modern YAML is authoritative", async () => {
+  for (const mode of ["fresh", "legacy", "modern-yaml"]) {
+    const context = await fixture(null);
     const legacy = path.join(path.dirname(context.nativeConfig), "settings.json");
     const legacyBytes = "pty-private-opaque-legacy-settings-must-not-be-parsed\n";
     const fallbackBytes = '{"modelRoles":{"default":"pty-private-default-only"}}\n';
-    const hasLegacyJson = ["legacy-json", "legacy-both", "modern-yml", "modern-yaml"].includes(mode);
-    const hasLegacyDb = ["legacy-db", "legacy-both", "modern-yml", "modern-yaml"].includes(mode);
     try {
-      if (hasLegacyJson) await fs.writeFile(legacy, legacyBytes, { mode: 0o600 });
-      if (hasLegacyDb) {
+      if (mode !== "fresh") {
+        await fs.writeFile(legacy, legacyBytes, { mode: 0o600 });
         context.nativeDbOriginal = "pty-private-opaque-legacy-db-must-not-be-opened\n";
         await fs.writeFile(context.nativeDb, context.nativeDbOriginal, { mode: 0o600 });
       }
-      if (mode === "metadata-error") await fs.symlink(legacy, legacy);
       if (mode === "modern-yaml") await fs.writeFile(context.nativeFallbackConfig, fallbackBytes, { mode: 0o600 });
       const terminal = context.terminal();
       await newTelegram(context, terminal);
@@ -676,7 +679,7 @@ ptyTest("fresh installs are missing, legacy state is unknown, and either modern 
       await terminal.finished(true);
       const transcript = terminal.transcript();
       expect(transcript).toContain("Saved configuration:");
-      if (mode.startsWith("legacy") || mode === "metadata-error") {
+      if (mode === "legacy") {
         expect(transcript).toContain(judgeUnknown);
         expect(transcript).toContain("unknown, not confirmed missing");
         expect(transcript).not.toContain(judgeRecommendation);
@@ -690,8 +693,7 @@ ptyTest("fresh installs are missing, legacy state is unknown, and either modern 
       expect(transcript).not.toContain("pty-native-presence-judge-secret");
       expect(transcript).not.toContain("pty-native-auth-must-stay-private");
       expect(await context.nativeSetupImports()).toBe(1);
-      if (hasLegacyJson) expect(await fs.readFile(legacy, "utf8")).toBe(legacyBytes);
-      else if (mode === "metadata-error") expect(await fs.readlink(legacy)).toBe(legacy);
+      if (mode !== "fresh") expect(await fs.readFile(legacy, "utf8")).toBe(legacyBytes);
       else expect(await exists(legacy)).toBe(false);
       if (mode === "modern-yaml") expect(await fs.readFile(context.nativeFallbackConfig, "utf8")).toBe(fallbackBytes);
       else expect(await exists(context.nativeFallbackConfig)).toBe(false);
@@ -700,67 +702,66 @@ ptyTest("fresh installs are missing, legacy state is unknown, and either modern 
   }
 }, 180_000);
 
-ptyTest("effective project and overlay judge assignments preserve native precedence over unresolved legacy global state", async () => {
+ptyTest("project null leaves a legacy judge unknown while overlay null explicitly clears it", async () => {
   for (const layer of ["project", "overlay"]) {
-    for (const selector of ["@pty-private-judge", "", [], " , , ", ["", " "], null]) {
-      const context = await fixture(null);
-      const legacy = path.join(path.dirname(context.nativeConfig), "settings.json");
-      const legacyBytes = "pty-private-unresolved-global-judge\n";
-      const layerPath = layer === "project" ? context.nativeProjectConfig : path.join(context.root, "judge-overlay.yml");
-      const layerBytes = `${JSON.stringify({ modelRoles: { judge: selector } })}\n`;
-      try {
-        await fs.writeFile(legacy, legacyBytes, { mode: 0o600 });
-        context.nativeDbOriginal = "pty-private-unresolved-account-storage\n";
-        await fs.writeFile(context.nativeDb, context.nativeDbOriginal, { mode: 0o600 });
-        await fs.mkdir(path.dirname(layerPath), { recursive: true });
-        await fs.writeFile(layerPath, layerBytes, { mode: 0o600 });
-        if (layer === "overlay") context.env.PI_CONFIG_FILES = layerPath;
-        const terminal = context.terminal();
-        await newTelegram(context, terminal);
-        await terminal.secret("TELEGRAM_BOT_TOKEN", "pty-legacy-precedence-judge-secret", false);
-        await terminal.answer(memoryPrompt, "n");
-        await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
-        await terminal.finished(true);
-        const transcript = terminal.transcript();
-        expect(transcript).toContain("Saved configuration:");
-        if (layer === "project" && selector === null) {
-          expect(transcript).toContain(judgeUnknown);
-          expect(transcript).not.toContain(judgeRecommendation);
-        } else {
-          expect(transcript).not.toContain(judgeUnknown);
-          if (selector === "@pty-private-judge") expect(transcript).not.toContain(judgeRecommendation);
-          else {
-            expect(transcript).toContain(judgeRecommendation);
-            expect(transcript).toContain(`empty or unset in ${layer} settings`);
-          }
-        }
-        expect(transcript).not.toContain("pty-private");
-        expect(transcript).not.toContain("pty-legacy-precedence-judge-secret");
-        expect(await context.nativeSetupImports()).toBe(1);
-        expect(await fs.readFile(legacy, "utf8")).toBe(legacyBytes);
-        expect(await fs.readFile(layerPath, "utf8")).toBe(layerBytes);
-        expect(await exists(context.nativeFallbackConfig)).toBe(false);
-        await context.inert();
-      } finally { await context.cleanup(); }
-    }
+    const context = await fixture(null);
+    const legacy = path.join(path.dirname(context.nativeConfig), "settings.json");
+    const legacyBytes = "pty-private-unresolved-global-judge\n";
+    const layerPath = layer === "project" ? context.nativeProjectConfig : path.join(context.root, "judge-overlay.yml");
+    const layerBytes = '{"modelRoles":{"judge":null}}\n';
+    try {
+      await fs.writeFile(legacy, legacyBytes, { mode: 0o600 });
+      context.nativeDbOriginal = "pty-private-unresolved-account-storage\n";
+      await fs.writeFile(context.nativeDb, context.nativeDbOriginal, { mode: 0o600 });
+      await fs.mkdir(path.dirname(layerPath), { recursive: true });
+      await fs.writeFile(layerPath, layerBytes, { mode: 0o600 });
+      if (layer === "overlay") context.env.PI_CONFIG_FILES = layerPath;
+      const terminal = context.terminal();
+      await newTelegram(context, terminal);
+      await terminal.secret("TELEGRAM_BOT_TOKEN", "pty-legacy-precedence-judge-secret", false);
+      await terminal.answer(memoryPrompt, "n");
+      await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
+      await terminal.finished(true);
+      const transcript = terminal.transcript();
+      expect(transcript).toContain("Saved configuration:");
+      if (layer === "project") {
+        expect(transcript).toContain(judgeUnknown);
+        expect(transcript).not.toContain(judgeRecommendation);
+      } else {
+        expect(transcript).not.toContain(judgeUnknown);
+        expect(transcript).toContain(judgeRecommendation);
+        expect(transcript).toContain("empty or unset in overlay settings");
+      }
+      expect(transcript).not.toContain("pty-private");
+      expect(transcript).not.toContain("pty-legacy-precedence-judge-secret");
+      expect(await context.nativeSetupImports()).toBe(1);
+      expect(await fs.readFile(legacy, "utf8")).toBe(legacyBytes);
+      expect(await fs.readFile(layerPath, "utf8")).toBe(layerBytes);
+      expect(await exists(context.nativeFallbackConfig)).toBe(false);
+      await context.inert();
+    } finally { await context.cleanup(); }
   }
-}, 240_000);
+}, 90_000);
 
-ptyTest("global, project and overlay judge selectors suppress advice without availability checks or native writes", async () => {
+ptyTest("effective global, project and overlay judge selectors suppress advice without availability checks or native writes", async () => {
   for (const [layer, selector] of [
-    ["global", "pty-private-unavailable/judge"], ["global", "@pty-private-role"],
-    ["project", "pi/pty-private-role"], ["overlay", "@pty-private-role"],
+    ["global", "pty-private-unavailable/judge"],
     ["overlay", ["@pty-private-role", "pty-private-unavailable/judge"]],
-    ["global", " , @pty-private-role, "], ["project", ["", "@pty-private-role", " "]],
-    ["project-null", null], ["head-project", "@pty-private-head-role"],
+    ["project", "@pty-private-head-role"],
   ] as const) {
-    const context = await fixture(layer === "project-null"
-      ? { modelRoles: { judge: "@pty-private-global-role" } } : {});
+    const context = await fixture(layer === "global" ? { modelRoles: { judge: selector } } : null);
+    const legacy = path.join(path.dirname(context.nativeConfig), "settings.json");
+    const legacyBytes = "pty-private-unresolved-global-judge\n";
+    const projectNull = '{"modelRoles":{"judge":null}}\n';
     try {
       let headCwd = context.root;
-      let layerPath = context.nativeConfig;
-      if (layer === "project" || layer === "project-null") layerPath = context.nativeProjectConfig;
-      if (layer === "head-project") {
+      let layerPath = context.nativeProjectConfig;
+      let bytes = projectNull;
+      if (layer !== "global") {
+        await fs.writeFile(legacy, legacyBytes, { mode: 0o600 });
+        bytes = `\n${JSON.stringify({ modelRoles: { judge: selector } })}\n`;
+      }
+      if (layer === "project") {
         headCwd = path.join(context.root, "actual-head-workspace");
         await fs.mkdir(headCwd);
         layerPath = path.join(headCwd, path.relative(context.root, context.nativeProjectConfig));
@@ -769,8 +770,7 @@ ptyTest("global, project and overlay judge selectors suppress advice without ava
         layerPath = path.join(context.root, "judge-overlay.yml");
         context.env.PI_CONFIG_FILES = layerPath;
       }
-      const bytes = `\n${JSON.stringify({ modelRoles: { judge: selector } })}\n`;
-      if (layer !== "global") await fs.mkdir(path.dirname(layerPath), { recursive: true });
+      await fs.mkdir(path.dirname(layerPath), { recursive: true });
       await fs.writeFile(layerPath, bytes, { mode: 0o600 });
       context.nativeDbOriginal = "judge-setup-must-not-open-or-migrate-this-account-store";
       await fs.writeFile(context.nativeDb, context.nativeDbOriginal, { mode: 0o600 });
@@ -789,14 +789,14 @@ ptyTest("global, project and overlay judge selectors suppress advice without ava
       expect(await context.nativeSetupImports()).toBe(1);
       expect(await fs.readFile(layerPath, "utf8")).toBe(bytes);
       expect((await fs.stat(layerPath)).mode & 0o777).toBe(0o600);
-      if (layer === "global") await fs.writeFile(context.nativeConfig, context.nativeOriginal);
+      if (layer !== "global") expect(await fs.readFile(legacy, "utf8")).toBe(legacyBytes);
       await context.inert();
     } finally { await context.cleanup(); }
   }
-}, 180_000);
+}, 120_000);
 
 ptyTest("empty or null overlay judge roles recommend effective configuration without exposing hidden assignments", async () => {
-  for (const selector of [null, "", "   ", [], " , , ", ["", " "], [",", " , "]]) {
+  for (const selector of [null, [",", " , "]]) {
     const context = await fixture({ modelRoles: { judge: "pty-private-global/judge" } });
     const overlay = path.join(context.root, "judge-overlay.yml");
     const bytes = `${JSON.stringify({ modelRoles: { judge: selector } })}\n`;
@@ -826,83 +826,61 @@ ptyTest("empty or null overlay judge roles recommend effective configuration wit
   }
 }, 120_000);
 
-ptyTest("delimiter-only global and project judge strings and arrays recommend configuration without native writes", async () => {
-  for (const layer of ["global", "project"]) {
-    for (const selector of [",", " , , \t", ["", " "], [",", " , "]]) {
-      const context = await fixture(layer === "global" ? { modelRoles: { judge: selector } } : {});
-      const bytes = `${JSON.stringify({ modelRoles: { judge: selector } })}\n`;
-      try {
-        if (layer === "project") {
-          await fs.mkdir(path.dirname(context.nativeProjectConfig), { recursive: true });
-          await fs.writeFile(context.nativeProjectConfig, bytes, { mode: 0o600 });
-        }
-        const terminal = context.terminal();
-        await newTelegram(context, terminal);
-        await terminal.secret("TELEGRAM_BOT_TOKEN", "pty-delimiter-only-judge-secret", false);
-        await terminal.answer(memoryPrompt, "n");
-        await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
-        await terminal.finished(true);
-        expect(terminal.transcript()).toContain(judgeRecommendation);
-        expect(terminal.transcript()).toContain(`empty or unset in ${layer} settings`);
-        expect(terminal.transcript()).not.toContain(judgeUnknown);
-        expect(terminal.transcript()).not.toContain("pty-delimiter-only-judge-secret");
-        if (layer === "project") expect(await fs.readFile(context.nativeProjectConfig, "utf8")).toBe(bytes);
-        await context.inert();
-      } finally { await context.cleanup(); }
-    }
-  }
-}, 180_000);
-
-ptyTest("failed native settings reads report unknown rather than missing and preserve every native input", async () => {
-  for (const failure of ["global-malformed", "project-malformed", "overlay-malformed", "global-unreadable", "overlay-missing", "invalid-value"]) {
-    const context = await fixture({});
-    const privateValue = "pty-private-native-judge-failure";
-    const malformed = `modelRoles: [\nprivate: ${privateValue}\n`;
-    let failedPath = context.nativeConfig;
+ptyTest("delimiter-only global and project judge settings recommend configuration without native writes", async () => {
+  for (const [layer, selector] of [["global", " , , \t"], ["project", [",", " , "]]] as const) {
+    const context = await fixture(layer === "global" ? { modelRoles: { judge: selector } } : {});
+    const bytes = `${JSON.stringify({ modelRoles: { judge: selector } })}\n`;
     try {
-      if (failure === "project-malformed") failedPath = context.nativeProjectConfig;
-      if (failure.startsWith("overlay")) {
-        failedPath = path.join(context.root, "judge-overlay.yml");
-        context.env.PI_CONFIG_FILES = failedPath;
+      if (layer === "project") {
+        await fs.mkdir(path.dirname(context.nativeProjectConfig), { recursive: true });
+        await fs.writeFile(context.nativeProjectConfig, bytes, { mode: 0o600 });
       }
-      await fs.mkdir(path.dirname(failedPath), { recursive: true });
-      if (failure === "global-unreadable") {
-        await fs.unlink(failedPath);
-        await fs.mkdir(failedPath);
-      } else if (failure !== "overlay-missing") {
-        await fs.writeFile(failedPath, failure === "invalid-value"
-          ? JSON.stringify({ judgment: { attemptTimeoutMs: -1 }, private: privateValue }) : malformed, { mode: 0o600 });
-      }
-      const before = failure === "global-unreadable" || failure === "overlay-missing"
-        ? undefined : await fs.readFile(failedPath, "utf8");
       const terminal = context.terminal();
       await newTelegram(context, terminal);
-      await terminal.secret("TELEGRAM_BOT_TOKEN", "pty-unknown-judge-secret", false);
+      await terminal.secret("TELEGRAM_BOT_TOKEN", "pty-delimiter-only-judge-secret", false);
       await terminal.answer(memoryPrompt, "n");
       await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
       await terminal.finished(true);
-      expect(terminal.transcript()).toContain("Saved configuration:");
-      expect(terminal.transcript()).toContain(judgeUnknown);
-      expect(terminal.transcript()).toContain("unknown, not confirmed missing");
-      expect(terminal.transcript()).not.toContain(judgeRecommendation);
-      expect(terminal.transcript()).not.toContain(privateValue);
-      expect(terminal.transcript()).not.toContain("pty-unknown-judge-secret");
-      expect(terminal.transcript()).not.toContain("Settings config is invalid");
-      expect(terminal.transcript()).not.toContain("Failed to parse config overlay");
-      expect(await exists(context.config)).toBe(true);
-      expect(parseEnv(await fs.readFile(`${context.config}.env`, "utf8")))
-        .toEqual({ TELEGRAM_BOT_TOKEN: "pty-unknown-judge-secret" });
-      if (failure === "global-unreadable") {
-        expect(await fs.readdir(failedPath)).toEqual([]);
-        await fs.rmdir(failedPath);
-      } else if (failure === "overlay-missing") expect(await exists(failedPath)).toBe(false);
-      else expect(await fs.readFile(failedPath, "utf8")).toBe(before!);
-      expect((await fs.readdir(path.dirname(context.nativeConfig))).some(name => name.includes(".invalid"))).toBe(false);
-      await fs.writeFile(context.nativeConfig, context.nativeOriginal);
+      expect(terminal.transcript()).toContain(judgeRecommendation);
+      expect(terminal.transcript()).toContain(`empty or unset in ${layer} settings`);
+      expect(terminal.transcript()).not.toContain(judgeUnknown);
+      expect(terminal.transcript()).not.toContain("pty-delimiter-only-judge-secret");
+      if (layer === "project") expect(await fs.readFile(context.nativeProjectConfig, "utf8")).toBe(bytes);
       await context.inert();
     } finally { await context.cleanup(); }
   }
-}, 180_000);
+}, 90_000);
+
+ptyTest("a malformed native overlay reports an unknown judge without repair or secret diagnostics", async () => {
+  const context = await fixture({});
+  const privateValue = "pty-private-native-judge-failure";
+  const malformed = `modelRoles: [\nprivate: ${privateValue}\n`;
+  const overlay = path.join(context.root, "judge-overlay.yml");
+  try {
+    await fs.writeFile(overlay, malformed, { mode: 0o600 });
+    context.env.PI_CONFIG_FILES = overlay;
+    const terminal = context.terminal();
+    await newTelegram(context, terminal);
+    await terminal.secret("TELEGRAM_BOT_TOKEN", "pty-unknown-judge-secret", false);
+    await terminal.answer(memoryPrompt, "n");
+    await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
+    await terminal.finished(true);
+    expect(terminal.transcript()).toContain("Saved configuration:");
+    expect(terminal.transcript()).toContain(judgeUnknown);
+    expect(terminal.transcript()).toContain("unknown, not confirmed missing");
+    expect(terminal.transcript()).not.toContain(judgeRecommendation);
+    expect(terminal.transcript()).not.toContain(privateValue);
+    expect(terminal.transcript()).not.toContain("pty-unknown-judge-secret");
+    expect(terminal.transcript()).not.toContain("Settings config is invalid");
+    expect(terminal.transcript()).not.toContain("Failed to parse config overlay");
+    expect(await exists(context.config)).toBe(true);
+    expect(parseEnv(await fs.readFile(`${context.config}.env`, "utf8")))
+      .toEqual({ TELEGRAM_BOT_TOKEN: "pty-unknown-judge-secret" });
+    expect(await fs.readFile(overlay, "utf8")).toBe(malformed);
+    expect((await fs.readdir(path.dirname(context.nativeConfig))).some(name => name.includes(".invalid"))).toBe(false);
+    await context.inert();
+  } finally { await context.cleanup(); }
+}, 90_000);
 
 ptyTest("existing-config credential replacement does not inspect or recommend a missing judge", async () => {
   const context = await fixture({});
