@@ -1540,7 +1540,11 @@ describe("thread kickoff before execution", () => {
     if (!lane) throw new Error("Expected held work binding");
     const followup = message(`kickoff-later-${certainty}`, original.route, "Also check duplicates");
     await runtime.receive(followup);
-    await runtime.messageLane(lane.id, followup.text, followup.id);
+    const kickoff = { outputId: `${original.id}:kickoff`, state: certainty === "rejected" ? "failed" : "uncertain" };
+    expect(await runtime.messageLane(lane.id, followup.text, followup.id)).toMatchObject({
+      state: "pending", queueHolds: { kickoff },
+    });
+    expect(await runtime.inspect(lane.id)).toMatchObject({ queueHolds: { kickoff } });
     await runtime.kick();
     await expect(runtime.startLane(start)).rejects.toThrow("Kickoff delivery is not confirmed");
     expect(hosts.has(lane.socketPath)).toBe(false);
@@ -6132,6 +6136,161 @@ describe("real Store runtime coordination", () => {
     await runtime.kick();
     expect(host.prompts).toHaveLength(1);
     expect(host.prompts[0]!.command.message).toContain("Request ID: pending-later");
+  });
+
+  test("a reattached lane reports held follow-ups until the owner resolves the exact input in its topic", async () => {
+    const { runtime, store, config, hosts, launched, messenger, main } = fixture();
+    const lane = savedLane(store, config, "survivor", route("11"), process.pid);
+    const other = savedLane(store, config, "unrelated", route("12"));
+    const host = new HostTransport(lane.sessionFile, "session-survivor");
+    hosts.set(lane.socketPath, host);
+    store.receive(message("original-lane-input", lane.route), lane.id);
+    store.submit("original-lane-input", "lost-native-receipt", lane.generation);
+    await runtime.start();
+
+    const followUp = message("after-restart", lane.route);
+    store.receive(followUp, "main");
+    store.settle(followUp.id, "done");
+    expect(await runtime.messageLane(lane.id, followUp.text, followUp.id)).toEqual({
+      inputId: "handoff:after-restart:survivor", state: "pending",
+      queueHolds: { runtimeBlocked: false, uncertainInputIds: ["original-lane-input"] },
+    });
+    expect(await runtime.inspect(lane.id)).toMatchObject({
+      state: { isSettled: true, queuedMessageCount: 0 },
+      observationState: { ownerCurrent: false },
+      queueHolds: { runtimeBlocked: false, uncertainInputIds: ["original-lane-input"] },
+    });
+    host.beforeState = () => { throw new Error("Native connection stopped reporting state"); };
+    expect(await runtime.inspect(lane.id)).toMatchObject({
+      state: null, stateError: expect.any(String),
+      queueHolds: { runtimeBlocked: true, uncertainInputIds: ["original-lane-input"] },
+    });
+    host.beforeState = undefined;
+    // Reconcile the independent runtime block without clearing durable uncertainty.
+    await runtime.resume(lane.id);
+    main.beforeState = () => { throw new Error("HEAD state is temporarily unavailable"); };
+    await admit(runtime, message("lane-queue-status", lane.route, "/status"));
+    const status = messenger.sent.find(output => output.sourceId === "lane-queue-status")?.text;
+    expect(status).toContain("Native HEAD: unavailable or unverified.");
+    expect(status).toContain("original-lane-input");
+    main.beforeState = undefined;
+
+    await admit(runtime, message("other-topic-resolve", other.route, "/resolve --lane original-lane-input"));
+    expect(store.input("other-topic-resolve")?.state).toBe("cancelled");
+    expect(store.input("original-lane-input")?.state).toBe("uncertain");
+    expect(host.prompts).toHaveLength(0);
+
+    host.state.isSettled = false;
+    host.state.isStreaming = true;
+    host.emit({ type: "agent_start" });
+    await admit(runtime, message("lane-owner-resolve", lane.route, "/resolve --lane original-lane-input"));
+    expect(store.input("lane-owner-resolve")?.state).toBe("done");
+    expect(store.input("original-lane-input")?.state).toBe("cancelled");
+    expect(store.input("handoff:after-restart:survivor")?.state).toBe("pending");
+    expect(host.prompts).toHaveLength(0);
+
+    host.state.isSettled = true;
+    host.state.isStreaming = false;
+    host.emit({ type: "session_settled" });
+    await host.whenPrompts(1);
+    expect(host.prompts.map(prompt => prompt.command.message)).toEqual([expect.stringContaining("Request ID: handoff:after-restart:survivor")]);
+    expect(launched).toEqual([]);
+  });
+
+  test("resolved lane readback recovers without a native event or blocking unrelated lanes", async () => {
+    const { runtime, config, store, hosts } = fixture();
+    const lane = savedLane(store, config, "lost-admission", route("11"), process.pid);
+    const other = savedLane(store, config, "healthy-sibling", route("12"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-lost-admission");
+    const otherHost = new HostTransport(other.sessionFile, "session-healthy-sibling");
+    hosts.set(lane.socketPath, host);
+    hosts.set(other.socketPath, otherHost);
+    await runtime.start();
+    host.beforePrompt = () => { throw new Error("Native prompt acknowledgement was lost"); };
+    await delegate(runtime, message("lost", lane.route));
+    host.beforePrompt = undefined;
+    await delegate(runtime, message("later", lane.route));
+    expect(delegated(store, "lost")?.state).toBe("uncertain");
+
+    host.beforeState = () => { throw new Error("Native settlement read failed"); };
+    await admit(runtime, message("resolve-lost-lane", lane.route, "/resolve --lane handoff:lost:lost-admission"));
+    expect(delegated(store, "lost")?.state).toBe("cancelled");
+    expect(delegated(store, "later")?.state).toBe("pending");
+    expect(host.prompts).toHaveLength(1);
+
+    const reading = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    host.beforeState = async () => {
+      reading.resolve();
+      await release.promise;
+    };
+    const wake = runtime.kick();
+    try {
+      await reading.promise;
+      // Use a deadline only to keep a shared-pump regression from hanging teardown.
+      const deadline = new Promise<never>((_, reject) => AbortSignal.timeout(1500).addEventListener("abort",
+        () => reject(new Error("Unrelated lane dispatch waited for the failing Host"))));
+      await Promise.race([delegate(runtime, message("unrelated", other.route)), deadline]);
+      expect(otherHost.prompts.map(prompt => prompt.command.message)).toEqual([
+        expect.stringContaining("Request ID: handoff:unrelated:healthy-sibling"),
+      ]);
+      expect(delegated(store, "later")?.state).toBe("pending");
+    } finally {
+      host.beforeState = undefined;
+      release.resolve();
+    }
+    await wake;
+    await host.whenPrompts(2);
+    expect(host.prompts.map(prompt => prompt.command.message)).toEqual([
+      expect.stringContaining("Request ID: handoff:lost:lost-admission"),
+      expect.stringContaining("Request ID: handoff:later:lost-admission"),
+    ]);
+  });
+
+  test("a pending workflow reports a later uncertain steering input in its active lane group", async () => {
+    const { runtime, config, store, hosts } = fixture();
+    const lane = savedLane(store, config, "lane-group", route("11"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-lane-group");
+    hosts.set(lane.socketPath, host);
+    await runtime.start();
+    const activateSource = (id: string) => {
+      const source = message(id, lane.route);
+      store.receive(source, "main", { [`user-source:${id}`]: "true" });
+      store.settle(id, "done");
+      return source;
+    };
+    const initial = activateSource("active-lane");
+    await runtime.messageLane(lane.id, initial.text, initial.id);
+    const workflow = activateSource("queued-workflow");
+    const choice = { name: "ulw-plan" as const, reason: "Select the planning workflow for this follow-up." };
+    await runtime.messageLane(lane.id, workflow.text, workflow.id, choice);
+    const steer = activateSource("later-steer");
+    host.beforePrompt = () => { throw new Error("Native steering acknowledgement was lost"); };
+    expect(await runtime.messageLane(lane.id, steer.text, steer.id)).toMatchObject({ state: "uncertain" });
+    expect(host.prompts.map(prompt => prompt.command.streamingBehavior)).toEqual([undefined, "steer"]);
+    expect(await runtime.messageLane(lane.id, workflow.text, workflow.id, choice)).toMatchObject({
+      state: "pending", queueHolds: { uncertainInputIds: ["handoff:later-steer:lane-group"] },
+    });
+  });
+
+  test("a surviving PID without a verified lane connection reports a runtime hold instead of dispatching", async () => {
+    const { runtime, store, config, launched, messenger } = fixture();
+    const lane = savedLane(store, config, "unverified-host", route("11"), process.pid);
+    await runtime.start();
+    const followUp = message("check-connection", lane.route);
+    store.receive(followUp, "main");
+    store.settle(followUp.id, "done");
+
+    expect(await runtime.messageLane(lane.id, followUp.text, followUp.id)).toEqual({
+      inputId: "handoff:check-connection:unverified-host", state: "pending",
+      queueHolds: { runtimeBlocked: true, uncertainInputIds: [] },
+    });
+    expect(await runtime.inspect(lane.id)).toMatchObject({
+      runtimeState: "interrupted", state: null, queueHolds: { runtimeBlocked: true, uncertainInputIds: [] },
+    });
+    await admit(runtime, message("unverified-host-status", lane.route, "/status"));
+    expect(messenger.sent.find(output => output.sourceId === "unverified-host-status")?.text).toContain('"runtimeBlocked":true');
+    expect(launched).toEqual([]);
   });
 
   test("shutdown acceptance and socket disconnect never release a still-live native process", async () => {

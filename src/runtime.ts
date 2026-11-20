@@ -1761,7 +1761,7 @@ export class Superagent {
     return lane;
   }
 
-  async messageLane(id: string, text: string, sourceId: string, choice?: WorkflowChoice): Promise<void> {
+  async messageLane(id: string, text: string, sourceId: string, choice?: WorkflowChoice) {
     this.assertRestartOpen();
     const lane = this.requireLane(id);
     if (lane.workState !== "open") throw new Error("Lane is not open; explicitly resume it first");
@@ -1785,6 +1785,12 @@ export class Superagent {
       attachments: original.attachments,
     }, id, { [`handoff-source:${handoffId}`]: sourceId }, workflow);
     await this.kick();
+    const handoff = this.store.input(handoffId);
+    if (!handoff) throw new Error("Durable lane follow-up is missing");
+    return {
+      inputId: handoff.id, state: handoff.state,
+      ...(handoff.state === "pending" ? { queueHolds: this.laneQueueHolds(id, handoff.id) } : {}),
+    };
   }
 
   private requireLane(id: string): Lane {
@@ -2161,20 +2167,39 @@ export class Superagent {
     let lane = this.requireLane(id);
     const live = this.live.get(id);
     let state: RuntimeState | null = null;
+    let stateError: string | null = null;
     if (live) {
-      try { state = await this.checkLaneModel(live); }
-      catch { /* Return the actionable hold alongside expected/actual identity. */ }
-      state ??= await this.state(live);
+      try {
+        // If only model validation failed, still return the verified native state.
+        state = await this.checkLaneModel(live).catch(() => this.state(live));
+      } catch {
+        stateError = "Native lane state is unavailable or its identity is unverified.";
+      }
       lane = this.requireLane(id);
     }
     const actual = isLaneModel(state?.model) ? { provider: state.model.provider, id: state.model.id } : null;
     return {
-      ...lane, state: state ? { ...state, model: actual } : null,
+      ...lane, state: state ? { ...state, model: actual } : null, stateError,
+      queueHolds: this.laneQueueHolds(id),
       observationState: this.observationState(lane, state),
       modelCheck: { expected: lane.model, actual, error: this.modelHolds.get(id) ?? null },
       modelChange: this.modelIntent(id),
       modelApply: this.modelIntent(id, "apply"),
     };
+  }
+
+  private laneQueueHolds(id: string, beforeInputId?: string) {
+    const uncertainInputIds: string[] = [];
+    const inputs = this.store.inputs(id);
+    const live = this.live.get(id);
+    const active = live && this.current(live) ? new Set(Array.from(live.admitted.values(), receipt => receipt.input.id)) : null;
+    let earlier = true;
+    for (const input of inputs) {
+      if (input.id === beforeInputId) earlier = false;
+      if (input.state === "uncertain" && (earlier || active?.has(input.id))) uncertainInputIds.push(input.id);
+    }
+    const kickoff = this.kickoffHold(inputs);
+    return { runtimeBlocked: this.blocked.has(id), uncertainInputIds, ...(kickoff ? { kickoff } : {}) };
   }
 
   private observationState(lane: Lane, state: RuntimeState | null) {
@@ -2925,10 +2950,33 @@ export class Superagent {
     return `${this.headStatus(state)}; settled: ${flag(state.isSettled)}; streaming: ${flag(state.isStreaming)}; compacting: ${flag(state.isCompacting)}; native queued: ${this.metric(state.queuedMessageCount)}; pending async: ${flag(state.hasPendingAsyncWork)}; owned running work: ${flag(state.hasOwnedRunningWork)}; goal enabled: ${state.goal === null ? "false" : flag(state.goal?.enabled)}; native approvals: ${Array.isArray(state.pendingUiRequests) ? state.pendingUiRequests.length : "unknown"}`;
   }
 
+  private async queueStatus(input: InputRecord, state: RuntimeState | null): Promise<string> {
+    const inputs = this.store.inputs("main").filter(candidate => candidate.id !== input.id);
+    const counts = (targetInputs: InputRecord[]) => ["pending", "submitted", "uncertain"].map(status => `${status}: ${targetInputs.filter(candidate => candidate.state === status).length}`).join(", ");
+    const bound = this.boundLane(input.route);
+    let laneStatus = "none (no automatic lane dispatch)";
+    if (bound) {
+      const laneLive = this.live.get(bound.id);
+      let actual = "native state unavailable/unloaded";
+      let native: RuntimeState | null = null;
+      if (laneLive) {
+        try { native = await this.state(laneLive); actual = this.nativeStatus(native); } catch { actual = "native state unverified"; }
+      }
+      const current = this.requireLane(bound.id);
+      const holds = this.laneQueueHolds(bound.id);
+      laneStatus = `${JSON.stringify(bound.id)}; work: ${current.workState}; stored runtime: ${current.runtimeState}; ${counts(this.store.inputs(bound.id))}; approvals: ${this.store.approvals(bound.id).length}; actual: ${actual}\nLane queue holds: ${JSON.stringify(holds)}${holds.uncertainInputIds.length ? " (owner: /resolve --lane <input-id> after checking the original work)" : ""}\nRecorded lane observation (not verified acceptance or live-target proof): ${JSON.stringify(current.observation ?? null)}\nObservation ownership/ages: ${JSON.stringify(this.observationState(current, native))}`;
+    }
+    const uncertainInputs = inputs.filter(candidate => candidate.state === "uncertain");
+    const uncertain = uncertainInputs.length
+      ? `\nUncertain HEAD inputs held (block later HEAD work): ${uncertainInputs.map(candidate => JSON.stringify(candidate.id)).join(", ")}. Eligible exact native evidence receives one isolated same-HEAD recovery decision; missing, failed, ambiguous evidence or effects remain held without replay. Inspect the original native session or use owner /resolve <input-id> to close uncertainty without claiming completion.`
+      : "";
+    return `Native HEAD: ${state ? this.nativeStatus(state) : "unavailable or unverified"}.\nPreset initialization: ${this.initialization ? `${this.initialization.state}; ${this.initialization.detail}` : "not managed by this runtime"}.\nLogical topic: ${JSON.stringify(input.route.topicId ?? input.route.threadId ?? "main")}; shared HEAD session: ${state ? JSON.stringify(state.sessionId) : "unverified"}.\nHEAD inputs: ${counts(inputs)}; durable approvals: ${this.store.approvals("main").length}; stop pending: ${this.headStopping > 0}; managed compaction pending: ${!!this.headCompaction}.${uncertain}\nBound lane: ${laneStatus}.\nIdle/settled is not proof of task completion; uncertain effects are never automatically repeated.`;
+  }
+
   private async queryHead(input: InputRecord, command: HeadCommand, live: Live, state: RuntimeState): Promise<boolean> {
     const reply = (text: string, outcome: "done" | "cancelled" = "done") => this.controlReply(input,
       `${command.name === "help" ? "HEAD controls (help changes no settings)." : "HEAD session only (not lanes or global defaults)."} ${text}`, outcome);
-    if (["help", "status", "context", "usage"].includes(command.name) && command.argument) {
+    if (["help", "context", "usage"].includes(command.name) && command.argument) {
       reply(`Invalid syntax. Use /${command.name} with no arguments.`, "cancelled"); return true;
     }
     if (command.name === "help") {
@@ -2941,31 +2989,10 @@ export class Superagent {
         "/stop [head|lane-id] — head aborts current/admitted ordinary HEAD work and earlier pending changes, not historical uncertain effects or unrelated lanes; an actual managed lane-id pauses that lane. Bare /stop pauses this conversation's bound lane, otherwise HEAD.",
         "/restart — durably fence intake, confirm the original-route ACK, checkpoint/interrupt busy HEAD and cancel its original approval cards, then safely replace BOTH Gateway AND HEAD. Restore the same native session/model/effort/board and resume eligible previously active goals without prompt replay. Independent lanes stay running. Uncertain effects or unreconciled owned resources remain held; no forced kill. ACK/acceptance is not completion; explicit stop wins.",
         "/resolve [input-id] — close ONE already-uncertain HEAD input as cancelled so later HEAD work is no longer held. Requires the exact ID when several are held; never replays the original work and never claims its native outcome. Send a new request if that work is still wanted.",
+        "/resolve --lane <input-id> — close one exact uncertain input in this conversation's bound lane. Does not replay it, resume a paused lane, or bypass native readiness.",
         "/resume — resume this conversation's bound lane only (no head resume mode).",
         "/new [request]; /main — logical DM topic selection; threads/forum topics already supply independent topics. Topic selection does not create a separate HEAD session.",
       ].join("\n")); return true;
-    }
-    if (command.name === "status") {
-      const inputs = this.store.inputs("main").filter(candidate => candidate.id !== input.id);
-      const counts = (targetInputs: InputRecord[]) => ["pending", "submitted", "uncertain"].map(status => `${status}: ${targetInputs.filter(candidate => candidate.state === status).length}`).join(", ");
-      const bound = this.boundLane(input.route);
-      let laneStatus = "none (no automatic lane dispatch)";
-      if (bound) {
-        const laneLive = this.live.get(bound.id);
-        let actual = "native state unavailable/unloaded";
-        let native: RuntimeState | null = null;
-        if (laneLive) {
-          try { native = await this.state(laneLive); actual = this.nativeStatus(native); } catch { actual = "native state unverified"; }
-        }
-        const current = this.requireLane(bound.id);
-        laneStatus = `${JSON.stringify(bound.id)}; work: ${current.workState}; stored runtime: ${current.runtimeState}; ${counts(this.store.inputs(bound.id))}; approvals: ${this.store.approvals(bound.id).length}; actual: ${actual}\nRecorded lane observation (not verified acceptance or live-target proof): ${JSON.stringify(current.observation ?? null)}\nObservation ownership/ages: ${JSON.stringify(this.observationState(current, native))}`;
-      }
-      const uncertainInputs = inputs.filter(candidate => candidate.state === "uncertain");
-      const uncertain = uncertainInputs.length
-        ? `\nUncertain HEAD inputs held (block later HEAD work): ${uncertainInputs.map(candidate => JSON.stringify(candidate.id)).join(", ")}. Eligible exact native evidence receives one isolated same-HEAD recovery decision; missing, failed, ambiguous evidence or effects remain held without replay. Inspect the original native session or use owner /resolve <input-id> to close uncertainty without claiming completion.`
-        : "";
-      reply(`Native HEAD: ${this.nativeStatus(state)}.\nPreset initialization: ${this.initialization ? `${this.initialization.state}; ${this.initialization.detail}` : "not managed by this runtime"}.\nLogical topic: ${JSON.stringify(input.route.topicId ?? input.route.threadId ?? "main")}; shared HEAD session: ${JSON.stringify(state.sessionId)}.\nHEAD inputs: ${counts(inputs)}; durable approvals: ${this.store.approvals("main").length}; stop pending: ${this.headStopping > 0}; managed compaction pending: ${!!this.headCompaction}.${uncertain}\nBound lane: ${laneStatus}.\nIdle/settled is not proof of task completion; uncertain effects are never automatically repeated.`);
-      return true;
     }
     if (command.name === "context") { reply(this.contextStatus(state)); return true; }
     if (command.name === "usage") {
@@ -3135,6 +3162,10 @@ export class Superagent {
    * The cancelled input's own text stays authoritative: a resolution is not a retry.
    */
   private resolveControl(input: InputRecord, command: HeadCommand): void {
+    if (/^--lane(?:\s|$)/.test(command.argument)) {
+      this.resolveLaneControl(input, command.argument);
+      return;
+    }
     const binding = `head:resolve-target:${input.id}`;
     const bound = this.store.getMeta(binding);
     const target = bound ?? command.argument.trim();
@@ -3186,6 +3217,31 @@ export class Superagent {
     acknowledge(selected);
   }
 
+  private resolveLaneControl(control: InputRecord, argument: string): void {
+    const target = /^--lane\s+(\S+)$/.exec(argument)?.[1];
+    if (!target) {
+      this.controlReply(control, "Use /resolve --lane <exact-uncertain-input-id> in the bound lane's conversation.", "cancelled");
+      return;
+    }
+    if (this.restartFence()) {
+      this.controlReply(control, "Gateway AND HEAD restart is pending or held; no lane input was resolved.", "cancelled");
+      return;
+    }
+    const lane = this.boundLane(control.route);
+    if (!lane || !authorizeRoute(this.config, lane.route)) {
+      this.controlReply(control, "No authorized lane is bound to this conversation. No lane input was resolved.", "cancelled");
+      return;
+    }
+    const text = `Uncertain lane input ${JSON.stringify(target)} was closed as cancelled. It was not replayed, and its outcome is not known. Later inputs still require verified native readiness and an open lane.`;
+    if (!this.store.resolveLaneInput(control.id, lane.id, target, { id: `${control.id}:head-control`, text })) {
+      this.controlReply(control, `No uncertain input in this conversation's lane matches ${JSON.stringify(target)}. Use /status to find held input IDs.`, "cancelled");
+      return;
+    }
+    const live = this.live.get(lane.id);
+    if (live) this.background(this.finish(live));
+    this.background(this.kick().catch(this.report));
+  }
+
   private async headControl(input: InputRecord, command: HeadCommand, earlierMain: boolean): Promise<void> {
     if (command.name === "restart") {
       if (this.restartActive === input.id || this.admitRestart(input, command)) await this.runHeadRestart(input);
@@ -3207,6 +3263,12 @@ export class Superagent {
     let submitted = false;
     try {
       const live = this.live.get("main");
+      if (command.name === "status") {
+        if (command.argument) { reply("Invalid syntax. Use /status with no arguments.", "cancelled"); return; }
+        const state = live && this.current(live) ? await this.state(live).catch(() => null) : null;
+        reply(await this.queueStatus(input, state));
+        return;
+      }
       if (!live || !this.current(live)) { reply("Native HEAD is unavailable; nothing was changed.", "cancelled"); return; }
       let state = await this.state(live);
       if (await this.queryHead(input, command, live, state)) return;
@@ -3368,11 +3430,18 @@ export class Superagent {
     await this.pumping;
   }
 
+  private kickoffHold(inputs: readonly InputRecord[]) {
+    for (const input of inputs) {
+      const outputId = this.store.getMeta(`kickoff-output:${input.id}`);
+      if (outputId === null) continue;
+      const state = this.store.output(outputId)?.state ?? "missing";
+      if (state !== "sent") return { outputId, state };
+    }
+    return null;
+  }
+
   private kickoffHeld(target: string): boolean {
-    return this.store.inputs(target).some(input => {
-      const id = this.store.getMeta(`kickoff-output:${input.id}`);
-      return id !== null && this.store.output(id)?.state !== "sent";
-    });
+    return this.kickoffHold(this.store.inputs(target)) !== null;
   }
 
   private pendingHeadModel(exceptId?: string): InputRecord | undefined {
@@ -3387,7 +3456,23 @@ export class Superagent {
       do {
         this.repeat = false;
         if (this.restartFence()) return;
-        for (const live of this.live.values()) if (live.releasing) await this.release(live);
+        for (const live of this.live.values()) {
+          if (live.releasing) {
+            await this.release(live);
+          } else if (live.id !== "main" && live.input && !live.preparing && !live.finishing
+            && (live.result || this.store.input(live.input.id)?.state === "cancelled")) {
+            // An explicit resolution may have raced a failed native read. Revisit
+            // finish on ordinary wakes, but only for a settleable admission group.
+            const admissions = [...live.admitted.values()].map(receipt => ({
+              cancelled: this.store.input(receipt.input.id)?.state === "cancelled", result: receipt.result,
+            }));
+            if (admissions.some(item => item.cancelled) && admissions.every(item => item.cancelled || item.result)) {
+              // finish owns the per-Host readback and wakes dispatch on settlement.
+              // An unresponsive lane must not hold the shared pump open.
+              this.background(this.finish(live));
+            }
+          }
+        }
         for (const input of this.store.inputs()) {
           if (input.state !== "pending") continue;
           try { this.authorized(input.route); }
@@ -3726,7 +3811,10 @@ export class Superagent {
       const admitted = live.admitted.get(requestId);
       if (admitted && !admitted.result) {
         this.activity(submitted, false);
-        this.store.settle(input.id, "uncertain", { id: `${input.id}:admission`, text: "요청 접수 결과가 불확실합니다. 정확한 원래 세션의 접수·실행 근거가 있을 때만 격리된 헤드 복구 판단을 진행합니다. 근거가 없거나 불명확하면 계속 보류하며 자동 재시도하지 않습니다. 원래 세션을 확인하거나 /resolve <input-id>로 운영자가 불확실 상태를 종료할 수 있습니다." });
+        const text = live.id === "main"
+          ? "요청 접수 결과가 불확실합니다. 정확한 원래 세션의 접수·실행 근거가 있을 때만 격리된 헤드 복구 판단을 진행합니다. 근거가 없거나 불명확하면 계속 보류하며 자동 재시도하지 않습니다. 원래 세션을 확인하거나 /resolve <input-id>로 운영자가 불확실 상태를 종료할 수 있습니다."
+          : "레인 요청 접수 결과가 불확실하며 자동 재시도하지 않았습니다. 원래 세션과 외부 효과를 확인한 뒤 운영자가 연결된 대화에서 /resolve --lane <input-id>로 이 불확실 상태를 종료할 수 있습니다.";
+        this.store.settle(input.id, "uncertain", { id: `${input.id}:admission`, text });
         try { live.busy = !(await this.state(live)).isSettled; }
         catch { this.blocked.add(live.id); }
       }
