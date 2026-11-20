@@ -83,14 +83,14 @@ bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
-`--trust` allows package lifecycle scripts, including managed `omp-ulw` preparation.
+`--trust` allows package lifecycle scripts, including preparation of the managed ULW integration.
 Ensure `bun pm bin --global` is on `PATH`. Alternatively, with Bun on `PATH`:
 
 ```sh
 npm install --global omp-superagent@0.1.2
 ```
 
-Keep lifecycle scripts enabled for the managed `omp-ulw` integration.
+Keep lifecycle scripts enabled for the managed ULW integration.
 Published SDK packages and platform-native dependencies come from the package registry;
 no Rust toolchain, OMP source checkout, core patch, or native build is required.
 Dependency installation needs network access. It does not start a bot or replace OMP.
@@ -187,12 +187,12 @@ Repository changes alone do not update a running service.
 
 ## ULW included
 
-[omp-ulw](https://github.com/dbc-hbin/omp-ulw) is installed and loaded as a managed integration.
+[omp-superkit](https://github.com/dbc-hbin/omp-superkit) is installed and loaded as a managed integration.
 Use a workflow explicitly, or let the head select one when the authorized task genuinely
 benefits from it. Ordinary work can stay in a direct session, native task, or regular lane.
 
 Updates apply to new Hosts, not running heads or lanes. See
-[managed integration operations](docs/OPERATIONS.md#필수-관리형-omp-ulw-설치와-갱신)
+[managed integration operations](docs/OPERATIONS.md#필수-관리형-omp-superkit-설치와-갱신)
 for update and activation behavior.
 
 ## Development
@@ -218,7 +218,7 @@ or production readiness.
 - [Release records](docs/releases/0.1.0.md#verification-records): dated verification evidence and limits.
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
-[omp-ulw](https://github.com/dbc-hbin/omp-ulw) workflow integration.
+[omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.
 The mascot reimagines OMP's pi mark as a little superhero.
 
 ## License

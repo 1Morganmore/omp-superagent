@@ -165,8 +165,9 @@ Gateway는 설정된 메신저 자격 증명을 보유하고 헤드 환경에서
 
 ### 필수 ULW 설치와 일반 코드 갱신 경계
 
-`omp-ulw`는 선택적 사용자 checkout이 아니라 설치에 항상 포함되는 관리형 의존성이다.
-공식 원격은 `https://github.com/dbc-hbin/omp-ulw.git`이며 `upstream/ulw.json`에 기록한다.
+`omp-superkit`은 선택적 사용자 checkout이 아니라 설치에 항상 포함되는 관리형 의존성이다.
+공식 원격은 `https://github.com/dbc-hbin/omp-superkit.git`이며 `upstream/ulw.json`에 기록한다.
+관리 설치와 중복 탐지는 패키지 식별자 `omp-superkit`과 기존 `omp-ulw`를 모두 인식한다.
 OMP 실행 파일과 독립적으로 루트 postinstall 또는 명시적인 `bun run prepare:ulw`로
 ULW를 준비한다. Bun pin은 `packageManager: bun@1.4.4`이고
 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `pi-ai`, `pi-catalog`, `pi-natives`, `pi-tui`, `pi-utils`
@@ -904,7 +905,7 @@ native serial tail에 대기 중인 resume도 기존 `RpcUserInputGate`의 접�
 
 ### 일반 모델 프로필과 역할 특화의 범위
 
-`omp-ulw` 같은 일반 모델 프로필은 조사·구현·계획·검증 등의 작업 방법을 제공할 수 있지만
+`omp-superkit` 같은 일반 모델 프로필은 조사·구현·계획·검증 등의 작업 방법을 제공할 수 있지만
 head/lane 신원, 감독자 토폴로지, 대화 라우팅, 외부 발송 권한을 결정하지 않는다. 기존 필수
 head 번들과 lane SKILL 주입에서 역할을 특화하므로 별도 공용 프롬프트 레지스트리나 중복 TS
 역할 문구를 추가하지 않는다. 운영자 권한·도구 제외, 실제 native 도구 스키마·승인 계약은
@@ -992,7 +993,7 @@ head→lane 인계의 workflow 선택에는 구조화된 `workflow`가 필요하
 
 #### Native 전달과 활성화의 구분
 
-공식 `omp-ulw`는 관리형 설치/업데이트 대상에 포함한다. 설치·프로필 로드 자체는 workflow
+공식 `omp-superkit`은 관리형 설치/업데이트 대상에 포함한다. 설치·프로필 로드 자체는 workflow
 선택이 아니며 **선택한 skill loaded/applied, 실제 ULW/native mode armed, native goal 생성은
 별도 사실**이다. runtime이 신뢰된 원래 사용자 호출 또는 구조화된 head 선택을 native 입력
 선두에 두고 `Request ID`·source metadata와 작업 본문을 보존하므로 종전 Request ID 선두

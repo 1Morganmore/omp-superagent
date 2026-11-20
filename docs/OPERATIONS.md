@@ -207,9 +207,9 @@ export PATH="$PWD/.upstream/toolchain/node_modules/.bin:$PATH"
 이는 현재 셸의 PATH만 바꾼다. 전역 설치·기존 OMP 교체·자동 시작 등록은 필요 없다.
 모델 제공자 인증은 기존 OMP 방식으로 별도 준비한다. 이 프로젝트가 인증 엔진을 대체하지 않는다.
 
-### 필수 관리형 omp-ulw 설치와 갱신
+### 필수 관리형 omp-superkit 설치와 갱신
 
-설치에는 공식 [dbc-hbin/omp-ulw](https://github.com/dbc-hbin/omp-ulw)가 항상 포함된다.
+설치에는 공식 [dbc-hbin/omp-superkit](https://github.com/dbc-hbin/omp-superkit)이 항상 포함된다.
 루트 `bun install`의 postinstall이 ULW를 준비한다. 활성화 검사는 배포된 native SDK의
 실제 prompt composition을 사용한다. ULW만 다시 준비하거나 확인할 때는 다음을 사용한다.
 
@@ -226,8 +226,9 @@ active가 있는 Gateway 시작을 기다리게 하지 않는다. 이는 일반 
 전역 OMP 설치·설정, 공유 ULW 프롬프트 원본은 수정하지 않는다.
 
 준비·offline composition probe가 성공한 immutable revision만 원자적으로 활성화한다.
-기존 active 이후에는 같은 원격의 fast-forward만 허용하며 실패·rewind·divergence는 이전
-active를 보존한다. 상세 lock·staging·probe 계약은 [설계](../DESIGN.md#필수-ulw-설치와-일반-코드-갱신-경계)를 따른다.
+기존 active 이후에는 같은 원격의 fast-forward만 허용하며, 공식 `omp-ulw` → `omp-superkit`
+이름 변경에도 같은 검사를 적용한다. 실패·rewind·divergence는 이전 active를 보존한다.
+상세 lock·staging·probe 계약은 [설계](../DESIGN.md#필수-ulw-설치와-일반-코드-갱신-경계)를 따른다.
 관리 pointer/lock을 수동 편집해 우회하지 않는다. active가 없거나 무효면 start는 어댑터
 활성화 전에 실패하므로 `bun run prepare:ulw`로 먼저 복구한다. doctor는 원격 최신성이나
 loader 성공을 검사하지 않는다. 이전 revision은 자동 삭제하지 않는다.
@@ -1196,7 +1197,7 @@ ULW 병합 회귀는 외부 checkout을 수정하거나 설치하지 않고 명�
 환경변수를 생략하면 외부 ULW 조합은 건너뛴다.
 
 ```sh
-OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-ulw/index.ts bun test test/skills.test.ts
+OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-superkit/index.ts bun test test/skills.test.ts
 ```
 
 새 revision과 기존 revision 재활성화는 배포된 OMP SDK의 실제 prompt renderer·ExtensionRunner를

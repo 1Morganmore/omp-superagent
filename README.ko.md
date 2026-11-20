@@ -64,14 +64,14 @@ bun add --global --trust omp-superagent@0.1.2
 omp-sa --help
 ```
 
-`--trust`는 관리형 `omp-ulw` 준비 등 패키지 설치 스크립트 실행을 허용합니다.
+`--trust`는 관리형 ULW 통합 준비 등 패키지 설치 스크립트 실행을 허용합니다.
 `bun pm bin --global`의 출력 경로를 `PATH`에 포함하세요. Bun이 `PATH`에 있다면 npm으로도 설치할 수 있습니다.
 
 ```sh
 npm install --global omp-superagent@0.1.2
 ```
 
-postinstall이 필수 관리형 `omp-ulw`를 준비하므로 설치 스크립트를 생략하지 마세요.
+postinstall이 필수 관리형 ULW 통합을 준비하므로 설치 스크립트를 생략하지 마세요.
 공개 SDK 패키지와 플랫폼 네이티브 의존성은 패키지 레지스트리에서 받으며, Rust 도구·OMP 소스
 checkout·코어 패치·네이티브 빌드가 필요하지 않습니다. 의존성 설치에는 네트워크가 필요하지만,
 봇을 시작하거나 설치된 OMP를 교체하지는 않습니다.
@@ -165,12 +165,12 @@ Codex 구독 음성 또는 별도 과금되는 API 음성 중 하나를 선택�
 
 ## ULW
 
-공식 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)는 필수 관리형 통합입니다.
+공식 [omp-superkit](https://github.com/dbc-hbin/omp-superkit)은 필수 관리형 통합입니다.
 사용자의 명시적 요청이나 허가된 작업에 구체적으로 도움이 된다는 헤드의 판단으로 workflow를
 선택합니다. 일반 작업은 직접 세션·native task·일반 레인으로 처리할 수 있습니다.
 
 업데이트는 새 Host에 적용하며 실행 중인 헤드·레인의 버전은 유지합니다.
-[관리형 통합 운영](docs/OPERATIONS.md#필수-관리형-omp-ulw-설치와-갱신)에서 갱신·활성화 동작을 확인하세요.
+[관리형 통합 운영](docs/OPERATIONS.md#필수-관리형-omp-superkit-설치와-갱신)에서 갱신·활성화 동작을 확인하세요.
 
 ## 개발
 
@@ -193,7 +193,7 @@ OMP 19.0.0 런타임·실계정·운영 준비 완료의 검증 근거가 아닙
 - [릴리즈 기록](docs/releases/0.1.0.md#verification-records): 날짜·기준선별 검증 근거와 한계.
 - [설계](DESIGN.md): Gateway·헤드·레인과 공유 게시판의 계약.
 
-[oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)를 사용합니다.
+[oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-superkit](https://github.com/dbc-hbin/omp-superkit)을 사용합니다.
 
 ## License
 

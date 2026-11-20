@@ -1,5 +1,5 @@
 {
-  "repository": "https://github.com/dbc-hbin/omp-ulw.git",
+  "repository": "https://github.com/dbc-hbin/omp-superkit.git",
   "ref": "HEAD",
   "directory": ".upstream/ulw",
   "checkIntervalMs": 3600000,

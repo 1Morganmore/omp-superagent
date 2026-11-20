@@ -318,11 +318,11 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## Managed ULW: separately licensed package and bundled skills
 
-- Source: [dbc-hbin/omp-ulw](https://github.com/dbc-hbin/omp-ulw);
+- Source: [dbc-hbin/omp-superkit](https://github.com/dbc-hbin/omp-superkit) (formerly `omp-ulw`);
   management configuration: `upstream/ulw.json`. Packages are prepared separately
   under `.upstream/ulw/revisions/<revision>/package`; `active.json` identifies the
   selected revision. The inspected snapshot was
-  [`1625e0de2e4807f1cfdac19e6b54578af1329951`](https://github.com/dbc-hbin/omp-ulw/tree/1625e0de2e4807f1cfdac19e6b54578af1329951).
+  [`1625e0de2e4807f1cfdac19e6b54578af1329951`](https://github.com/dbc-hbin/omp-superkit/tree/1625e0de2e4807f1cfdac19e6b54578af1329951).
 - This project's MIT license does not grant a license to that separate package or
   override its per-file licenses and attribution. The inspected snapshot has no
   root LICENSE or `package.json` license declaration; no blanket package license

@@ -40,6 +40,18 @@ interface PackageManifest {
 }
 export interface ManagedUlwOptions { manifestPath?: string; root?: string }
 
+function isManagedUlwPackageName(name: string | undefined): boolean {
+  return name === "omp-superkit" || name === "omp-ulw";
+}
+
+function matchesUlwRepository(previous: string, current: string): boolean {
+  // GitHub kept the repository identity and history when it renamed the project.
+  return previous === current || (
+    previous === "https://github.com/dbc-hbin/omp-ulw.git" &&
+    current === "https://github.com/dbc-hbin/omp-superkit.git"
+  );
+}
+
 export function readUlwManifest(manifestPath = join(projectRoot, "upstream/ulw.json")): UlwManifest {
   const value = JSON.parse(readFileSync(manifestPath, "utf8")) as UlwManifest;
   if (!value.repository || value.ref !== "HEAD" || !value.directory ||
@@ -71,7 +83,7 @@ export function validateManagedUlwPackage(packagePath: string): string {
   if (!isAbsolute(packagePath)) throw new Error("Managed ULW package must have an absolute path");
   const canonical = realpathSync(packagePath);
   const pkg = JSON.parse(readFileSync(join(canonical, "package.json"), "utf8")) as PackageManifest;
-  if (pkg.name !== "omp-ulw" || !Array.isArray(pkg.omp?.extensions) || !pkg.omp.extensions.length)
+  if (!isManagedUlwPackageName(pkg.name) || !Array.isArray(pkg.omp?.extensions) || !pkg.omp.extensions.length)
     throw new Error("Managed ULW package has no native extension manifest");
   for (const entry of pkg.omp.extensions) {
     if (typeof entry !== "string" || !entry || isAbsolute(entry)) throw new Error("Invalid managed ULW extension entry");
@@ -241,7 +253,7 @@ if (import.meta.main && process.argv[2] === "--launch-extensions") {
       for (;;) {
         try {
           const manifest = JSON.parse(await readFile(join(current, "package.json"), "utf8")) as PackageManifest;
-          return manifest.name === "omp-ulw" ? current : undefined;
+          return isManagedUlwPackageName(manifest.name) ? current : undefined;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
@@ -375,21 +387,22 @@ export async function updateManagedUlw(options: ManagedUlwOptions = {}): Promise
       if (!branch || !upstreamRevision) throw new Error("ULW upstream did not advertise an unambiguous default branch and HEAD commit");
       const active = readActive(root);
       let nextActive: ActiveRevision | undefined;
-      if (active && active.repository !== manifest.repository) throw new Error("Managed ULW source repository changed; explicit operator reconciliation required");
-      if (active?.revision === upstreamRevision && active.repository === manifest.repository) {
+      if (active && !matchesUlwRepository(active.repository, manifest.repository))
+        throw new Error("Managed ULW source repository changed; explicit operator reconciliation required");
+      if (active?.revision === upstreamRevision) {
         activeManagedUlw(options);
       } else {
         const revisionRoot = join(root, "revisions", upstreamRevision);
-        let prepared = false;
+        let preparedRepository: string | undefined;
         try {
           const provenance = JSON.parse(await readFile(join(revisionRoot, "provenance.json"), "utf8")) as ActiveRevision;
-          if (provenance.revision !== upstreamRevision || provenance.repository !== manifest.repository)
+          if (provenance.revision !== upstreamRevision || !matchesUlwRepository(provenance.repository, manifest.repository))
             throw new Error("Existing immutable ULW revision has different provenance");
           validateManagedUlwPackage(join(revisionRoot, "package"));
-          prepared = true;
+          preparedRepository = provenance.repository;
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const provenance: ActiveRevision = { revision: upstreamRevision, repository: manifest.repository, branch, preparedAt: new Date().toISOString() };
-        if (!prepared) {
+        if (!preparedRepository) {
           stage = await mkdtemp(join(root, ".stage-"));
           const source = join(stage, "source");
           const distribution = join(stage, "distribution");
@@ -430,7 +443,7 @@ export async function updateManagedUlw(options: ManagedUlwOptions = {}): Promise
           await mkdir(join(root, "revisions"), { recursive: true, mode: 0o700 });
           await rename(distribution, revisionRoot);
         }
-        if (prepared) {
+        if (preparedRepository) {
           // A previously prepared revision may have been active before a remote
           // rewind. Do not bypass ancestry merely because its files already exist.
           stage = await mkdtemp(join(root, ".stage-"));
@@ -443,7 +456,7 @@ export async function updateManagedUlw(options: ManagedUlwOptions = {}): Promise
           }
           await probe(join(revisionRoot, "package"), stage, manifest);
         }
-        nextActive = provenance;
+        nextActive = { ...provenance, repository: preparedRepository ?? provenance.repository };
       }
       // Finish fallible staging cleanup/status publication before committing the
       // active pointer, so a failed preparation never reports a rollback after

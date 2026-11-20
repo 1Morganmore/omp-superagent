@@ -35,7 +35,7 @@ async function promptExtension(revision: string, defect = "none"): Promise<strin
   return source.replace('const defect: string = "none";', `const defect: string = ${JSON.stringify(defect)};`)
     + `\nexport const revision = ${JSON.stringify(revision)};\n`;
 }
-async function fixture() {
+async function fixture(packageName = "omp-ulw") {
   const root = await mkdtemp(join(await realpath("/tmp"), "omu-"));
   cleanups.push(async () => { await writable(root); await rm(root, { recursive: true, force: true }); });
   const remote = join(root, "remote");
@@ -47,7 +47,7 @@ async function fixture() {
   await mkdir(join(remote, "skills/fixture"), { recursive: true });
   await writeFile(join(remote, "skills/fixture/SKILL.md"), "---\nname: ulw-local-fixture\ndescription: Local git install fixture.\n---\nRead only fixture.\n");
   await writeFile(join(remote, "resource.txt"), "resource-v1");
-  await writeFile(join(remote, "package.json"), JSON.stringify({ name: "omp-ulw", version: "0.0.0-fixture", type: "module",
+  await writeFile(join(remote, "package.json"), JSON.stringify({ name: packageName, version: "0.0.0-fixture", type: "module",
     omp: { extensions: ["./index.ts"] }, scripts: { postinstall: "exit 91", build: "exit 92" } }));
   await writeFile(join(remote, "index.ts"), await promptExtension("v1"));
   const commit = async () => {
@@ -66,8 +66,8 @@ async function fixture() {
   return { root, remote, managed, options, first, manifest, manifestPath, commit, cli };
 }
 
-async function launchFixture() {
-  const f = await fixture();
+async function launchFixture(packageName = "omp-superkit", alternateName = "omp-ulw") {
+  const f = await fixture(packageName);
   const home = join(f.root, "home");
   const agentDir = join(home, "agent");
   const unrelated = join(f.root, "operator-package");
@@ -83,7 +83,7 @@ async function launchFixture() {
   await writeFile(join(unrelated, "package.json"), JSON.stringify({
     name: "operator-package", omp: { extensions: ["./index.ts"] },
   }));
-  await writeFile(join(oldUlw, "package.json"), JSON.stringify({ name: "omp-ulw", omp: { extensions: ["./index.ts"] } }));
+  await writeFile(join(oldUlw, "package.json"), JSON.stringify({ name: alternateName, omp: { extensions: ["./index.ts"] } }));
   await writeFile(join(oldUlw, "index.ts"), "throw new Error('unmanaged ULW must not load');\n");
   const configPath = join(f.root, "launch.json");
   await writeFile(configPath, JSON.stringify({ extensions: [unrelated, oldUlw] }));
@@ -127,7 +127,7 @@ test("stock launch refuses resource roots that would resurrect a disabled siblin
 }, 60_000);
 
 test("stock launch excludes a second ULW reached through native ambient symlink discovery", async () => {
-  const f = await launchFixture();
+  const f = await launchFixture("omp-ulw", "omp-superkit");
   await writeFile(f.configPath, JSON.stringify({ extensions: [f.unrelated] }));
   await symlink(f.oldUlw, join(f.agentDir, "extensions/old-ulw"));
   const launch = await f.launch();
@@ -329,11 +329,15 @@ test("changed remote activates atomically; unchanged remote and failed updates r
   await updateManagedUlw(f.options);
   expect(activeManagedUlw(f.options)).toBe(firstPath);
   expect((await lstat(join(firstPath, "index.ts"))).ino).toBe(inode);
+  const manifestPath = join(f.remote, "package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, name: "omp-superkit" }));
   await writeFile(join(f.remote, "index.ts"), await promptExtension("v2"));
   const second = await f.commit();
   const updated = await updateManagedUlw(f.options);
   expect(updated.revision).toBe(second);
   const secondPath = activeManagedUlw(f.options);
+  expect(JSON.parse(await readFile(join(secondPath, "package.json"), "utf8")).name).toBe("omp-superkit");
   const secondBytes = await readFile(join(secondPath, "index.ts"), "utf8");
   const secondInode = (await lstat(join(secondPath, "index.ts"))).ino;
   expect(secondPath).not.toBe(firstPath);
