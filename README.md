@@ -20,10 +20,10 @@ the results back to your conversation.
 
 Install from [npm](https://www.npmjs.com/package/omp-superagent) or use the source
 and npm tarballs from the
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.2).
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.3).
 Install with Bun or npm below. Bun is still required at runtime; this is not a
-standalone binary. OMP must already be installed; this project neither patches nor
-builds it. Installation prepares the managed dependencies.
+standalone binary. Installation prepares the managed dependencies. Running a Host
+requires a separately installed OMP; this project neither patches nor builds it.
 
 ## Why superagent?
 
@@ -208,15 +208,16 @@ bun run test:ci
 
 See [developer verification and source release steps](docs/OPERATIONS.md#6-개발자-검증)
 for offline native/PTY coverage, prerequisites, and local packaging/publication boundaries.
-[Recorded results and limitations](docs/releases/0.1.0.md#verification-records) apply
-to the versions tested; they do not verify the OMP 19.0.0 runtime, live accounts,
-or production readiness.
+The [current CI matrix](https://github.com/dbc-hbin/omp-superagent/blob/main/.github/workflows/ci.yml)
+includes stock OMP 19.0.0.
+[Historical results](docs/releases/0.1.0.md#verification-records) apply only to the
+recorded versions and scenarios. Offline CI does not verify live accounts or production readiness.
 
 ## Documentation & credits
 
-- [Design](DESIGN.md): routing, roles, sessions, and lifecycle.
+- [Design](DESIGN.md): architecture, messaging authority and execution contracts.
 - [Operations guide](docs/OPERATIONS.md): platform setup, commands, and recovery.
-- [Release records](docs/releases/0.1.0.md#verification-records): dated verification evidence and limits.
+- [Release notes](docs/releases/0.1.3.md) and [historical verification records](docs/releases/0.1.0.md#verification-records).
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.

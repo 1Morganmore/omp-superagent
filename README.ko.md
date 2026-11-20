@@ -16,9 +16,9 @@ Discord·Telegram·Slack을 [oh-my-pi](https://github.com/can1357/oh-my-pi)의 �
 ## 배포 형태
 
 [npm 패키지](https://www.npmjs.com/package/omp-superagent)를 Bun 또는 npm으로 설치하거나
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.2)의 소스·npm tarball을 받으세요.
-실행에는 Bun이 필요하며 독립 실행 바이너리는 아닙니다. OMP는 미리 설치되어 있어야 하며
-이 프로젝트가 패치하거나 빌드하지 않습니다. 설치 시 관리형 의존성도 준비합니다.
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.3)의 소스·npm tarball을 받으세요.
+실행에는 Bun이 필요하며 독립 실행 바이너리는 아닙니다. 설치 시 관리형 의존성을 준비합니다.
+Host를 실행하려면 별도로 설치한 OMP가 필요하며, 이 프로젝트가 패치하거나 빌드하지 않습니다.
 
 ## 차별점
 
@@ -185,14 +185,16 @@ bun run test:ci
 
 오프라인 native/PTY 범위·필요 도구·로컬 패키징과 게시 경계는
 [개발자 검증·소스 릴리즈 절차](docs/OPERATIONS.md#6-개발자-검증)를 참고하세요.
-[실행 결과와 한계](docs/releases/0.1.0.md#verification-records)는 시험한 버전에만 적용됩니다.
-OMP 19.0.0 런타임·실계정·운영 준비 완료의 검증 근거가 아닙니다.
+[현재 CI](https://github.com/dbc-hbin/omp-superagent/blob/main/.github/workflows/ci.yml)는
+순정 OMP 19.0.0을 검사 대상에 포함합니다.
+[과거 실행 기록](docs/releases/0.1.0.md#verification-records)은 기록된 버전과 시나리오에만 적용됩니다.
+오프라인 CI는 실계정 접속이나 운영 준비 완료를 보증하지 않습니다.
 
 ## 문서와 출처
 
 - [운영 가이드](docs/OPERATIONS.md): 설치·설정·명령·복구 절차.
-- [릴리즈 기록](docs/releases/0.1.0.md#verification-records): 날짜·기준선별 검증 근거와 한계.
-- [설계](DESIGN.md): Gateway·헤드·레인과 공유 게시판의 계약.
+- [릴리즈 노트](docs/releases/0.1.3.md) 및 [과거 검증 기록](docs/releases/0.1.0.md#verification-records).
+- [설계(영문)](DESIGN.md): 아키텍처와 메신저 권한·실행 계약.
 
 [oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-superkit](https://github.com/dbc-hbin/omp-superkit)을 사용합니다.
 

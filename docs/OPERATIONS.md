@@ -28,10 +28,10 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 `decision_ask`는 HEAD와 레인 root에서 사용하며 native 자식에는 제공하지 않는다.
 `lane_inspect({})`가 목록 조회다. 레인에는 관리 권한을, native 자식에는 관리·게시판 권한을 주지 않는다.
 일반 OMP에 이 확장들을 전역 설치하지 않는다. 도구 인자·역할 경계는
-[설계의 관리 도구 계약](../DESIGN.md#5-레인-관리-도구와-운영-스킬)을 따른다.
+[설계의 관리 도구 계약](design/execution.md#management-tools)을 따른다.
 
-- `skill://superagent-head`: 라우팅·모델 선택·감독 절차. root head에는 번들 전체를 매 턴
-  주입하며, 파일 수정은 Host 재시작 뒤 반영된다.
+- `skill://superagent-head`: 라우팅·모델 선택·감독 절차. root head에는 `SKILL.md`의 역할
+  지침만 주입하고 상세 참조는 필요할 때 패키지 경로에서 읽는다. 역할 파일 수정은 Host 재시작 뒤 반영된다.
 - `skill://superagent-lane`: 범위 내 직접 작업·부분 위임·검증·보고. 상세 workflow는 필요할 때 읽는다.
 - native discovery를 사용하므로 현재 cwd와 무관하게 위 URI를 읽을 수 있다. 사용자·프로젝트
   스킬을 덮어쓰지 않는다. `--no-skills`는 이 URI 기반 운영 흐름에서 사용하지 않는다.
@@ -101,7 +101,7 @@ jevify는 충분히 큰 동질적 자료에 고정 rubric을 독립 적용하여
 계획만 요청받았으면 구현하지 않으며 native 승인·artifact
 review·비용·범위·pause/cancel·불확실성 보류를 우회하지 않는다.
 방법별 선택 기준·구조화된 인계·native mode 매핑은
-[설계의 workflow 계약](../DESIGN.md#workflow-선택과-명시적-레인-인계)에 모은다.
+[설계의 workflow 계약](design/execution.md#workflow-selection)에 모은다.
 사용자 jevify 선택은 원래 입력 선두의 소문자 독립 prose `jevify`만 인정하며 `/jevify`·대문자·
 인용/code/path·부정·뒤쪽 언급은 아니다. 호출 없는 일반 원문에도 헤드 선택 필드는 사용 가능하다.
 runtime의 `workflowPrompt`는 fenced context 밖에 소문자 native `jevify`를 prefix하며 ULW
@@ -128,7 +128,7 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 비밀 대신 간결한 관측·근거·충돌을 공유한다. 반환된 정확한 게시물만 읽음 처리하며 구독은
 실제 세션별이다. header 알림과 본문 읽음은 다르다. 게시물은 명령·승인·완료 근거가 아니며
 유휴 모델 호출·unloaded 레인 기동을 만들지 않는다. membership·도구 필드·알림의 정확한
-계약은 [설계의 게시판 절](../DESIGN.md#공유-정보-게시판--별도-공통-확장)을 따른다.
+계약은 [설계의 게시판 절](design/execution.md#shared-information-board)을 따른다.
 
 ### 새 레인의 모델 선택
 
@@ -155,7 +155,7 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 `lane_inspect`에서 저장된 `model/modelPreset/modelPresetSnapshot/modelReason`과 실제
 `state.model`·`modelCheck`를 구분한다. 실제 상태가 null이면 일치가 아니라 미관측이다.
 최초 쓰기 예외·judge 제한·모델 채택·private overlay 계약은
-[설계의 모델 선택 절](../DESIGN.md#native-judge-자문과-모델-동일성의-구분)을 따른다.
+[설계의 모델 선택 절](design/execution.md#models-and-presets)을 따른다.
 
 ## 1. 로컬 준비 — 봇은 시작하지 않음
 
@@ -228,7 +228,7 @@ active가 있는 Gateway 시작을 기다리게 하지 않는다. 이는 일반 
 준비·offline composition probe가 성공한 immutable revision만 원자적으로 활성화한다.
 기존 active 이후에는 같은 원격의 fast-forward만 허용하며, 공식 `omp-ulw` → `omp-superkit`
 이름 변경에도 같은 검사를 적용한다. 실패·rewind·divergence는 이전 active를 보존한다.
-상세 lock·staging·probe 계약은 [설계](../DESIGN.md#필수-ulw-설치와-일반-코드-갱신-경계)를 따른다.
+상세 lock·staging·probe 계약은 [설계](design/execution.md#managed-omp-superkit-integration)를 따른다.
 관리 pointer/lock을 수동 편집해 우회하지 않는다. active가 없거나 무효면 start는 어댑터
 활성화 전에 실패하므로 `bun run prepare:ulw`로 먼저 복구한다. doctor는 원격 최신성이나
 loader 성공을 검사하지 않는다. 이전 revision은 자동 삭제하지 않는다.
@@ -705,7 +705,8 @@ pending 순서를 유지하고 `gateway.unresolvedEvents`와 `head.ready: false`
 관리 Host를 중복 기동하지 말고, 알 수 없거나 교체된 socket을 지워 우회하지 않는다.
 launch 직후 소유권 기록 전 crash 등은 수동 조정까지 보류할 수 있다. 모든 crash의 자동
 복구를 보장하지 않으며 재시작 시 `config.model`로 기존 head 모델을 덮지 않는다.
-정확한 접수·소유권 복구 계약은 [설계](../DESIGN.md#8-영속-상태권한복구)를 따른다.
+정확한 [접수](design/messaging.md#durable-admission-and-recovery)와
+[소유권 복구](../DESIGN.md#startup-readiness-and-shutdown) 계약은 설계를 따른다.
 
 모든 입력은 헤드가 판단하며 새 레인은 `lane_start`, 기존 레인 지시는 `lane_message`로
 명시적으로 전달한다. 레인 생성이 대기 입력을 자동 이동시키지 않는다. 결과는 durable head
@@ -1097,8 +1098,7 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
 - 세션별 Bun owner는 native OMP stdio와 재연결 socket만 유지한다. 세션 파일·lease·연결·실행·
   실제 종료는 별개다. native UI·비동기 실행·goal·소유 서비스·저장 완료가 확인되지 않으면
   안전한 유휴로 추측하거나 강제 회수하지 않는다. shutdown ACK만으로 예산·소유권을 해제하지 않는다.
-  상세 구현은 [실행 자원과 수명](../DESIGN.md#6-실행-자원과-수명)과
-  [Host 관측 경계](../DESIGN.md#7-설치-omp-host와-관측-경계)를 따른다.
+  상세 구현은 [실행 자원과 Host 수명](design/execution.md#execution-budget-and-host-lifecycle)을 따른다.
 - 모든 플랫폼의 입력 첨부는 요청당 최대 10개, 개별 20 MiB, 합계 40 MiB다.
   선언 크기·실제 스트림 크기를 대조하며 redirect는 따르지 않는다.
   Telegram에서 `file_size`가 없으면 크기 미상(`null`)으로 저장한다. 알려진 0바이트와 구분하며,
@@ -1210,7 +1210,7 @@ OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-superkit/index.ts bun test test/ski
 
 새 revision과 기존 revision 재활성화는 배포된 OMP SDK의 실제 prompt renderer·ExtensionRunner를
 사용하는 격리된 offline composition probe도 통과해야 한다. 상세 검사는
-[ULW 설치 계약](../DESIGN.md#필수-ulw-설치와-일반-코드-갱신-경계)을 따르며 import·합성 성공을
+[ULW 설치 계약](design/execution.md#managed-omp-superkit-integration)을 따르며 import·합성 성공을
 모델 호출·Agent 실행·goal 생성·workflow 완료의 증거로 확대하지 않는다.
 
 ### 소스·npm 릴리즈
