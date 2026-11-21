@@ -87,6 +87,21 @@ fn split_closes_and_reopens_a_code_fence_with_its_language() {
 }
 
 #[test]
+fn split_does_not_reopen_inline_backticks_as_a_code_fence() {
+    let inline = "```example```";
+    let prose = "a".repeat(2_050);
+    let input = format!("{inline}\n\n{prose}");
+    let chunks = split(&input, 2_000, 5).unwrap();
+    assert_eq!(chunks[0], inline);
+    assert_eq!(chunks[1..].concat(), prose);
+
+    // A space split before the closing run would make the first fragment
+    // look like a real opener. Keep the original text in the attachment.
+    let overlong = format!("```example {prose}```");
+    assert!(split(&overlong, 2_000, 5).is_none());
+}
+
+#[test]
 fn split_keeps_blank_lines_inside_a_reopened_fence() {
     let code = format!("{}\n\n{}", "a".repeat(40), "b".repeat(40));
     let text = format!("```py\n{code}\n```");
@@ -98,6 +113,26 @@ fn split_keeps_blank_lines_inside_a_reopened_fence() {
             format!("```py\n\n{}\n```", "b".repeat(40)),
         ]
     );
+}
+
+#[test]
+fn split_preserves_a_shorter_marker_inside_a_longer_fence() {
+    let literal = format!("```{}", "x".repeat(2_100));
+    let input = format!("````text\n{literal}\n````");
+    let chunks = split(&input, 2_000, 5).unwrap();
+    assert!(chunks.len() > 1);
+    let content = chunks
+        .iter()
+        .map(|part| {
+            let body = part
+                .strip_prefix("````text")
+                .unwrap()
+                .strip_suffix("\n````")
+                .unwrap();
+            body.strip_prefix('\n').unwrap_or(body)
+        })
+        .collect::<String>();
+    assert_eq!(content, literal);
 }
 
 #[test]

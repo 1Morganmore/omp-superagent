@@ -81,6 +81,12 @@ fn fence(line: &str) -> Option<(u8, usize, &str)> {
     (count >= 3).then(|| (ch, count, &line[count..]))
 }
 
+fn opens(line: &str) -> Option<(u8, usize, &str)> {
+    // A backtick fence's info string cannot contain backticks. In particular,
+    // a line that starts and ends with the same backtick run is inline code.
+    fence(line).filter(|(ch, _, rest)| *ch != b'`' || !rest.contains('`'))
+}
+
 fn closes(line: &str, ch: u8, length: usize) -> bool {
     fence(line).is_some_and(|(kind, count, rest)| {
         kind == ch && count >= length && rest.trim_matches([' ', '\t', '\r']).is_empty()
@@ -176,12 +182,11 @@ pub(super) fn render(text: &str, budget: usize) -> Cow<'_, str> {
     let mut bytes = text.len();
     let mut fenced = None;
     while let Some(line) = lines.next() {
-        let marker = fence(line);
         if let Some((ch, length)) = fenced {
             if closes(line, ch, length) {
                 fenced = None;
             }
-        } else if let Some((ch, length, _)) = marker {
+        } else if let Some((ch, length, _)) = opens(line) {
             fenced = Some((ch, length));
         } else if !block_start(line)
             && let Some(delimiter) = lines.peek().copied()
@@ -228,7 +233,7 @@ fn open_fence<'a>(text: &'a str, mut open: Open<'a>) -> Open<'a> {
             if closes(line, ch, length) {
                 open = None;
             }
-        } else if let Some((ch, length, _)) = fence(line) {
+        } else if let Some((ch, length, _)) = opens(line) {
             let opener = unindent(line).unwrap_or(line).trim_end_matches('\r');
             open = Some((ch, length, opener));
         }
@@ -280,6 +285,25 @@ pub(super) fn split(text: &str, limit: usize, parts: usize) -> Option<Vec<String
                 .checked_sub(prefix + reserve)
                 .filter(|units| *units > 0)?;
             let (body, next) = cut(rest, budget);
+            if !next.is_empty() && !rest[body.len()..].starts_with('\n') {
+                let line_start = body.rfind('\n').map_or(0, |at| at + 1);
+                let original = rest[line_start..].split('\n').next().unwrap_or_default();
+                let tail = next.split('\n').next().unwrap_or_default();
+                let head = &body[line_start..];
+                // A cut within a line can turn inline backticks into a fence
+                // by removing their closing run or moving them to column zero.
+                let changes_fence = match open_fence(&body[..line_start], open) {
+                    Some((ch, length, _)) => [original, head, tail]
+                        .into_iter()
+                        .any(|line| closes(line, ch, length)),
+                    None => [original, head, tail]
+                        .into_iter()
+                        .any(|line| opens(line).is_some()),
+                };
+                if changes_fence {
+                    return None;
+                }
+            }
             let state = open_fence(body, open);
             let closer = state.map_or(0, |(_, length, _)| length + 1);
             if closer <= reserve {

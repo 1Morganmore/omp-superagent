@@ -3,6 +3,7 @@ use std::time::Duration;
 use reqwest::{Method, RequestBuilder, Response, Url, multipart};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::time::{Instant, timeout_at};
 
 use super::rest::{FILE_LIMIT, Rest, broken, no_mentions};
 use super::{
@@ -13,6 +14,8 @@ use super::{
 const MESSAGE_LIMIT: usize = 2_000;
 /// More parts than this are sent as one text attachment instead.
 const MESSAGE_PARTS: usize = 5;
+// Leave time to persist and return the receipt before the head's 30 s IPC timeout.
+const OUTPUT_SEND_BUDGET: Duration = Duration::from_secs(25);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +149,7 @@ impl Payload {
 
 impl State {
     pub(super) async fn send(&self, output: &Output) -> Effect<String> {
+        let deadline = Instant::now() + OUTPUT_SEND_BUDGET;
         if let Some(reply) = &output.reply_to
             && (!snowflake(&reply.message_id) || reply.route.physical() != output.route.physical())
         {
@@ -153,7 +157,11 @@ impl State {
                 "Discord reply requires a real message in the exact destination conversation",
             ));
         }
-        let channel = self.destination(&output.route).await?;
+        let not_started =
+            || EffectError::rejected("Discord output deadline expired before sending");
+        let channel = timeout_at(deadline, self.destination(&output.route))
+            .await
+            .map_err(|_| not_started())??;
         let payloads = Payload::split(
             &output.text,
             &nonce(&output.id, &output.route, 0),
@@ -168,10 +176,18 @@ impl State {
                 payload.body["message_reference"] =
                     json!({"message_id": reply.message_id, "fail_if_not_exists": false});
             }
-            let request = self
-                .rest
-                .request(Method::POST, &format!("channels/{}/messages", channel.id));
-            let sent = match Rest::response::<RemoteMessage>(payload.apply(request)).await {
+            let request = payload.apply(
+                self.rest
+                    .request(Method::POST, &format!("channels/{}/messages", channel.id)),
+            );
+            if Instant::now() >= deadline {
+                return Err(if first.is_some() {
+                    broken("Discord output deadline expired after partial delivery")
+                } else {
+                    not_started()
+                });
+            }
+            let sent = match Rest::response_before::<RemoteMessage>(request, deadline).await {
                 Ok(sent) if sent.belongs(&output.route) && snowflake(&sent.id) => sent,
                 Ok(_) => {
                     return Err(broken(

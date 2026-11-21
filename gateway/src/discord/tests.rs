@@ -94,6 +94,11 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
             if content.starts_with("reject") {
                 return (StatusCode::BAD_REQUEST, Json(json!({"code":50035}))).into_response();
             }
+            if content.starts_with("deadline first") {
+                time::sleep(Duration::from_secs(12)).await;
+            } else if content.starts_with("deadline second") {
+                time::sleep(Duration::from_secs(14)).await;
+            }
             // Split parts get distinct receipts so the stored first ID is observable.
             let id = content
                 .strip_prefix("segment ")
@@ -513,6 +518,29 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     assert_eq!(rejected.certainty, "rejected", "nothing was delivered");
     received(&mut observed, "/channels/99/messages").await;
     assert!(observed.try_recv().is_err());
+
+    let output = [json!({"id":"deadline","route":route,
+        "text":paragraphs(&["deadline first", "deadline second", "deadline third"])})];
+    let (expired, ()) = tokio::join!(hub.effect("send", &output), async {
+        for (part, delay) in [("first", 12), ("second", 14)] {
+            let body = received(&mut observed, "/channels/99/messages").await;
+            assert!(
+                body["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("deadline {part}"))
+            );
+            // Advance only while the fixture holds a reply; resume for real TCP I/O.
+            time::pause();
+            time::advance(Duration::from_secs(delay)).await;
+            time::resume();
+        }
+    });
+    assert_eq!(expired.unwrap_err().certainty, "uncertain");
+    assert!(
+        observed.try_recv().is_err(),
+        "the total deadline must prevent the third POST even if each REST request fits its own timeout"
+    );
 
     let labels = ["segment 1"; 6];
     assert_eq!(

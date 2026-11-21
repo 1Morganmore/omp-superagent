@@ -207,8 +207,11 @@ approval.
   first splits an over-limit reply at paragraph, line, then space boundaries
   into at most five ordered messages, closing and reopening a code fence that
   crosses a boundary; only the first replies to the original message, each part
-  has its own nonce, and the first message ID is the receipt. A failure after a
-  visible part is uncertain and nothing is resent. Slack
+  has its own nonce, and the first message ID is the receipt. The Gateway has
+  25 seconds for the whole Discord output, including destination lookup,
+  leaving time to return the result before the head's 30-second IPC timeout.
+  No new parts are posted after that deadline. An in-flight POST at expiry or
+  a failure after a visible part is uncertain; nothing is resent. Slack
   uses upload URL → bytes → `files.completeUploadExternal`, not `files.upload`.
   Telegram and Slack do not automatically retry remote mutations. Discord formats
   pipe tables as fixed-width code blocks at delivery, preserving the stored
