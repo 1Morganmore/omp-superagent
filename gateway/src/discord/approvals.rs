@@ -138,7 +138,7 @@ impl State {
         let dialog = match Dialog::parse(&approval.request) {
             Ok(dialog) => dialog,
             Err(reason) => {
-                let delivery_id = nonce(&format!("approval-cancel:{token}"), &approval.route);
+                let delivery_id = nonce(&format!("approval-cancel:{token}"), &approval.route, 0);
                 let notice = format!("Request cancelled: {reason}");
                 let card = self
                     .write_card(
@@ -170,6 +170,7 @@ impl State {
         let delivery_id = nonce(
             &format!("approval:{}", pending.token),
             &pending.approval.route,
+            0,
         );
         let (text, controls) =
             cards::view(&pending).ok_or_else(|| broken("Discord approval view is unavailable"))?;
@@ -241,6 +242,7 @@ impl State {
         let nonce = nonce(
             &format!("approval:{}", pending.token),
             &pending.approval.route,
+            0,
         );
         self.write_card(
             &pending.approval.route,

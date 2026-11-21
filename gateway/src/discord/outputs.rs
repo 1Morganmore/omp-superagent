@@ -11,6 +11,8 @@ use super::{
 };
 
 const MESSAGE_LIMIT: usize = 2_000;
+/// More parts than this are sent as one text attachment instead.
+const MESSAGE_PARTS: usize = 5;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,8 +45,8 @@ pub(super) struct Attachment {
     size: u64,
 }
 
-pub(super) fn nonce(id: &str, route: &Route) -> String {
-    hash(&json!([id, route.key(), 0]))
+pub(super) fn nonce(id: &str, route: &Route, part: usize) -> String {
+    hash(&json!([id, route.key(), part]))
 }
 
 pub(super) fn attachment_url(value: &str) -> Option<Url> {
@@ -75,31 +77,45 @@ pub(super) struct Payload {
 }
 
 impl Payload {
-    pub fn new(text: &str, nonce: &str, components: Option<Value>) -> Effect<Self> {
+    fn text(content: String) -> Self {
+        Self {
+            body: json!({ "content": content, "allowed_mentions": no_mentions() }),
+            file: None,
+        }
+    }
+
+    /// One payload per Discord message, in order: up to `parts` text messages,
+    /// or one text attachment named after `nonce` when the text needs more.
+    fn split(text: &str, nonce: &str, parts: usize) -> Effect<Vec<Self>> {
         let rendered = markdown::render(text, FILE_LIMIT);
         if rendered.len() > FILE_LIMIT {
             return Err(EffectError::rejected(
                 "Discord text attachment exceeds the safe 8 MiB upload limit",
             ));
         }
-        let (content, file) = if utf16(&rendered) > MESSAGE_LIMIT {
-            (
-                "Full text is attached (exceeds Discord's message limit).".to_owned(),
-                Some((format!("omp-{nonce}.txt"), rendered.into_owned())),
-            )
-        } else if rendered.is_empty() {
-            ("(empty output)".to_owned(), None)
-        } else {
-            (rendered.into_owned(), None)
-        };
-        let mut body = json!({ "content": content, "allowed_mentions": no_mentions() });
+        if rendered.is_empty() {
+            return Ok(vec![Self::text("(empty output)".to_owned())]);
+        }
+        if utf16(&rendered) <= MESSAGE_LIMIT {
+            return Ok(vec![Self::text(rendered.into_owned())]);
+        }
+        if let Some(chunks) = markdown::split(&rendered, MESSAGE_LIMIT, parts) {
+            return Ok(chunks.into_iter().map(Self::text).collect());
+        }
+        let name = format!("omp-{nonce}.txt");
+        let mut payload =
+            Self::text("Full text is attached (exceeds Discord's message limit).".to_owned());
+        payload.body["attachments"] = json!([{ "id": 0, "filename": name }]);
+        payload.file = Some((name, rendered.into_owned()));
+        Ok(vec![payload])
+    }
+
+    pub fn new(text: &str, nonce: &str, components: Option<Value>) -> Effect<Self> {
+        let mut payload = Self::split(text, nonce, 1)?.remove(0);
         if let Some(components) = components {
-            body["components"] = components;
+            payload.body["components"] = components;
         }
-        if let Some((name, _)) = &file {
-            body["attachments"] = json!([{ "id": 0, "filename": name }]);
-        }
-        Ok(Self { body, file })
+        Ok(payload)
     }
 
     pub fn create(&mut self, nonce: &str) {
@@ -138,23 +154,40 @@ impl State {
             ));
         }
         let channel = self.destination(&output.route).await?;
-        let nonce = nonce(&output.id, &output.route);
-        let mut payload = Payload::new(&output.text, &nonce, None)?;
-        payload.create(&nonce);
-        if let Some(reply) = &output.reply_to {
-            payload.body["message_reference"] =
-                json!({"message_id": reply.message_id, "fail_if_not_exists": false});
+        let payloads = Payload::split(
+            &output.text,
+            &nonce(&output.id, &output.route, 0),
+            MESSAGE_PARTS,
+        )?;
+        let mut first = None;
+        for (part, mut payload) in payloads.into_iter().enumerate() {
+            payload.create(&nonce(&output.id, &output.route, part));
+            if part == 0
+                && let Some(reply) = &output.reply_to
+            {
+                payload.body["message_reference"] =
+                    json!({"message_id": reply.message_id, "fail_if_not_exists": false});
+            }
+            let request = self
+                .rest
+                .request(Method::POST, &format!("channels/{}/messages", channel.id));
+            let sent = match Rest::response::<RemoteMessage>(payload.apply(request)).await {
+                Ok(sent) if sent.belongs(&output.route) && snowflake(&sent.id) => sent,
+                Ok(_) => {
+                    return Err(broken(
+                        "Discord message receipt identity could not be verified",
+                    ));
+                }
+                // Earlier parts are already visible: never report a definite
+                // rejection that would invite sending the whole output again.
+                Err(_) if first.is_some() => {
+                    return Err(broken("Discord delivered only part of a split message"));
+                }
+                Err(error) => return Err(error),
+            };
+            first.get_or_insert(sent.id);
         }
-        let request = self
-            .rest
-            .request(Method::POST, &format!("channels/{}/messages", channel.id));
-        let sent: RemoteMessage = Rest::response(payload.apply(request)).await?;
-        if !sent.belongs(&output.route) || !snowflake(&sent.id) {
-            return Err(broken(
-                "Discord message receipt identity could not be verified",
-            ));
-        }
-        Ok(sent.id)
+        first.ok_or_else(|| broken("Discord message was not sent"))
     }
 
     pub(super) async fn activity(
