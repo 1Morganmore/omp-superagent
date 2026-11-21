@@ -47,7 +47,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 openmls = "0.8.1"
 openmls_basic_credential = "0.5"
 openmls_rust_crypto = "0.5.1"
-tokio = { version = "1", features = ["fs", "io-std", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "io-std", "rt-multi-thread", "test-util"] }
 
 [profile.release]
 strip = true

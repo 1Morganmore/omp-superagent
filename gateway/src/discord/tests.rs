@@ -55,9 +55,10 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
         .headers()
         .get("authorization")
         .is_some_and(|value| value == "Bot offline-token");
-    let body: Value =
-        serde_json::from_slice(&to_bytes(request.into_body(), 64 * 1024).await.unwrap())
-            .unwrap_or(Value::Null);
+    let bytes = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+    // A multipart upload is recorded as raw text so its payload_json stays observable.
+    let body: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
     if path.starts_with("/interactions/") {
         assert!(
             !authorized,
@@ -86,10 +87,24 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
         }
         ("POST", "/channels/99/messages") => {
             fixture.emitted.send((path, body.clone())).unwrap();
-            if body["content"] == "ambiguous" {
+            let content = body["content"].as_str().unwrap_or_default();
+            if content == "ambiguous" {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            let remote = json!({"id":"700", "channel_id":"99", "author":{"id":"71","bot":true},
+            if content.starts_with("reject") {
+                return (StatusCode::BAD_REQUEST, Json(json!({"code":50035}))).into_response();
+            }
+            if content.starts_with("deadline first") {
+                time::sleep(Duration::from_secs(12)).await;
+            } else if content.starts_with("deadline second") {
+                time::sleep(Duration::from_secs(14)).await;
+            }
+            // Split parts get distinct receipts so the stored first ID is observable.
+            let id = content
+                .strip_prefix("segment ")
+                .and_then(|rest| rest.get(..1))
+                .map_or_else(|| "700".to_owned(), |part| format!("80{part}"));
+            let remote = json!({"id":id, "channel_id":"99", "author":{"id":"71","bot":true},
                 "components":body.get("components").cloned().unwrap_or_else(|| json!([])) });
             *fixture.last_card.lock().unwrap() = remote.clone();
             remote
@@ -430,6 +445,132 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
         observed.try_recv().is_err(),
         "ambiguous REST effect must not be retried in the adapter"
     );
+
+    let paragraphs = |labels: &[&str]| {
+        labels
+            .iter()
+            .map(|label| format!("{label} {}", "x".repeat(1_500)))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let reply = json!({"route":route,"messageId":"205"});
+    let split = hub
+        .effect(
+            "send",
+            &[json!({"id":"split","route":route,"replyTo":reply,
+                "text":paragraphs(&["segment 1", "segment 2", "segment 3"])})],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        split, "801",
+        "the first message is the stored remote receipt"
+    );
+    let physical: model::Route = serde_json::from_value(route.clone()).unwrap();
+    let mut nonces = HashSet::new();
+    for part in 0..3 {
+        let body = received(&mut observed, "/channels/99/messages").await;
+        let content = body["content"].as_str().unwrap();
+        assert!(content.starts_with(&format!("segment {}", part + 1)));
+        assert!(content.encode_utf16().count() <= 2_000);
+        assert_eq!(body["nonce"], outputs::nonce("split", &physical, part));
+        assert_eq!(body["enforce_nonce"], true);
+        assert!(nonces.insert(body["nonce"].as_str().unwrap().to_owned()));
+        assert_eq!(body["allowed_mentions"], rest::no_mentions());
+        assert_eq!(
+            body["message_reference"],
+            if part == 0 {
+                json!({"message_id":"205","fail_if_not_exists":false})
+            } else {
+                Value::Null
+            },
+            "only the first part replies to the original message"
+        );
+    }
+    assert!(observed.try_recv().is_err());
+
+    let partial = hub
+        .effect(
+            "send",
+            &[json!({"id":"partial","route":route,
+                "text":paragraphs(&["segment 1", "reject", "segment 3"])})],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        partial.certainty, "uncertain",
+        "a visible earlier part makes a later rejection ambiguous for the whole output"
+    );
+    received(&mut observed, "/channels/99/messages").await;
+    received(&mut observed, "/channels/99/messages").await;
+    assert!(
+        observed.try_recv().is_err(),
+        "later parts are not sent and nothing is retried after a partial failure"
+    );
+    let rejected = hub
+        .effect(
+            "send",
+            &[json!({"id":"rejected","route":route,
+                "text":paragraphs(&["reject", "segment 2"])})],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.certainty, "rejected", "nothing was delivered");
+    received(&mut observed, "/channels/99/messages").await;
+    assert!(observed.try_recv().is_err());
+
+    let output = [json!({"id":"deadline","route":route,
+        "text":paragraphs(&["deadline first", "deadline second", "deadline third"])})];
+    let (expired, ()) = tokio::join!(hub.effect("send", &output), async {
+        for (part, delay) in [("first", 12), ("second", 14)] {
+            let body = received(&mut observed, "/channels/99/messages").await;
+            assert!(
+                body["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("deadline {part}"))
+            );
+            // Advance only while the fixture holds a reply; resume for real TCP I/O.
+            time::pause();
+            time::advance(Duration::from_secs(delay)).await;
+            time::resume();
+        }
+    });
+    assert_eq!(expired.unwrap_err().certainty, "uncertain");
+    assert!(
+        observed.try_recv().is_err(),
+        "the total deadline must prevent the third POST even if each REST request fits its own timeout"
+    );
+
+    let labels = ["segment 1"; 6];
+    assert_eq!(
+        hub.effect(
+            "send",
+            &[json!({"id":"overflow","route":route,"replyTo":reply,"text":paragraphs(&labels)})],
+        )
+        .await
+        .unwrap(),
+        "700"
+    );
+    let upload = received(&mut observed, "/channels/99/messages").await;
+    let upload = upload
+        .as_str()
+        .expect("more than five parts fall back to one upload");
+    let payload: Value = upload
+        .lines()
+        .find_map(|line| serde_json::from_str(line).ok())
+        .expect("multipart payload_json part");
+    assert_eq!(
+        payload["content"],
+        "Full text is attached (exceeds Discord's message limit)."
+    );
+    let name = format!("omp-{}.txt", outputs::nonce("overflow", &physical, 0));
+    assert_eq!(payload["attachments"][0]["filename"], name);
+    assert_eq!(payload["nonce"], outputs::nonce("overflow", &physical, 0));
+    assert_eq!(payload["allowed_mentions"], rest::no_mentions());
+    assert_eq!(payload["message_reference"]["message_id"], "205");
+    assert!(upload.contains(&format!("filename=\"{name}\"")));
+    assert!(observed.try_recv().is_err());
 
     wire(&mut socket, json!({"op":7})).await;
     let (stream, _) = time::timeout(Duration::from_secs(5), ws.accept())

@@ -5,6 +5,7 @@ use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tokio::time::{Instant, timeout_at};
 
 use super::{Effect, EffectError, model::Interaction, snowflake};
 
@@ -81,15 +82,31 @@ impl Rest {
             }
             return Err(EffectError::rejected("Discord lookup was rejected (404)"));
         }
-        decode(check(response).await?).await.map(Lookup::Found)
+        decode(check(response, None).await?)
+            .await
+            .map(Lookup::Found)
     }
 
     pub async fn response<T: DeserializeOwned>(request: RequestBuilder) -> Effect<T> {
-        decode(check(send(request).await?).await?).await
+        decode(check(send(request).await?, None).await?).await
+    }
+
+    pub async fn response_before<T: DeserializeOwned>(
+        request: RequestBuilder,
+        deadline: Instant,
+    ) -> Effect<T> {
+        let expired = || broken("Discord output deadline expired awaiting a message receipt");
+        let response = timeout_at(deadline, send(request))
+            .await
+            .map_err(|_| expired())??;
+        let response = check(response, Some(deadline)).await?;
+        timeout_at(deadline, decode(response))
+            .await
+            .map_err(|_| expired())?
     }
 
     pub async fn empty(request: RequestBuilder) -> Effect<()> {
-        check(send(request).await?).await.map(|_| ())
+        check(send(request).await?, None).await.map(|_| ())
     }
 
     pub async fn callback(&self, interaction: &Interaction, body: Value) -> Effect<()> {
@@ -140,7 +157,10 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Effect<T> {
         .map_err(|_| broken("Discord REST response could not be verified"))
 }
 
-async fn check(response: reqwest::Response) -> Effect<reqwest::Response> {
+async fn check(
+    response: reqwest::Response,
+    deadline: Option<Instant>,
+) -> Effect<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -157,10 +177,18 @@ async fn check(response: reqwest::Response) -> Effect<reqwest::Response> {
             status.as_u16()
         ));
         if retry {
-            let delay = response
-                .json::<Failure>()
-                .await
-                .map_or(header, |value| value.retry_after.or(header));
+            // The status already confirms rejection. Only the optional retry
+            // delay depends on the body; expiry cannot undo that certainty.
+            let retry_delay = async {
+                response
+                    .json::<Failure>()
+                    .await
+                    .map_or(header, |value| value.retry_after.or(header))
+            };
+            let delay = match deadline {
+                Some(deadline) => timeout_at(deadline, retry_delay).await.unwrap_or(header),
+                None => retry_delay.await,
+            };
             error.retry_after_ms = delay
                 .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
                 .and_then(|duration| u64::try_from(duration.as_millis()).ok());
@@ -171,4 +199,39 @@ async fn check(response: reqwest::Response) -> Effect<reqwest::Response> {
         "Discord REST outcome is uncertain ({})",
         status.as_u16()
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{Router, body::Body, response::IntoResponse};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn rate_limit_remains_rejected_when_its_body_misses_the_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new().fallback(|| async {
+            let body = Body::from_stream(futures_util::stream::pending::<
+                Result<&'static str, std::io::Error>,
+            >());
+            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "2")], body).into_response()
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let response = send(Client::new().post(url).timeout(Duration::from_secs(5)))
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            check(response, Some(Instant::now())),
+        )
+        .await
+        .expect("the optional body cannot hold the rejected receipt past its deadline")
+        .unwrap_err();
+        assert_eq!(error.certainty, "rejected");
+        assert_eq!(error.retry_after_ms, Some(2_000));
+        server.abort();
+    }
 }

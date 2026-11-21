@@ -1135,13 +1135,16 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
   - Slack: 토큰 없는 `slack-file:<file_id>`에서 `files.info`로 소유자의 hosted 파일·workspace·
     원래 대화/thread share를 확인한다. 해당 team/file의 `files.slack.com/files-pri/TEAM-FILE/…`
     HTTPS 경로에만 bot Authorization 헤더로 접근한다. 외부 링크 파일은 받지 않는다.
-- 긴 출력은 아래 단일 텍스트 첨부로 보낸다. 입력 한도와 다르며 여러 조각의 부분 발송으로
-  우회하지 않는다. Telegram·Slack 변경·발송 API의 SDK 자동 재시도는 끈다. 읽기/poll 재연결과 불확실한 외부
+- 긴 출력은 아래 단일 텍스트 첨부로 보낸다. 입력 한도와 다르다. Discord만 예외로, 2,000 UTF-16 단위를
+  넘는 답변을 문단·줄·공백 경계에서 최대 5개 메시지로 나눠 순서대로 보낸다. 코드 블록이 경계에
+  걸리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다. 원래 메시지에 대한 답장 표시는 첫
+  메시지에만 붙고, 저장되는 원격 ID도 첫 메시지 ID이다. 일부만 보낸 뒤 실패하면 다시 보내지 않고
+  불확실(uncertain)로 남긴다. Telegram·Slack 변경·발송 API의 SDK 자동 재시도는 끈다. 읽기/poll 재연결과 불확실한 외부
   효과를 재실행하는 것은 다르다.
 
   | 플랫폼 | 일반 텍스트 | 긴 출력 |
   | --- | --- | --- |
-  | Discord | 2,000자 이하 | 텍스트 첨부, 최대 8 MiB |
+  | Discord | 2,000 UTF-16 단위 이하 | 최대 5개 메시지로 분할, 그보다 길면 텍스트 첨부(최대 8 MiB) |
   | Telegram | 4,096 UTF-16 단위 이하 | `sendDocument` 텍스트 파일, 최대 50 MiB. parse_mode 없이 전송하고 preview·paid broadcast 비활성화 |
   | Slack | 3,000자 이하 plain text | 텍스트 파일, 최대 8 MiB. `files.getUploadURLExternal` → HTTPS 업로드 → `files.completeUploadExternal`로 원래 channel/thread에 게시. 폐기된 `files.upload` 미사용 |
 
