@@ -19,16 +19,31 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
 
 impl LifecycleConfig {
-    /// Verify the head's native profile before the native entry point can activate adapters.
-    pub async fn require_mnemopi(&self) -> Result<()> {
-        #[derive(serde::Deserialize)]
-        struct Status {
-            status: String,
+    /// Refuse unsupported profiles without changing native settings or creating state.
+    pub(super) async fn preflight_memory(&self) -> Result<()> {
+        let result = async {
+            ensure!(
+                self.check_memory("preflight").await?,
+                "Native OMP memory profile cannot be prepared"
+            );
+            Ok(())
         }
-        #[derive(serde::Deserialize)]
-        struct Report {
-            memory: Status,
+        .await;
+        if result.is_err() {
+            eprintln!(
+                "Managed sessions require an enabled native OMP memory backend. \
+                 Run omp-sa doctor with the same configuration and native profile."
+            );
         }
+        result
+    }
+
+    /// Read back enabled memory without granting permission to repair it.
+    pub(super) async fn memory_enabled(&self) -> Result<bool> {
+        self.check_memory("enabled").await
+    }
+
+    async fn check_memory(&self, operation: &str) -> Result<bool> {
         let (_, args) = self
             .command
             .split_first()
@@ -36,17 +51,12 @@ impl LifecycleConfig {
         let mut check = bun(self, &self.head_environment());
         check
             .arg(self.root.join("src/managed-memory-helper.ts"))
-            .arg("inspect")
+            .arg(operation)
             .args(args);
-        let report: Report = tagged_output(
+        tagged_output(
             &capture(check, None, OPERATION_TIMEOUT).await?,
             "MANAGED_MEMORY ",
-        )?;
-        ensure!(
-            report.memory.status == "enabled",
-            "Effective Mnemopi is not configured"
-        );
-        Ok(())
+        )
     }
 }
 
