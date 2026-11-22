@@ -123,8 +123,8 @@ requires a separately installed OMP; this project neither patches nor builds it.
 
 This checkout requires Git, **Bun >= 1.4.4**, and local Unix sockets. Installing the
 package does not require OMP. To run a Host, install stock OMP separately; the
-CLI checks capabilities, not a version range. The tested releases are
-**OMP 18.20.3, 18.22.2, and 19.0.0**.
+CLI checks capabilities, not a version range. CI tests **OMP 19.0.0**;
+**18.20.3 and 18.22.2** were tested in earlier releases.
 Windows is unsupported.
 Configure `command` with the installed OMP executable followed by native CLI flags;
 runtime/script wrappers are unsupported.
@@ -134,9 +134,9 @@ runtime/script wrappers are unsupported.
 
 The SDK stays pinned to **19.0.0**, from upstream `v19.0.0` commit
 [`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e).
-`bun run test:ci` tests the installed OMP. To reproduce CI, use
-`bun run test:baseline` for the SDK-matched CLI or `bash scripts/test-omp.sh v18.22.2`
-(or `v18.20.3`) for OMP 18. Each verifies the release binary and runs the same suite.
+`bun run test:ci` tests the installed OMP. Use `bun run test:baseline` to reproduce
+the SDK-matched CI check. OMP 18 is manual only: `bash scripts/test-omp.sh v18.22.2`
+(or `v18.20.3`) verifies the release binary and runs the same suite locally.
 The separate weekly/manual **OMP upstream compatibility** workflow tests the latest
 published CLI without falling back to the baseline or blocking releases.
 
@@ -347,6 +347,7 @@ worker. That is not a stop command for an already running lane.
 
 ## Working from chat
 
+- Ask “keep the Discord bot online”, “watch `owner/repo#35` and tell me when CI passes”, or “let me know when this lane stalls or finishes”. Ask for status or stop the watch in the same conversation. A watch does not authorize a merge or stop the work. Discord presence controls only the bot's indicator, not its ability to receive messages.
 - Send follow-ups in the existing work thread or topic to continue its task. No repository
   name or command is needed.
 - Elsewhere, send the request itself, even if it names a repository. HEAD answers questions

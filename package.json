@@ -33,7 +33,7 @@
     "build:owner": "bun --no-env-file scripts/build-host-owner.ts --owner",
     "build:native": "bun --no-env-file scripts/build-host-owner.ts",
     "check": "tsc --noEmit",
-    "test": "bun run build:native && bun test test",
+    "test": "bun run build:native && bun test --parallel=2 test",
     "test:ci": "bun --no-env-file scripts/ci.ts",
     "test:baseline": "bash scripts/test-omp.sh",
     "release": "bun --no-env-file scripts/release.ts",
