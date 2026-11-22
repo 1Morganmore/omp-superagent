@@ -71,7 +71,15 @@ impl Rest {
     }
 
     pub async fn lookup<T: DeserializeOwned>(&self, path: &str) -> Effect<Lookup<T>> {
-        Self::lookup_response(send(self.request(Method::GET, path)).await?).await
+        Self::lookup_response(send(self.request(Method::GET, path)).await?, &[10003, 10008]).await
+    }
+
+    /// A history destination is gone only on Discord's Unknown Channel code.
+    pub async fn history_lookup<T: DeserializeOwned>(&self, path: &str) -> Effect<Option<T>> {
+        match Self::lookup_response(send(self.request(Method::GET, path)).await?, &[10003]).await? {
+            Lookup::Found(value) => Ok(Some(value)),
+            Lookup::Missing => Ok(None),
+        }
     }
 
     /// Read-only intake retries an unproved read even when a request failed
@@ -87,19 +95,22 @@ impl Rest {
             }
             return Err(broken("Discord lookup authority could not be verified"));
         }
-        match Self::lookup_response(response).await? {
+        match Self::lookup_response(response, &[10003, 10008]).await? {
             Lookup::Found(value) => Ok(Some(value)),
             Lookup::Missing => Ok(None),
         }
     }
 
-    async fn lookup_response<T: DeserializeOwned>(response: reqwest::Response) -> Effect<Lookup<T>> {
+    async fn lookup_response<T: DeserializeOwned>(
+        response: reqwest::Response,
+        missing_codes: &[u64],
+    ) -> Effect<Lookup<T>> {
         if response.status() == StatusCode::NOT_FOUND {
             let failure = response
                 .json::<Failure>()
                 .await
                 .map_err(|_| broken("Discord lookup outcome is unknown"))?;
-            if matches!(failure.code, Some(10003 | 10008)) {
+            if failure.code.is_some_and(|code| missing_codes.contains(&code)) {
                 return Ok(Lookup::Missing);
             }
             return Err(EffectError::rejected("Discord lookup was rejected (404)"));

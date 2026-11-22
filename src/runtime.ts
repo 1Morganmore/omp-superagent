@@ -49,6 +49,7 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const remoteReconnectIntervalMs = 10_000;
 const discordCatchupInitialDelayMs = 2_000;
 const discordCatchupMaxDelayMs = 60_000;
+const discordCatchupMissing = "missing";
 
 interface DiscordCatchupRetry {
   readonly route: Route;
@@ -2611,11 +2612,12 @@ export class Superagent {
 
   private reserveCatchupCursors(): Array<{ route: Route; cursor: string }> {
     return this.knownRoutes().flatMap(route => {
+      const boundaryKey = discordCatchupBoundaryKey(route);
+      const boundary = boundaryKey ? this.store.getMeta(boundaryKey) || null : null;
+      if (boundary === discordCatchupMissing) return [];
       try { this.authorized(route); }
       catch { this.report(new Error("Skipping a stored messenger cursor whose authorization was revoked")); return []; }
       const latest = this.store.getMeta(`cursor:${physicalRouteKey(route)}`) || null;
-      const boundaryKey = discordCatchupBoundaryKey(route);
-      const boundary = boundaryKey ? this.store.getMeta(boundaryKey) || null : null;
       const cursor = boundary ?? latest;
       if (cursor === null) return [];
       const order = latest === null ? null : compareMessageIds(route.platform, cursor, latest);
@@ -2666,9 +2668,16 @@ export class Superagent {
         try {
           const history = await untilAborted(boundaryKey ? this.stopSignal.signal : undefined, () => this.messenger.fetchAfter(route, cursor));
           if (this.stopped) return;
-          // Streaming-only platforms recover their durable intake in the adapter.
-          // No history response is not proof that the offline gap was fetched.
-          if (history === null) continue;
+          if (history === null) {
+            // Discord returns null only for a definitively missing physical
+            // destination. Its ID cannot be reused; late intake must not
+            // resurrect the history scan. Keep the original admission records.
+            if (boundaryKey && this.store.getMeta(boundaryKey) === cursor) {
+              this.store.setMeta(boundaryKey, discordCatchupMissing);
+            }
+            // On streaming-only platforms, null still means adapter-owned recovery.
+            continue;
+          }
           const ordered = history.map(input => {
             if (physicalRouteKey(input.route) !== physicalRouteKey(route)) throw new Error("Catchup crossed conversation routes");
             if (input.messageId === null) throw new Error("Catchup returned an event without a real message ID");

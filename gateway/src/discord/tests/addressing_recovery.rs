@@ -9,13 +9,13 @@ const REFERENCE: &str = "/channels/88/messages/111";
 const FIRST_EDIT: &str = "2026-11-21T01:02:03.456000+00:00";
 const FIRST_EDIT_MS: i64 = 1_795_222_923_456;
 
-fn journal(temporary: &Temp) -> Vec<String> {
+pub(super) fn journal(temporary: &Temp) -> Vec<String> {
     let db = Connection::open(temporary.0.join("coordination.sqlite")).unwrap();
     let mut read = db.prepare("SELECT data FROM discord_owner_intake ORDER BY sequence").unwrap();
     read.query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
 }
 
-async fn assert_checkpoint(socket: &mut FixtureSocket, sequence: u64) {
+pub(super) async fn assert_checkpoint(socket: &mut FixtureSocket, sequence: u64) {
     wire(socket, json!({"op":1,"d":null})).await;
     time::timeout(Duration::from_secs(5), async {
         loop {

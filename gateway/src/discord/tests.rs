@@ -27,6 +27,8 @@ use crate::{
 
 #[path = "tests/addressing.rs"]
 mod addressing_tests;
+#[path = "tests/addressing_authority.rs"]
+mod addressing_authority_tests;
 #[path = "tests/addressing_recovery.rs"]
 mod addressing_recovery_tests;
 

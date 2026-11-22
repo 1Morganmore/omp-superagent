@@ -20,6 +20,7 @@ mod rotation;
 mod tests;
 
 pub(crate) use discord_intake::DiscordIntake;
+pub(crate) use ingress::{DiscordSourceReceipt, discord_attachment_identity_url};
 pub use ingress::{GatewayReceipt, QueuedEvent, answer_digest};
 pub(crate) use restart::{AuthorityError, js_trim};
 pub(crate) use rotation::{HEAD_ROTATION, HEAD_SESSION_FILE};

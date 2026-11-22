@@ -19,7 +19,7 @@ use crate::{
     group::{Candidate, Request as GroupRequest, Room, Rooms},
     picker::{Pickers, Selection},
     slack::Slack,
-    store::{DiscordIntake, Store},
+    store::{DiscordIntake, DiscordSourceReceipt, Store},
     telegram::Telegram,
 };
 
@@ -87,6 +87,10 @@ impl Context {
         self.rooms.has_guild(self.platform, guild)
     }
 
+    pub(crate) fn group_destinations(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.rooms.destinations(self.platform)
+    }
+
     pub(crate) fn has_group_actor(&self, guild: Option<&str>, user: &str) -> bool {
         self.rooms.has_actor(self.platform, guild, user)
     }
@@ -140,14 +144,14 @@ impl Context {
     pub(crate) fn discord_intake(&self) -> DiscordIntake<'_> {
         DiscordIntake(&self.store)
     }
-    pub(crate) fn discord_admitted_input(&self, input: &Value, require_original_text: bool) -> Result<Option<Value>> {
+    pub(crate) fn discord_admitted_input(&self, input: &Value, confirmation: bool) -> Result<DiscordSourceReceipt> {
         let route = &input["route"];
         ensure!(
             self.platform == "discord" && route["platform"] == self.platform,
             "Discord source crossed platform boundary"
         );
         self.rooms.owner_route(route)?;
-        self.store.discord_admitted_input(input, require_original_text)
+        self.store.discord_admitted_input(input, confirmation)
     }
     pub(crate) fn insert_meta_if_absent(
         &self,

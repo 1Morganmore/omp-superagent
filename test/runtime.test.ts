@@ -8471,6 +8471,54 @@ describe("real Store runtime coordination", () => {
     }
   }, 10_000);
 
+  test("a definitively deleted Discord thread leaves the history retry and reconnect sweeps", async () => {
+    const maintenance = Promise.withResolvers<void>();
+    let observeMaintenance = false;
+    const { runtime, store, messenger, errors } = fixture(3, undefined, {
+      syncPresetRoles: async () => { if (observeMaintenance) maintenance.resolve(); },
+    });
+    const deleted = route("10");
+    const sibling = route("11");
+    const prior = message("180", deleted, "/status");
+    const unavailable = new DeliveryError("Discord reply lookup unavailable");
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await runtime.start();
+      await admit(runtime, prior);
+      await admit(runtime, message("190", sibling, "/status"));
+      messenger.backlog.set(routeKey(deleted), unavailable);
+      await messenger.handlers!.reconnect!();
+
+      const missing = Promise.withResolvers<void>();
+      const fetchAfter = messenger.fetchAfter.bind(messenger);
+      messenger.fetchAfter = async (route, cursor) => {
+        const history = await fetchAfter(route, cursor);
+        if (history === null) missing.resolve();
+        return history;
+      };
+      messenger.backlog.set(routeKey(deleted), null);
+      clock.mockReturnValue(now + 60_000);
+      await missing.promise;
+
+      // A late durable intake receipt cannot make the deleted ID recoverable.
+      await messenger.handlers!.message(message("181", deleted, "/status"));
+      await messenger.handlers!.reconnect!();
+      observeMaintenance = true;
+      clock.mockReturnValue(now + 120_000);
+      await maintenance.promise;
+
+      expect(messenger.fetched).toEqual([
+        { route: deleted, cursor: "180" }, { route: sibling, cursor: "190" },
+        { route: deleted, cursor: "180" }, { route: sibling, cursor: "190" },
+      ]);
+      expect(store.input(prior.id)).toMatchObject({ route: deleted, state: "done" });
+      expect(errors).toEqual([unavailable]);
+    } finally {
+      clock.mockRestore();
+    }
+  }, 10_000);
+
   test("shutdown does not wait for or admit a late response from a scheduled Discord history retry", async () => {
     const { runtime, directory, messenger, errors } = fixture();
     const destination = route();

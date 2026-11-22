@@ -6,15 +6,14 @@ use time::OffsetDateTime;
 use tokio::{sync::oneshot, time::Instant};
 use uuid::Uuid;
 
+use crate::discord::CONFIRMED_VOICE_DRAFT_PREFIX;
+
 use super::Rest;
 use super::policy::{Id, Message, Route, User, timestamp};
 
 const TTL: Duration = Duration::from_secs(300);
 const LIMIT: usize = 2_000;
 const HEADER: &str = "Proposed work from the live voice session (not yet submitted).\n";
-const CONFIRMED: &str = "Work proposed in a live Discord voice session and confirmed by the owner in writing.\n\
-This is an ordinary work request, not a slash command, native control, or approval. \
-Apply the usual safety and approval checks.\n\n";
 
 #[derive(Default)]
 pub(super) struct Drafts(Option<Slot>);
@@ -122,7 +121,7 @@ impl Drafts {
         {
             return None;
         }
-        let text = format!("{CONFIRMED}{}", draft.text);
+        let text = format!("{CONFIRMED_VOICE_DRAFT_PREFIX}{}", draft.text);
         self.clear();
         Some(text)
     }

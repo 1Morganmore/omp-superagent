@@ -7,7 +7,7 @@ use super::{
     Effect, State,
     ingress::{LiveWire, authorized_message},
     message_source::Revision,
-    model::{Channel, Message, Route},
+    model::{Channel, Message, Route, hash},
     rest::broken,
 };
 
@@ -16,6 +16,12 @@ enum Evidence {
     Coordinates(Revision),
     Wire { route: Route, source: Value },
     Verified { route: Route, message: Box<Message> },
+}
+
+#[derive(Deserialize, Serialize)]
+enum RouteAuthority {
+    Bound(Route),
+    Policy(String),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -29,6 +35,8 @@ pub(super) struct Pending {
     create: bool,
     require_addressing: bool,
     evidence: Evidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coordinate_authority: Option<RouteAuthority>,
 }
 
 struct Verified {
@@ -87,11 +95,17 @@ fn project_owner_source(raw: &Value) -> Value {
 impl Pending {
     pub(super) fn from_dispatch(state: &State, raw: &Value, create: bool, route: Option<Route>) -> Option<Self> {
         let identity = state.identity.get()?;
-        let evidence = match route {
+        let (evidence, coordinate_authority) = match route {
             Some(route) if raw["author"]["id"] == state.config.owner_id => {
-                Evidence::Wire { route, source: project_owner_source(raw) }
+                (Evidence::Wire { route, source: project_owner_source(raw) }, None)
             }
-            _ => Evidence::Coordinates(Revision::from_wire(raw, create)?),
+            route => (
+                Evidence::Coordinates(Revision::from_wire(raw, create)?),
+                Some(route.map_or_else(
+                    || RouteAuthority::Policy(state.owner_policy_digest()),
+                    RouteAuthority::Bound,
+                )),
+            ),
         };
         Some(Self {
             account_id: identity.account.clone(),
@@ -103,6 +117,7 @@ impl Pending {
             require_addressing: state.config.require_addressing,
             create,
             evidence,
+            coordinate_authority,
         })
     }
 
@@ -122,6 +137,7 @@ impl Pending {
         if state.identity.get().map(|identity| &identity.account) != Some(&self.account_id)
             || state.config.owner_id != self.owner_id
             || !state.allowed_guild(self.guild_id.as_deref())
+            || matches!(&self.evidence, Evidence::Coordinates(_)) && self.coordinate_authority.is_none()
         {
             return Ok(Resolution::Refused);
         }
@@ -152,12 +168,25 @@ impl Pending {
         }
         let addressing = self.addressing(state, &route);
         let message = match &self.evidence {
-            Evidence::Coordinates(revision) => match live {
-                Some(wire) if wire.data.get("author").is_some() => {
-                    state.verify_wire(&wire.data, self.create, &route, addressing).await?
+            Evidence::Coordinates(revision) => {
+                let originally_allowed = match &self.coordinate_authority {
+                    Some(RouteAuthority::Bound(expected)) => *expected == route,
+                    // An unseen guild channel's parent was not established
+                    // at receipt. A new allowlist cannot prove old authority.
+                    Some(RouteAuthority::Policy(digest)) => route.guild_id.is_none()
+                        || *digest == state.owner_policy_digest(),
+                    None => false,
+                };
+                if !originally_allowed {
+                    return Ok(Resolution::Refused);
                 }
-                _ => state.hydrate_source(&self.id, &route, self.create, revision).await?,
-            },
+                match live {
+                    Some(wire) if wire.data.get("author").is_some() => {
+                        state.verify_wire(&wire.data, self.create, &route, addressing).await?
+                    }
+                    _ => state.hydrate_source(&self.id, &route, self.create, revision, addressing).await?,
+                }
+            }
             Evidence::Wire { route: expected, source } if *expected == route => {
                 state.verify_wire(source, self.create, &route, addressing).await?
             }
@@ -173,6 +202,16 @@ impl Pending {
 }
 
 impl State {
+    fn owner_policy_digest(&self) -> String {
+        let mut guilds: Vec<_> = self.config.allowed_guild_ids.iter().collect();
+        let mut parents: Vec<_> = self.config.allowed_channel_ids.iter().collect();
+        let mut groups: Vec<_> = self.ctx.group_destinations().collect();
+        guilds.sort_unstable();
+        parents.sort_unstable();
+        groups.sort_unstable();
+        hash(&json!([guilds, parents, groups]))
+    }
+
     pub(super) fn assert_live_intake_drained(&self, route: &Route) -> Effect<()> {
         if self.ctx.discord_intake().contains((&route.account_id, &route.authority_id, route.destination()))
             .map_err(|_| broken("Discord pending intake is unavailable"))?
@@ -200,6 +239,7 @@ impl State {
                     // cause us to hydrate a now-superseded message revision.
                     if !matches!(&pending.evidence, Evidence::Verified { .. }) {
                         pending.evidence = Evidence::Verified { route: route.clone(), message: message.clone() };
+                        pending.coordinate_authority = None;
                         retry(|| ready(
                             serde_json::to_string(&pending)
                                 .map_err(Into::into)

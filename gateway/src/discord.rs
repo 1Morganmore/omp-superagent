@@ -45,6 +45,10 @@ use voice::Voice;
 
 type Effect<T> = std::result::Result<T, EffectError>;
 
+pub(crate) const CONFIRMED_VOICE_DRAFT_PREFIX: &str = "Work proposed in a live Discord voice session and confirmed by the owner in writing.\n\
+This is an ordinary work request, not a slash command, native control, or approval. \
+Apply the usual safety and approval checks.\n\n";
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Config {

@@ -7,6 +7,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::mpsc;
 
 use crate::group::{Candidate, Output as GroupOutput};
+use crate::store::DiscordSourceReceipt;
 
 use super::addressing::addressed_text;
 use super::outputs::{attachment_url, nonce};
@@ -371,11 +372,21 @@ impl State {
         let Some(mut input) = message_input(message, route) else {
             return Ok(None);
         };
-        if route.guild_id.is_some()
-            && let Some(saved) = self.ctx.discord_admitted_input(&input, voice_control)
+        if route.guild_id.is_some() {
+            // Before source provenance was stored, this exact original reply
+            // could have been projected into an already-admitted voice draft.
+            let confirmation = route.thread_id.is_none()
+                && message.content == "/voice confirm"
+                && message.edited_timestamp.is_none()
+                && message.attachments.is_empty()
+                && reply_id(message, route).is_some_and(|(_, reference)| reference.kind == 0);
+            match self.ctx.discord_admitted_input(&input, confirmation)
                 .map_err(|_| broken("Discord admitted source could not be verified"))?
-        {
-            return Ok(Some(saved));
+            {
+                DiscordSourceReceipt::Admitted(saved) => return Ok(Some(saved)),
+                DiscordSourceReceipt::LegacyVoiceConfirmation => return Ok(None),
+                DiscordSourceReceipt::Absent => (),
+            }
         }
         if voice_control {
             return Ok(None);
@@ -404,21 +415,40 @@ impl State {
             ));
         }
         let route = route.physical();
+        self.assert_route(&route)?;
         if self.group_route(&route) {
             return Err(EffectError::rejected("Discord group rooms do not allow history recovery"));
         }
         self.assert_live_intake_drained(&route)?;
-        let channel = self.destination(&route).await?;
+        let cached = self.channels.read().await.get(route.destination()).cloned();
+        let channel = match cached {
+            Some(channel) => channel,
+            None => {
+                let Some(channel) = self.rest.history_lookup::<Channel>(
+                    &format!("channels/{}", route.destination()),
+                ).await? else { return Ok(Value::Null) };
+                if channel.id != route.destination() {
+                    return Err(broken("Discord history channel did not match its requested destination"));
+                }
+                self.remember_channel(channel.clone()).await;
+                channel
+            }
+        };
+        if self.route_for(&channel)? != route {
+            return Err(EffectError::rejected("Discord destination identity changed"));
+        }
+        let channel = channel.sendable()?;
         let mut after = cursor.to_owned();
         let mut inputs = Vec::new();
         loop {
-            let page: Vec<Value> = self
+            let page: Option<Vec<Value>> = self
                 .rest
-                .get(&format!(
+                .history_lookup(&format!(
                     "channels/{}/messages?after={after}&limit=100",
                     channel.id
                 ))
                 .await?;
+            let Some(page) = page else { return Ok(Value::Null) };
             let count = page.len();
             let mut messages =
                 page.into_iter()

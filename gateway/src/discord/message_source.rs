@@ -3,6 +3,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+use crate::store::discord_attachment_identity_url;
+
 use super::{
     Effect, State,
     addressing::{addressed_text, has_inline_mention},
@@ -30,10 +32,8 @@ fn digest(value: &Value) -> String {
 
 fn attachment_digest(files: &[RemoteAttachment]) -> String {
     let mut files: Vec<_> = files.iter().map(|file| {
-        // Signed CDN parameters may rotate without an edit. The file's
-        // Discord ID, HTTPS location without its query, and metadata bind it.
-        let path = file.url.split_once('?').map_or(file.url.as_str(), |(path, _)| path);
-        json!([file.id, file.filename, path, file.size, file.content_type, file.duration_secs])
+        let location = discord_attachment_identity_url(&file.url);
+        json!([file.id, file.filename, location, file.size, file.content_type, file.duration_secs])
     }).collect();
     files.sort_by(|left, right| left[0].as_str().cmp(&right[0].as_str()));
     digest(&json!(files))
@@ -57,11 +57,9 @@ impl Revision {
             None => None,
             Some(value) => Some(digest(&json!(Option::<Reference>::deserialize(value).ok()?))),
         };
-        // A timestamp-less edit binds only when both mutable fields were
-        // observed. Otherwise REST could substitute a later text/file change.
         if create && content_digest.is_none()
             || !create && edited_at_nanos.is_none()
-                && (content_digest.is_none() || attachment_digest.is_none())
+                && content_digest.is_none() && attachment_digest.is_none()
         {
             return None;
         }
@@ -72,6 +70,10 @@ impl Revision {
             reference_digest,
             kind: raw["type"].as_u64(),
         })
+    }
+
+    fn identifies_edit(&self) -> bool {
+        self.edited_at_nanos.is_some() || self.content_digest.is_some() && self.attachment_digest.is_some()
     }
 
     fn matches(&self, message: &Message, create: bool) -> Effect<bool> {
@@ -113,7 +115,13 @@ impl State {
         route: &Route,
         create: bool,
         revision: &Revision,
+        addressing: bool,
     ) -> Effect<Option<Message>> {
+        // An addressed edit needs a specific revision; outside addressing,
+        // keep accepting sparse owner edits after authenticated REST hydration.
+        if addressing && !create && !revision.identifies_edit() {
+            return Ok(None);
+        }
         let found = self.rest.evidence::<Message>(&format!("channels/{}/messages/{id}", route.destination())).await?;
         let Some(found) = found else { return Ok(None) };
         if found.id != id || found.channel_id != route.destination() {
@@ -152,7 +160,7 @@ impl State {
             return Ok(None);
         }
         let Some(revision) = Revision::from_wire(raw, create) else { return Ok(None) };
-        let Some(found) = self.hydrate_source(id, route, create, &revision).await? else { return Ok(None) };
+        let Some(found) = self.hydrate_source(id, route, create, &revision, addressing).await? else { return Ok(None) };
         if let Some(mut message) = received.filter(|_| raw.get("attachments").is_some()) {
             message.edited_timestamp = found.edited_timestamp;
             if message.mentions.is_none() {
