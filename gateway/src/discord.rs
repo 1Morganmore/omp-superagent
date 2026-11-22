@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::adapter::{Adapter, Context, EffectError};
 
+mod addressing;
 mod approvals;
 mod cards;
 mod commands;
@@ -19,8 +20,10 @@ mod dispatch;
 mod ingress;
 mod login;
 mod markdown;
+mod message_source;
 mod model;
 mod outputs;
+mod pending;
 mod permissions;
 mod picker;
 mod purposes;
@@ -42,6 +45,10 @@ use voice::Voice;
 
 type Effect<T> = std::result::Result<T, EffectError>;
 
+pub(crate) const CONFIRMED_VOICE_DRAFT_PREFIX: &str = "Work proposed in a live Discord voice session and confirmed by the owner in writing.\n\
+This is an ordinary work request, not a slash command, native control, or approval. \
+Apply the usual safety and approval checks.\n\n";
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Config {
@@ -49,6 +56,8 @@ struct Config {
     owner_id: String,
     allowed_guild_ids: HashSet<String>,
     allowed_channel_ids: HashSet<String>,
+    #[serde(default)]
+    require_addressing: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -60,7 +69,7 @@ struct Identity {
 struct State {
     ctx: Context,
     config: Config,
-    rest: Rest,
+    rest: Arc<Rest>,
     identity: OnceLock<Identity>,
     channels: RwLock<HashMap<String, Channel>>,
     voice: Option<Voice>,
@@ -85,11 +94,11 @@ impl Discord {
         );
         let token = std::env::var(&policy.token_env)
             .map_err(|_| anyhow::anyhow!("Configured Discord credential is unavailable"))?;
-        let rest = Rest::new(ctx.http.clone(), token)?;
+        let rest = Arc::new(Rest::new(ctx.http.clone(), token)?);
         let voice = config
             .get("voice")
             .filter(|value| !value.is_null())
-            .map(|_| Voice::new(config, ctx.clone()))
+            .map(|_| Voice::new(config, ctx.clone(), Arc::clone(&rest)))
             .transpose()?;
         Ok(Self {
             state: Arc::new(State {

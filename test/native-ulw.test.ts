@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { stopHostFixtures } from "./fixtures/host-fixture-processes";
 
 // Both native execution and this exact external package are explicit opt-ins.
-// Never silently substitute a mock ULW extension or a developer checkout path.
+// Never silently substitute a mock Superkit extension or a developer checkout path.
 const nativeUlwTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" && process.env.OMP_TEST_ULW_EXTENSION ? test : test.skip;
 
 async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
@@ -15,7 +15,7 @@ async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T
   finally { clearTimeout(timer); }
 }
 
-nativeUlwTest("actual shared ULW activates native Gateway head and explicitly selected lane workflows without granting data authority", async () => {
+nativeUlwTest("actual Superkit activates SUPER in the native Gateway head and explicitly selected lanes without granting data authority", async () => {
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osu-"));
   await fs.chmod(root, 0o700);
   let succeeded = false;

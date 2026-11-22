@@ -10,7 +10,7 @@ mod provider;
 #[path = "discord_voice/session.rs"]
 mod session;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 use time::OffsetDateTime;
@@ -58,11 +58,8 @@ struct State {
 }
 
 impl Voice {
-    pub(super) fn new(config: &Value, ctx: Context) -> Result<Self> {
+    pub(super) fn new(config: &Value, ctx: Context, rest: Arc<Rest>) -> Result<Self> {
         let config = Config::parse(config)?;
-        let token =
-            std::env::var(&config.token_env).context("Discord voice credential unavailable")?;
-        let rest = Arc::new(Rest::new(ctx.http.clone(), token)?);
         Ok(Self(Arc::new(Service {
             config,
             ctx,
@@ -74,20 +71,24 @@ impl Voice {
     }
 
     pub(super) fn is_control(&self, data: &Value) -> bool {
-        data["channel_id"].as_str().and_then(Id::parse) == Some(self.0.config.voice.text_channel_id)
-            && data["content"].as_str().is_some_and(Control::matches)
+        data["content"].as_str().is_some_and(|content| {
+            self.is_control_text(data["channel_id"].as_str().unwrap_or_default(), content)
+        })
     }
 
-    pub(super) fn is_priority_control(&self, data: &Value) -> bool {
-        self.is_control(data)
-            && data["content"].as_str().is_some_and(|content| {
-                matches!(
-                    Control::parse(content.trim()),
-                    Control::Stop
-                        | Control::WorkOff
-                        | Control::Start(Permission::Call | Permission::One)
-                )
-            })
+    pub(super) fn is_control_text(&self, channel: &str, content: &str) -> bool {
+        Id::parse(channel) == Some(self.0.config.voice.text_channel_id) && Self::matches_control(content)
+    }
+
+    pub(super) fn matches_control(content: &str) -> bool {
+        Control::matches(content)
+    }
+
+    pub(super) fn is_priority_control(content: &str) -> bool {
+        matches!(
+            Control::parse(content.trim()),
+            Control::Stop | Control::WorkOff | Control::Start(Permission::Call | Permission::One)
+        )
     }
 
     pub(super) async fn command(
@@ -336,6 +337,33 @@ impl Voice {
                 drop(error);
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl Voice {
+    // Establish only the in-memory media state in the offline fixture. Draft
+    // publication and its remote receipt are still verified by production code.
+    pub(super) async fn fixture_draft(&self, text: &str) -> Result<()> {
+        let route = Route {
+            account: Id::parse("71").unwrap(),
+            owner: Id::parse("42").unwrap(),
+            guild: Id::parse("77").unwrap(),
+            text: self.0.config.voice.text_channel_id,
+        };
+        let mut state = self.0.state.lock().await;
+        let call = session::Call {
+            route,
+            generation: 1,
+            outbound: state.outbound.as_ref().unwrap().clone(),
+        };
+        let mut active = Active::fixture(&call);
+        let offer = active.drafts.begin(route, text)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let delivery = offer.publish(&self.0.rest, deadline).await;
+        anyhow::ensure!(active.drafts.finish(delivery, Some(deadline)), "Fixture draft was not verified");
+        state.call = Some(active);
+        Ok(())
     }
 }
 

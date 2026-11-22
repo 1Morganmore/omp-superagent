@@ -25,6 +25,13 @@ use crate::{
     store::{GatewayReceipt, Store},
 };
 
+#[path = "tests/addressing.rs"]
+mod addressing_tests;
+#[path = "tests/addressing_authority.rs"]
+mod addressing_authority_tests;
+#[path = "tests/addressing_recovery.rs"]
+mod addressing_recovery_tests;
+
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
@@ -46,10 +53,14 @@ struct RestFixture {
     socket: String,
     emitted: mpsc::UnboundedSender<(String, Value)>,
     last_card: Arc<SyncMutex<Value>>,
+    responses: Responses,
 }
+
+type Responses = Arc<SyncMutex<HashMap<String, (StatusCode, Value)>>>;
 
 async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> Response {
     let path = request.uri().path().to_owned();
+    let target = request.uri().to_string();
     let method = request.method().as_str().to_owned();
     let authorized = request
         .headers()
@@ -70,6 +81,12 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
     if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if let Some((status, value)) = fixture.responses.lock().unwrap().get(&target) {
+        if method == "GET" && (status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS) {
+            drop(fixture.emitted.send((path, Value::Null)));
+        }
+        return (*status, Json(value.clone())).into_response();
+    }
     let result = match (method.as_str(), path.as_str()) {
         ("GET", "/gateway/bot") => json!({"url": fixture.socket, "shards": 1,
             "session_start_limit":{"total":1000,"remaining":1000,"reset_after":86_400_000_u64,"max_concurrency":1}}),
@@ -79,6 +96,15 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
         ("GET", "/channels/90/messages/206") => {
             json!({"id":"206","channel_id":"90","author":{"id":"42"},
             "type":0,"content":"edited by owner", "edited_timestamp":"2026-11-21T01:02:03.456000+00:00"})
+        }
+        ("GET", "/channels/88") => json!({"id":"88", "guild_id":"77", "type":0}),
+        ("POST", "/channels/88/messages") => {
+            let stamp = ::time::OffsetDateTime::now_utc()
+                .format(&::time::format_description::well_known::Rfc3339).unwrap();
+            let result = json!({"id":"700","guild_id":"77","channel_id":"88","author":{"id":"71","bot":true},
+                "content":body["content"],"timestamp":stamp});
+            fixture.emitted.send((path, body)).unwrap();
+            result
         }
         ("GET", "/channels/89") => json!({"id":"89", "guild_id":"77", "type":0}),
         ("POST", "/channels/90/messages") => {
@@ -144,7 +170,7 @@ async fn dispatch(ws: &mut FixtureSocket, sequence: u64, event: &str, data: Valu
     wire(ws, json!({"op":0, "s":sequence, "t":event, "d":data})).await;
 }
 
-async fn identify(listener: &TcpListener) -> FixtureSocket {
+async fn identify(listener: &TcpListener, voice: bool) -> FixtureSocket {
     let (stream, _) = listener.accept().await.unwrap();
     let mut ws = accept_async(stream).await.unwrap();
     wire(&mut ws, json!({"op":10,"d":{"heartbeat_interval":60_000}})).await;
@@ -154,8 +180,8 @@ async fn identify(listener: &TcpListener) -> FixtureSocket {
     let intents = identify["d"]["intents"].as_u64().unwrap();
     assert_eq!(
         intents & (1 << 7),
-        0,
-        "voice intent must not be enabled when voice is not configured"
+        u64::from(voice) << 7,
+        "voice intent must match whether voice is configured"
     );
     assert_eq!(
         intents & (1 | 1 << 9 | 1 << 12 | 1 << 15),
@@ -219,44 +245,66 @@ async fn discord_fixture(config: Value) -> (
 ) {
     let temporary = Temp::new();
     let store = Arc::new(Store::open(&temporary.0).unwrap());
+    let (hub, ws, observed, last_card, server, _, _) = discord_fixture_with_store(config, &store).await;
+    (temporary, store, hub, ws, observed, last_card, server)
+}
+
+async fn discord_fixture_with_store(mut config: Value, store: &Arc<Store>) -> (
+    Arc<Hub>, TcpListener, mpsc::UnboundedReceiver<(String, Value)>,
+    Arc<SyncMutex<Value>>, JoinHandle<()>, Responses, Arc<State>,
+) {
+    let policy = config["discord"].as_object_mut().unwrap();
+    for (key, value) in [
+        ("ownerId", json!("42")),
+        ("allowedGuildIds", json!(["77"])),
+        ("allowedChannelIds", json!(["88"])),
+    ] {
+        policy.entry(key).or_insert(value);
+    }
     let ws = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", http.local_addr().unwrap());
     let (emitted, observed) = mpsc::unbounded_channel();
     let last_card = Arc::new(SyncMutex::new(Value::Null));
+    let responses = Responses::default();
     let router = Router::new().fallback(rest).with_state(RestFixture {
         socket: format!("ws://{}/", ws.local_addr().unwrap()),
         emitted,
         last_card: Arc::clone(&last_card),
+        responses: Arc::clone(&responses),
     });
     let server: JoinHandle<()> = tokio::spawn(async move {
         axum::serve(http, router).await.unwrap();
     });
-    let hub = Hub::with_factory(&config, Arc::clone(&store), |_, _, ctx| {
+    let mut state = None;
+    let hub = Hub::with_factory(&config, Arc::clone(store), |_, config, ctx| {
+        let mut config = config.clone();
+        config["tokenEnv"] = json!("DISCORD_TOKEN");
         let mut rest = Rest::new(ctx.http.clone(), "offline-token".to_owned())?;
         rest.api.clone_from(&api);
-        Ok(Box::new(Discord {
+        let rest = Arc::new(rest);
+        let voice = config.get("voice")
+            .map(|_| Voice::new(&config, ctx.clone(), Arc::clone(&rest)))
+            .transpose()?;
+        let adapter = Discord {
             state: Arc::new(State {
                 ctx,
                 rest,
-                config: Config {
-                    token_env: String::new(),
-                    owner_id: "42".to_owned(),
-                    allowed_guild_ids: HashSet::from(["77".to_owned()]),
-                    allowed_channel_ids: HashSet::from(["88".to_owned()]),
-                },
+                config: Config::deserialize(&config)?,
                 stopping: AtomicBool::new(false),
                 identity: OnceLock::new(),
                 channels: RwLock::default(),
-                voice: None,
+                voice,
                 cards: Cards::default(),
                 purpose_lock: Mutex::new(()),
             }),
             task: Mutex::new(None),
-        }))
+        };
+        state = Some(Arc::clone(&adapter.state));
+        Ok(Box::new(adapter))
     })
     .unwrap();
-    (temporary, store, hub, ws, observed, last_card, server)
+    (hub, ws, observed, last_card, server, responses, state.unwrap())
 }
 
 #[tokio::test]
@@ -264,7 +312,7 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     let (_temporary, store, hub, ws, mut observed, last_card, server) =
         discord_fixture(json!({"discord":{}})).await;
     let (started, mut socket) = time::timeout(Duration::from_secs(5), async {
-        tokio::join!(hub.start(), identify(&ws))
+        tokio::join!(hub.start(), identify(&ws, false))
     })
     .await
     .unwrap();
@@ -764,12 +812,12 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
 #[tokio::test]
 async fn group_thread_accepts_only_live_member_text_and_replies_without_owner_effects() {
     let (_temporary, store, hub, ws, mut observed, _, server) = discord_fixture(json!({
-        "discord":{"allowedGuildIds":["77"],"allowedChannelIds":["88"]},
+        "discord":{"allowedGuildIds":["77"],"allowedChannelIds":["88"],"requireAddressing":true},
         "groupRooms":[{"platform":"discord","guildId":"77","channelId":"88",
             "userIds":["42","43"],"mode":"work","revision":"live","dailyLimit":1}]
     })).await;
     let (started, mut socket) = time::timeout(Duration::from_secs(5), async {
-        tokio::join!(hub.start(), identify(&ws))
+        tokio::join!(hub.start(), identify(&ws, false))
     }).await.unwrap();
     started.unwrap();
     hub.ready.send_replace(true);

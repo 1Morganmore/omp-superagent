@@ -3,11 +3,11 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, requireMessengerCredentials } from "./config";
+import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, loadStateDirectory, requireMessengerCredentials } from "./config";
 import { inspectInstalledOmp } from "./installed-omp";
 import { requireHostOwner } from "./host-owner-path";
 import { loadCredentials } from "./credentials";
-import type { Lane } from "./contracts";
+import { WORKFLOW_NAMES, type Lane } from "./contracts";
 import type { HostConnection } from "./host";
 import { readLaneRows } from "./lane-rows";
 
@@ -28,8 +28,10 @@ Usage:
   omp-sa discord-commands --config FILE [--apply]
   omp-sa telegram-commands --config FILE [--language CODE] [--apply]
   omp-sa slack-commands --config FILE --manifest-token-env NAME [--apply]
-  omp-sa worker add user@host [--config FILE] [--default [--local-repo PATH]]
+  omp-sa worker add user@host[:port] [--config FILE] [--default [--local-repo PATH]]
   omp-sa worker init --head-key PUBLIC_KEY --repo PATH [--repo PATH ...]
+  omp-sa worker list [--config FILE]
+  omp-sa worker doctor user@host[:port] [--config FILE]
 
 Setup and service lifecycle:
   setup creates FILE interactively, or preserves an existing FILE and prompts for its configured credentials.
@@ -76,7 +78,10 @@ Remote workers are opt-in:
   worker add generates a dedicated private key, prints the target init command, and never starts a bot.
   worker init on the target authorizes only the restricted worker command for that public key and those Git roots.
   After verifying the SSH host key separately, rerun worker add to verify and register the worker.
-  FILE defaults to ./config.local.json for worker add. Use --default only to opt into default remote placement.
+  worker list reads the local verified inventory only; it does not contact endpoints or report live availability.
+  worker doctor checks the exact enrolled destination, current slot counts and, for a default worker, the pinned
+  checkout's current Git revision. It does not change enrollment, start work, or verify native Host readiness.
+  FILE defaults to ./config.local.json for worker add, list and doctor. Use --default only for default remote placement.
 
 Owner controls in chat (not shell commands):
   Send /help in Discord or Telegram. In Slack messages replace / with ! (e.g. !help, !status);
@@ -108,7 +113,7 @@ Capabilities to request from HEAD in chat (not CLI subcommands):
     note. Notes do not edit Discord's channel description or authorize work.
   Shared board: registered HEAD and lane sessions can post, read and subscribe to informational updates
     within this instance. Board posts are not commands or approvals.
-  Workflows: begin a request with ulw, ulw-plan, ulw-execute, ulw-loop, ulw-research or mass-ulw.
+  Workflows: begin a request with one of: ${WORKFLOW_NAMES.filter(name => name !== "jevify").join(", ")}.
     For batch judging against one rubric, begin with lowercase jevify (not /jevify).
   Operations guide and native tool names: ${join(import.meta.dir, "../docs/OPERATIONS.md")}
 
@@ -159,7 +164,7 @@ async function workerCommand(args: string[]): Promise<void> {
       if (operands.length === 0) { console.log(HELP); return; }
       throw new Error("Usage: omp-sa worker --help");
     case "add": {
-      const usage = "Usage: omp-sa worker add user@host [--config FILE] [--default [--local-repo PATH]]";
+      const usage = "Usage: omp-sa worker add user@host[:port] [--config FILE] [--default [--local-repo PATH]]";
       const [destination, ...flags] = operands;
       if (!destination || destination.startsWith("-")) throw new Error(usage);
       let configPath: string | undefined;
@@ -183,6 +188,27 @@ async function workerCommand(args: string[]): Promise<void> {
         ...(preferred ? { defaultRepositoryRoot: localRepo ?? config.headCwd } : {}) }, workerDescribe);
       console.log(JSON.stringify(result, null, 2));
       if (result.status === "pending" && result.verificationError) process.exitCode = 1;
+      return;
+    }
+    case "list":
+    case "doctor": {
+      const doctor = verb === "doctor";
+      const usage = `Usage: omp-sa worker ${verb}${doctor ? " user@host[:port]" : ""} [--config FILE]`;
+      const destination = doctor ? operands[0] : undefined;
+      if (doctor && (!destination || destination.startsWith("-"))) throw new Error(usage);
+      const flags = doctor ? operands.slice(1) : operands;
+      const [flag, file] = flags;
+      if (flags.length !== 0 && (flags.length !== 2 || flag !== "--config" || !file || file.startsWith("-")))
+        throw new Error(usage);
+      const stateDir = await loadStateDirectory(file ?? "config.local.json");
+      const { workerInventory, workerDoctor } = await import("./worker-doctor");
+      if (destination) {
+        const report = await workerDoctor(stateDir, destination);
+        console.log(JSON.stringify(report, null, 2));
+        if (report.status === "blocked") process.exitCode = 1;
+      } else {
+        console.log(JSON.stringify(workerInventory(stateDir), null, 2));
+      }
       return;
     }
     case "init": {
@@ -221,7 +247,7 @@ async function workerCommand(args: string[]): Promise<void> {
       return;
     }
     default:
-      throw new Error("Usage: omp-sa worker add|init (see omp-sa worker --help)");
+      throw new Error("Usage: omp-sa worker add|init|list|doctor (see omp-sa worker --help)");
   }
 }
 

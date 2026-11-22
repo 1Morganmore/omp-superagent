@@ -332,12 +332,13 @@ describe("durable coordination store", () => {
 
   test("Discord context snapshots survive reopen and metadata redelivery while each owner revision retains its own snapshot", () => {
     const { store, path } = fixture();
-    const original: Inbound = { ...inbound("discord-context"),
+    const original: Inbound = { ...inbound("discord-context"), discordOriginalText: "<@42> request discord-context",
       discordContext: { kind: "guild", channel: { id: "channel", name: "Original", topic: null, purpose: "Original purpose" },
         thread: { id: "thread", parentId: "channel", name: "Original thread" } },
     };
     store.receive(original, "main");
     const edited: Inbound = { ...original, id: "discord-context:edit", text: "Edited owner instruction",
+      discordOriginalText: "<@42> Edited owner instruction",
       discordContext: { kind: "guild", channel: { id: "channel", name: "Later", topic: "New topic" },
         thread: { id: "thread", parentId: "channel", name: "Renamed thread", purpose: "Later purpose" } },
     };
@@ -346,6 +347,9 @@ describe("durable coordination store", () => {
     const reopened = open(path);
     expect(reopened.receive({ ...original, discordContext: edited.discordContext }, "main")).toBe(false);
     expect(reopened.input(original.id)?.discordContext).toEqual(original.discordContext);
+    expect(reopened.input(original.id)?.discordOriginalText).toBe(original.discordOriginalText);
+    expect(() => reopened.receive({ ...original, discordOriginalText: `${original.text} <@42>` }, "main"))
+      .toThrow("identity conflict");
     expect(reopened.input(edited.id)?.discordContext).toEqual(edited.discordContext);
     expect(reopened.receive({ ...edited, discordContext: undefined }, "main")).toBe(false);
     expect(reopened.input(edited.id)?.discordContext).toEqual(edited.discordContext);
@@ -563,11 +567,11 @@ describe("durable coordination store", () => {
     const original = { ...inbound("workflow-source", route({ threadId: "source-thread" })), text: "Inspect the authorized repository" };
     store.receive(original, "main", { [`user-source:${original.id}`]: "true" });
     const handoff = { ...original, id: "workflow-handoff", route: managed.route, text: "Inspect just this bounded part" };
-    const workflow = { name: "ulw-plan" as const, reason: "Planning is needed for this authorized task", sourceId: original.id, provenance: "head" as const };
+    const workflow = { name: "super-plan" as const, reason: "Planning is needed for this authorized task", sourceId: original.id, provenance: "head" as const };
     const metadata = { [`handoff-source:${handoff.id}`]: original.id };
     expect(store.receive(handoff, managed.id, metadata, workflow)).toBe(true);
     expect(store.receive(handoff, managed.id, metadata, workflow)).toBe(false);
-    for (const changed of [null, { ...workflow, name: "ulw-loop" as const }, { ...workflow, reason: "A different choice" },
+    for (const changed of [null, { ...workflow, name: "super-loop" as const }, { ...workflow, reason: "A different choice" },
       { ...workflow, sourceId: "foreign" }, { ...workflow, provenance: "user" as const }]) {
       expect(() => store.receive(handoff, managed.id, metadata, changed)).toThrow("Workflow identity conflict");
     }
@@ -577,16 +581,64 @@ describe("durable coordination store", () => {
     store.close();
     const reopened = open(path);
     expect(reopened.input(handoff.id)).toMatchObject({ route: managed.route, workflow: {
-      name: "ulw-plan", sourceId: original.id, provenance: "head", reason: "Planning is needed for this authorized task",
+      name: "super-plan", sourceId: original.id, provenance: "head", reason: "Planning is needed for this authorized task",
     } });
     expect(reopened.input(original.id)?.text).toBe(original.text);
+  });
+
+  test("reads pre-SUPER rows without requeueing a handoff or reinterpreting previously ordinary text", () => {
+    const { store, path } = fixture();
+    const managed = admitLane(store);
+    const pendingBeforeUpgrade = store.inputs(managed.id, "pending");
+    const original = { ...inbound("old-workflow-source", route({ threadId: "old-source" })), text: "/ulw-plan inspect",
+      attachments: [{ id: "file", name: "reference.txt", size: 12, contentType: "text/plain",
+        url: "https://cdn.discordapp.com/attachments/1/2/reference.txt?ex=original" }] };
+    const handoff = { ...original, id: "old-workflow-handoff", route: managed.route, text: "Plan only the bounded change" };
+    const ordinary = { ...inbound("old-ordinary-text"), text: "super-plan change the repository" };
+    const userActivation = { name: "ulw-plan", reason: "Original invocation", sourceId: original.id, provenance: "user" as const };
+    const headActivation = { ...userActivation, reason: "Typed planning handoff", provenance: "head" as const };
+    store.close();
+    const oldDb = new Database(path);
+    try {
+      const insert = oldDb.query("INSERT INTO inputs(id, data, target, state, request_id, generation) VALUES (?, ?, ?, ?, ?, ?)");
+      insert.run(original.id, JSON.stringify({ ...original, workflow: userActivation }), "main", "pending", null, null);
+      insert.run(handoff.id, JSON.stringify({ ...handoff, workflow: headActivation }), managed.id, "submitted", "old-ticket", 7);
+      insert.run(ordinary.id, JSON.stringify(ordinary), "main", "done", "ordinary-ticket", 1);
+      const source = oldDb.query("INSERT INTO metadata(key, value) VALUES (?, ?)");
+      source.run(`user-source:${original.id}`, "true");
+      source.run(`handoff-source:${handoff.id}`, original.id);
+      source.run(`user-source:${ordinary.id}`, "true");
+    } finally {
+      oldDb.close();
+    }
+    const reopened = open(path);
+    expect(reopened.input(original.id)).toMatchObject({ ...original, workflow: { ...userActivation, name: "super-plan" } });
+    expect(reopened.input(handoff.id)).toMatchObject({ ...handoff, workflow: { ...headActivation, name: "super-plan" },
+      target: managed.id, state: "submitted", requestId: "old-ticket", generation: 7 });
+    expect(reopened.input(ordinary.id)).toMatchObject({ ...ordinary, workflow: null, state: "done", requestId: "ordinary-ticket" });
+    expect(reopened.receive(ordinary, "main")).toBe(false);
+    expect(() => reopened.receive(ordinary, "main", {}, { ...userActivation, name: "super-plan", sourceId: ordinary.id })).toThrow("Workflow identity conflict");
+    expect(reopened.receive(handoff, "main", {}, { ...headActivation, name: "super-plan" })).toBe(false);
+    expect(() => reopened.receive(handoff, managed.id, {}, { ...headActivation, name: "super-loop" })).toThrow("Workflow identity conflict");
+    expect(reopened.inputs(managed.id, "pending")).toEqual(pendingBeforeUpgrade);
+    const refreshed = { ...original, attachments: [{ ...original.attachments[0]!, url: "https://cdn.discordapp.com/attachments/1/2/reference.txt?ex=refreshed" }] };
+    expect(reopened.receive(refreshed, "main", {}, { ...userActivation, name: "super-plan" })).toBe(false);
+    const onDisk = new Database(path, { readonly: true });
+    try {
+      const data = onDisk.query<{ data: string }, [string]>("SELECT data FROM inputs WHERE id = ?");
+      expect(JSON.parse(data.get(original.id)!.data)).toEqual({ ...refreshed, workflow: userActivation });
+      expect(JSON.parse(data.get(handoff.id)!.data)).toEqual({ ...handoff, workflow: headActivation });
+      expect(JSON.parse(data.get(ordinary.id)!.data)).toEqual(ordinary);
+    } finally {
+      onDisk.close();
+    }
   });
 
   test("reports and inbound object properties do not acquire workflow authority", () => {
     const { store } = fixture();
     const managed = admitLane(store);
     const source = inbound("actual-user");
-    const workflow = { name: "ulw-loop" as const, sourceId: source.id, reason: "Original invocation", provenance: "user" as const };
+    const workflow = { name: "super-loop" as const, sourceId: source.id, reason: "Original invocation", provenance: "user" as const };
     store.receive(source, "main", { [`user-source:${source.id}`]: "true" }, workflow);
     const copied = { ...source, id: "copied", workflow };
     store.receive(copied, managed.id);
@@ -604,7 +656,7 @@ describe("durable coordination store", () => {
     const managed = admitLane(store);
     const source = inbound("cancelled-source");
     store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
-    const workflow = { name: "ulw-plan" as const, sourceId: source.id, reason: "Bounded planning", provenance: "head" as const };
+    const workflow = { name: "super-plan" as const, sourceId: source.id, reason: "Bounded planning", provenance: "head" as const };
     expect(() => store.receive(inbound("wrong-handoff"), managed.id, { "handoff-source:wrong-handoff": "other" }, workflow)).toThrow("exact handoff");
     store.settle(source.id, "cancelled");
     expect(() => store.receive(inbound("cancelled-handoff"), managed.id, { "handoff-source:cancelled-handoff": source.id }, workflow)).toThrow("uncancelled");

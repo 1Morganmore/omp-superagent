@@ -106,6 +106,11 @@ impl Rooms {
         self.0.iter().any(|room| room.platform == platform && Some(room.guild_id.as_str()) == guild)
     }
 
+    pub(crate) fn destinations<'a>(&'a self, platform: &'a str) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.0.iter().filter(move |room| room.platform == platform)
+            .map(|room| (room.guild_id.as_str(), room.channel_id.as_str()))
+    }
+
     pub(crate) fn has_actor(&self, platform: &str, guild: Option<&str>, user: &str) -> bool {
         self.0.iter().any(|room| {
             room.platform == platform && Some(room.guild_id.as_str()) == guild && room.permits(user)

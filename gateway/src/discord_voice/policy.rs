@@ -40,7 +40,7 @@ impl<'de> Deserialize<'de> for Id {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Config {
-    pub(super) token_env: String,
+    token_env: String,
     owner_id: Id,
     pub(super) allowed_guild_ids: HashSet<Id>,
     allowed_channel_ids: HashSet<Id>,

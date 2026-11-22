@@ -1,23 +1,37 @@
+use std::borrow::Cow;
+
+use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use reqwest::Method;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::mpsc;
 
 use crate::group::{Candidate, Output as GroupOutput};
+use crate::store::DiscordSourceReceipt;
 
+use super::addressing::addressed_text;
 use super::outputs::{attachment_url, nonce};
 use super::rest::{Rest, broken, no_mentions};
-use super::voice::Command;
+use super::voice::{Command, Voice};
 use super::{
     Effect, EffectError, State,
     model::{
-        Channel, Message, ReferencedMessage, RemoteMessage, Route, User, actual_guild, hash, snowflake,
-        snowflake_time,
+        Channel, Message, Reference, ReferencedMessage, RemoteMessage, Route, User, actual_guild,
+        hash, snowflake, snowflake_time,
     },
 };
 
 const VOICE_DRAFT_HEADER: &str = "Proposed work from the live voice session (not yet submitted).\n";
+
+pub(super) enum CandidateKind {
+    Owner(Option<Route>),
+    Group,
+}
+
+pub(super) struct LiveWire {
+    pub data: Value,
+    pub group: bool,
+}
 
 fn edit_time(text: &str) -> Option<i64> {
     let epoch = OffsetDateTime::parse(text, &Rfc3339)
@@ -58,15 +72,15 @@ fn attachment_values(message: &Message) -> Vec<Value> {
         .collect()
 }
 
+pub(super) fn authorized_message(message: &Message, route: &Route) -> bool {
+    message.author.id == route.authority_id
+        && !message.author.bot
+        && message.webhook_id.is_none()
+        && matches!(message.kind, 0 | 19)
+        && message.matches(route)
+}
+
 fn message_input(message: &Message, route: &Route) -> Option<Value> {
-    if message.author.id != route.authority_id
-        || message.author.bot
-        || message.webhook_id.is_some()
-        || !matches!(message.kind, 0 | 19)
-        || !message.matches(route)
-    {
-        return None;
-    }
     let attachments = attachment_values(message);
     if message.content.trim().is_empty() && attachments.is_empty() {
         return None;
@@ -91,29 +105,38 @@ fn message_input(message: &Message, route: &Route) -> Option<Value> {
     }))
 }
 
+pub(super) fn reply_id<'a>(message: &'a Message, route: &Route) -> Option<(&'a str, &'a Reference)> {
+    let reference = message.message_reference.as_ref()?;
+    let id = reference.message_id.as_deref()?;
+    (message.kind == 19
+        && snowflake(id)
+        && id != message.id
+        && reference.channel_id.as_deref() == Some(route.destination())
+        && actual_guild(reference.guild_id.as_deref(), route))
+    .then_some((id, reference))
+}
+
 impl State {
-    pub(super) async fn intake_candidate(&self, raw: &Value, create: bool) -> bool {
-        let Some(channel_id) = raw["channel_id"].as_str().filter(|id| snowflake(id)) else {
-            return false;
-        };
+    pub(super) async fn intake_candidate(&self, raw: &Value, create: bool) -> Option<CandidateKind> {
+        let channel_id = raw["channel_id"].as_str().filter(|id| snowflake(id))?;
         let raw_guild = raw["guild_id"].as_str();
         if !raw["id"].as_str().is_some_and(snowflake)
             || !self.allowed_guild(raw_guild)
             || raw["webhook_id"].is_string()
         {
-            return false;
+            return None;
         }
         let author = match raw.get("author") {
             Some(raw) => {
-                let Ok(user) = User::deserialize(raw) else { return false };
+                let user = User::deserialize(raw).ok()?;
                 if user.bot || (user.id != self.config.owner_id
                     && !(create && self.ctx.has_group_actor(raw_guild, &user.id)))
                 {
-                    return false;
+                    return None;
                 }
                 Some(user.id)
             }
-            None if create => return false,
+            None if create => return None,
             None => None,
         };
         // Most message updates are its system-owned renders or pin changes.
@@ -124,79 +147,79 @@ impl State {
             && raw.get("content").is_none()
             && raw.get("attachments").is_none()
         {
-            return false;
-        }
-        self.channels
-            .read()
-            .await
-            .get(channel_id)
-            .is_none_or(|channel| {
-                let known_guild = raw["guild_id"].as_str();
-                let exact = create || raw.get("guild_id").is_some();
-                (!exact || channel.guild_id.as_deref() == known_guild)
-                    && self.route_for(channel).is_ok_and(|route| {
-                        match self.ctx.group_room(route.guild_id.as_deref(), &route.channel_id) {
-                            Some(room) => create && author.as_deref().is_some_and(|id| room.permits(id)),
-                            None => author.as_deref().is_none_or(|id| id == self.config.owner_id),
-                        }
-                    })
-            })
-    }
-
-    async fn incoming_channel(
-        &self,
-        channel_id: &str,
-        guild_id: Option<&str>,
-        exact: bool,
-    ) -> Effect<Channel> {
-        if !self.allowed_guild(guild_id) {
-            return Err(EffectError::rejected("Discord guild is not authorized"));
-        }
-        let channel = self.channel_by_id(channel_id, false).await?;
-        if exact && channel.guild_id.as_deref() != guild_id {
-            return Err(EffectError::rejected(
-                "Discord event channel identity changed",
-            ));
-        }
-        Ok(channel)
-    }
-
-    async fn snapshot_reply(&self, message: &Message, route: &Route) -> Option<Value> {
-        let reference = message.message_reference.as_ref()?;
-        let id = reference.message_id.as_deref()?;
-        if message.kind != 19
-            || !snowflake(id)
-            || reference.channel_id.as_deref() != Some(route.destination())
-            || !actual_guild(reference.guild_id.as_deref(), route)
-        {
             return None;
+        }
+        let owner_possible = author.as_deref().is_none_or(|id| id == self.config.owner_id);
+        let channels = self.channels.read().await;
+        let Some(channel) = channels.get(channel_id) else {
+            return Some(if owner_possible { CandidateKind::Owner(None) } else { CandidateKind::Group });
+        };
+        let exact = create || raw.get("guild_id").is_some();
+        if exact && channel.guild_id.as_deref() != raw_guild {
+            return None;
+        }
+        let route = self.route_for(channel).ok()?;
+        if let Some(room) = self.ctx.group_room(route.guild_id.as_deref(), &route.channel_id) {
+            return (create && author.as_deref().is_some_and(|id| room.permits(id)))
+                .then_some(CandidateKind::Group);
+        }
+        owner_possible.then_some(CandidateKind::Owner(Some(route)))
+    }
+
+    pub(super) fn voice_control<'a>(&self, raw: &'a Value, voice: &Voice) -> Option<Cow<'a, str>> {
+        let original = raw["content"].as_str()?;
+        let channel = raw["channel_id"].as_str()?;
+        if self.config.require_addressing && raw["guild_id"].is_string()
+            && let Some(account) = self.identity.get()
+            && let Ok(message) = Message::deserialize(raw)
+            && let Some(text) = addressed_text(&message, &account.account)
+            && voice.is_control_text(channel, &text)
+        {
+            return Some(Cow::Owned(text));
+        }
+        voice.is_control_text(channel, original).then_some(Cow::Borrowed(original))
+    }
+
+    fn addressing_enabled(&self, route: &Route) -> bool {
+        self.config.require_addressing && route.guild_id.is_some()
+    }
+
+    async fn snapshot_reply(&self, message: &Message, route: &Route, proof: bool) -> Effect<Option<Value>> {
+        let Some((id, reference)) = reply_id(message, route) else {
+            return Ok(None);
+        };
+        if proof && reference.kind != 0 {
+            return Ok(None);
         }
         let matches = |source: &ReferencedMessage| {
             source.id == id
                 && source.channel_id == route.destination()
                 && actual_guild(source.guild_id.as_deref(), route)
         };
-        let fetched;
-        let source = if let Some(embedded) = message
-            .referenced_message
-            .as_deref()
-            .filter(|source| matches(source))
-        {
-            Some(embedded)
-        } else {
-            fetched = self
-                .rest
-                .get::<ReferencedMessage>(&format!(
-                    "channels/{}/messages/{id}",
-                    route.destination()
-                ))
-                .await;
-            match &fetched {
-                Ok(source) if matches(source) => Some(source),
-                // Optional context is unavailable; keep just the safe pointer.
-                Ok(_) | Err(_) => None,
+        let source = match message.referenced_message.as_deref() {
+            Some(source) if matches(source) => Some(Cow::Borrowed(source)),
+            Some(_) if proof => return Ok(None),
+            _ => match self.rest.evidence::<ReferencedMessage>(&format!(
+                "channels/{}/messages/{id}",
+                route.destination()
+            )).await {
+                Ok(Some(source)) if matches(&source) => Some(Cow::Owned(source)),
+                Ok(Some(_)) if proof => {
+                    return Err(broken("Discord reply lookup did not match its requested source"));
+                }
+                Ok(Some(_) | None) => None,
+                // If address proof is required, an unavailable lookup cannot
+                // become a denial: catch-up must not return any later inputs.
+                Err(error) if proof => return Err(error),
+                Err(_) => None,
             }
         };
+        let source = source.as_deref();
+        if proof && !source.is_some_and(|value| {
+            value.author.bot && value.author.id == route.account_id && value.webhook_id.is_none()
+        }) {
+            return Ok(None);
+        }
         let author = source.map(|value| &value.author.id);
         let text = source
             .filter(|source| {
@@ -204,12 +227,13 @@ impl State {
                     || !source.content.starts_with(VOICE_DRAFT_HEADER)
             })
             .map(|source| &source.content);
-        Some(json!({ "messageId": id, "authorId": author, "text": text }))
+        Ok(Some(json!({ "messageId": id, "authorId": author, "text": text })))
     }
 
     pub(super) async fn voice_message(
         &self,
         raw: &Value,
+        text: &str,
         outbound: &mpsc::Sender<Value>,
     ) -> Effect<()> {
         let Some(voice) = &self.voice else {
@@ -230,10 +254,8 @@ impl State {
         if self.group_route(&route) {
             return Ok(());
         }
-        let Some(mut input) = message_input(&message, &route) else {
-            return Ok(());
-        };
-        if route.guild_id.is_none()
+        if !authorized_message(&message, &route)
+            || route.guild_id.is_none()
             || route.guild_id != message.guild_id
             || route.thread_id.is_some()
             || outbound.is_closed()
@@ -241,14 +263,22 @@ impl State {
         {
             return Ok(());
         }
+        let Some(mut input) = message_input(&message, &route) else {
+            return Ok(());
+        };
+        // Pass only the canonical command to parsing. Its original physical
+        // text and exact reply identity remain available for the draft receipt.
+        let mut command = raw.clone();
+        command["content"] = json!(text);
         match voice
-            .command(raw, outbound)
+            .command(&command, outbound)
             .await
             .map_err(|_| broken("Discord voice command failed"))?
         {
             Command::Ignore | Command::Consumed => (),
             Command::Confirmed(text) => {
-                input["text"] = json!(text);
+                let original = std::mem::replace(&mut input["text"], json!(text));
+                input["discordOriginalText"] = original;
                 input["attachments"] = json!([]);
                 input["discordContext"] = self.context_snapshot(&route, Some(&channel)).await;
                 self.admit(json!({"kind": "message", "input": input}))?;
@@ -257,80 +287,23 @@ impl State {
         Ok(())
     }
 
-    pub(super) async fn message_dispatch(&self, raw: Value, create: bool, live: bool) -> Effect<()> {
-        let Some(channel_id) = raw["channel_id"].as_str().filter(|id| snowflake(id)) else {
+    pub(super) async fn group_dispatch(&self, raw: &Value) -> Effect<()> {
+        let Some(channel_id) = raw["channel_id"].as_str() else {
             return Ok(());
         };
-        let Some(id) = raw["id"].as_str().filter(|id| snowflake(id)) else {
-            return Ok(());
-        };
-        let guild = raw["guild_id"].as_str();
-        if !self.allowed_guild(guild)
-            || raw["webhook_id"].is_string()
-        {
-            return Ok(());
-        }
-        let channel = match self
-            .incoming_channel(channel_id, guild, create || raw.get("guild_id").is_some())
-            .await
-        {
-            Ok(channel) => channel,
-            Err(error) if error.certainty == "rejected" => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        // Check parent and owner policy before a partial update may fetch a message.
+        let channel = self.channel_by_id(channel_id, false).await?;
         let Ok(route) = self.route_for(&channel) else {
             return Ok(());
         };
-        if self.group_route(&route) {
-            if create && live {
-                self.group_message(&route, &raw)?;
-            }
-            return Ok(());
-        }
-        if raw["author"].is_object()
-            && !User::deserialize(&raw["author"])
-                .is_ok_and(|user| user.id == self.config.owner_id && !user.bot)
+        if self.group_route(&route)
+            && route.guild_id.as_deref() == raw["guild_id"].as_str()
         {
-            return Ok(());
-        }
-        let (message, fetched_raw) = match Message::deserialize(&raw) {
-            Ok(message)
-                if create
-                    || (raw.get("edited_timestamp").is_some()
-                        && raw.get("attachments").is_some()) =>
-            {
-                (message, None)
-            }
-            _ if create => return Ok(()),
-            _ => {
-                let found: Value = self
-                    .rest
-                    .get(&format!("channels/{channel_id}/messages/{id}"))
-                    .await?;
-                let message = Message::deserialize(&found)
-                    .map_err(|_| broken("Discord edit could not be verified"))?;
-                (message, Some(found))
-            }
-        };
-        // Gate controls even on partial edits whose resource omitted a guild ID.
-        if let Some(voice) = &self.voice {
-            let mut resource = fetched_raw.unwrap_or_else(|| raw.clone());
-            resource["guild_id"] = json!(route.guild_id);
-            if voice.is_control(&resource) {
-                return Ok(());
-            }
-        }
-        if message.id != id || (!create && message.edited_timestamp.is_none()) {
-            return Ok(());
-        }
-        if let Some(input) = self.with_context(&message, &route, &channel).await {
-            self.admit(json!({ "kind": "message", "input": input }))?;
+            self.group_message(&route, raw)?;
         }
         Ok(())
     }
 
-    fn group_message(&self, route: &Route, raw: &Value) -> Effect<()> {
+    pub(super) fn group_message(&self, route: &Route, raw: &Value) -> Effect<()> {
         let Ok(message) = Message::deserialize(raw) else { return Ok(()) };
         if message.author.bot
             || raw["author"]["system"] == true
@@ -377,18 +350,62 @@ impl State {
         Ok(receipt.id)
     }
 
-    async fn with_context(
+    pub(super) async fn with_context(
         &self,
         message: &Message,
         route: &Route,
         channel: &Channel,
-    ) -> Option<Value> {
-        let mut input = message_input(message, route)?;
-        if let Some(reply) = self.snapshot_reply(message, route).await {
+        addressing: bool,
+    ) -> Effect<Option<Value>> {
+        if !authorized_message(message, route) {
+            return Ok(None);
+        }
+        let text = addressing
+            .then(|| addressed_text(message, &route.account_id))
+            .flatten();
+        // Edits, catch-up and stale dispatches can never run voice commands
+        // or submit a voice control to the ordinary head.
+        let voice_control = self.voice.as_ref().is_some_and(|voice| {
+            voice.is_control_text(&message.channel_id, &message.content)
+                || text.as_deref().is_some_and(|text| voice.is_control_text(&message.channel_id, text))
+        });
+        let Some(mut input) = message_input(message, route) else {
+            return Ok(None);
+        };
+        if route.guild_id.is_some() {
+            // Before source provenance was stored, this exact original reply
+            // could have been projected into an already-admitted voice draft.
+            let confirmation = route.thread_id.is_none()
+                && message.content == "/voice confirm"
+                && message.edited_timestamp.is_none()
+                && message.attachments.is_empty()
+                && reply_id(message, route).is_some_and(|(_, reference)| reference.kind == 0);
+            match self.ctx.discord_admitted_input(&input, confirmation)
+                .map_err(|_| broken("Discord admitted source could not be verified"))?
+            {
+                DiscordSourceReceipt::Admitted(saved) => return Ok(Some(saved)),
+                DiscordSourceReceipt::LegacyVoiceConfirmation => return Ok(None),
+                DiscordSourceReceipt::Absent => (),
+            }
+        }
+        if voice_control {
+            return Ok(None);
+        }
+        let proof = addressing && route.thread_id.is_none() && text.is_none();
+        if let Some(text) = text.filter(|text| !Voice::matches_control(text)) {
+            if text.is_empty() && input["attachments"].as_array().is_some_and(Vec::is_empty) {
+                return Ok(None);
+            }
+            let original = std::mem::replace(&mut input["text"], json!(text));
+            input["discordOriginalText"] = original;
+        }
+        if let Some(reply) = self.snapshot_reply(message, route, proof).await? {
             input["reply"] = reply;
+        } else if proof {
+            return Ok(None);
         }
         input["discordContext"] = self.context_snapshot(route, Some(channel)).await;
-        Some(input)
+        Ok(Some(input))
     }
 
     pub(super) async fn fetch_after(&self, route: &Route, cursor: &str) -> Effect<Value> {
@@ -398,24 +415,44 @@ impl State {
             ));
         }
         let route = route.physical();
+        self.assert_route(&route)?;
         if self.group_route(&route) {
             return Err(EffectError::rejected("Discord group rooms do not allow history recovery"));
         }
-        let channel = self.destination(&route).await?;
+        self.assert_live_intake_drained(&route)?;
+        let cached = self.channels.read().await.get(route.destination()).cloned();
+        let channel = match cached {
+            Some(channel) => channel,
+            None => {
+                let Some(channel) = self.rest.history_lookup::<Channel>(
+                    &format!("channels/{}", route.destination()),
+                ).await? else { return Ok(Value::Null) };
+                if channel.id != route.destination() {
+                    return Err(broken("Discord history channel did not match its requested destination"));
+                }
+                self.remember_channel(channel.clone()).await;
+                channel
+            }
+        };
+        if self.route_for(&channel)? != route {
+            return Err(EffectError::rejected("Discord destination identity changed"));
+        }
+        let channel = channel.sendable()?;
         let mut after = cursor.to_owned();
         let mut inputs = Vec::new();
         loop {
-            let page: Vec<Value> = self
+            let page: Option<Vec<Value>> = self
                 .rest
-                .get(&format!(
+                .history_lookup(&format!(
                     "channels/{}/messages?after={after}&limit=100",
                     channel.id
                 ))
                 .await?;
+            let Some(page) = page else { return Ok(Value::Null) };
             let count = page.len();
             let mut messages =
                 page.into_iter()
-                    .map(|mut raw| {
+                    .map(|raw| {
                         let message = Message::deserialize(&raw)
                             .map_err(|_| broken("Discord history contained an invalid message"))?;
                         let id = message.id.parse::<u64>().map_err(|_| {
@@ -426,23 +463,19 @@ impl State {
                                 "Discord history destination did not match its request",
                             ));
                         }
-                        raw["guild_id"] = json!(route.guild_id);
-                        Ok((id, message, raw))
+                        Ok((id, message))
                     })
                     .collect::<Effect<Vec<_>>>()?;
-            messages.sort_unstable_by_key(|(id, _, _)| *id);
+            messages.sort_unstable_by_key(|(id, _)| *id);
             let previous = after
                 .parse::<u64>()
                 .map_err(|_| broken("Discord history cursor could not be verified"))?;
-            for (id, message, raw) in messages {
+            for (id, message) in messages {
                 if id <= previous {
                     return Err(broken("Discord history cursor did not advance"));
                 }
                 after = message.id.clone();
-                if self.voice.as_ref().is_some_and(|v| v.is_control(&raw)) {
-                    continue;
-                }
-                if let Some(input) = self.with_context(&message, &route, &channel).await {
+                if let Some(input) = self.with_context(&message, &route, &channel, self.addressing_enabled(&route)).await? {
                     inputs.push(input);
                 }
             }
@@ -450,6 +483,7 @@ impl State {
                 break;
             }
         }
+        self.assert_live_intake_drained(&route)?;
         Ok(Value::Array(inputs))
     }
 }

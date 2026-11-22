@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequest, Inbound, Lane, LaneModel, LanePresetSnapshot, ResolvedLanePreset, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "../src/contracts";
-import { physicalRouteKey, routeKey, WORKFLOW_NAMES } from "../src/contracts";
+import { physicalRouteKey, routeKey } from "../src/contracts";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { type Config, hostPaths } from "../src/config";
 import type { HostOptions } from "../src/host";
@@ -61,6 +61,12 @@ class HostTransport implements RuntimeHost {
   shutdownAllowed = true;
   shutdownDisconnect = false;
   workflowAvailable = true;
+  workflowCommands = [
+    { name: "super", source: "extension", description: "Enable SUPER mode" },
+    ...["super-plan", "super-loop", "super-run", "super-graph", "super-research"].map(name => ({
+      name, source: "extension", description: `Run the ${name} workflow`,
+    })),
+  ];
   beforeCapabilities?: () => Promise<void> | void;
   uiAcknowledges = true;
   children: Array<{ id: string }> = [];
@@ -177,9 +183,7 @@ class HostTransport implements RuntimeHost {
     }
     if (command.type === "get_available_commands") {
       await this.beforeCapabilities?.();
-      return { success: true, data: { commands: this.workflowAvailable ? WORKFLOW_NAMES.filter(name => name !== "jevify").map(name => ({
-        name, source: "extension", description: `Run the OMP-adapted ${name} workflow`,
-      })) : [] } };
+      return { success: true, data: { commands: this.workflowAvailable ? this.workflowCommands : [] } };
     }
     if (command.type === "set_model" || command.type === "set_model_preset") {
       await this.beforeSetModel?.();
@@ -279,7 +283,7 @@ class MessengerTransport implements Messenger {
   readonly activities: Array<{ message: MessageReference; activity: MessageActivity }> = [];
   activityFailure = false;
   private readonly activityWaiters: Array<{ count: number; resolve(): void }> = [];
-  readonly backlog = new Map<string, Inbound[] | null>();
+  readonly backlog = new Map<string, Inbound[] | Error | null>();
   readonly threads: Route[] = [];
   readonly threadSources: Array<string | undefined> = [];
   readonly threadTags: Array<readonly string[] | undefined> = [];
@@ -335,7 +339,9 @@ class MessengerTransport implements Messenger {
   }
   async fetchAfter(route: Route, cursor: string): Promise<Inbound[] | null> {
     this.fetched.push({ route, cursor });
-    return this.backlog.has(routeKey(route)) ? this.backlog.get(routeKey(route))! : [];
+    const history = this.backlog.get(routeKey(route));
+    if (history instanceof Error) throw history;
+    return history === undefined ? [] : history;
   }
   async stop(): Promise<void> { this.handlers = undefined; }
   whenSent(count: number): Promise<void> {
@@ -5096,7 +5102,7 @@ exit ${code}
 });
 
 describe("trusted workflow activation", () => {
-  test("native jevify reaches head and lane without an ULW command and retains source identity and dedupe", async () => {
+  test("native jevify reaches head and lane without a SUPER command and retains source identity and dedupe", async () => {
     const { runtime, store, main, hosts, directory } = fixture();
     main.workflowAvailable = false;
     await runtime.start();
@@ -5174,7 +5180,7 @@ describe("trusted workflow activation", () => {
     expect(prompt).toContain(`Original source ID: ${original.id}`);
     expect(prompt).toContain(`Original authorized conversation: ${routeKey(stored.route)}`);
     expect(prompt).not.toContain("/head ulw-plan");
-    expect(stored).toMatchObject({ text: original.text, target: "main", workflow: { name: "ulw-plan", provenance: "user", sourceId: original.id } });
+    expect(stored).toMatchObject({ text: original.text, target: "main", workflow: { name: "super-plan", provenance: "user", sourceId: original.id } });
     const topic = store.input("1750000000000000000");
     if (!topic) throw new Error("Expected the original /new boundary");
     expect(stored.route).toEqual(topic.route);
@@ -5184,20 +5190,40 @@ describe("trusted workflow activation", () => {
     expect(main.commands.some(command => command.type === "goal")).toBe(false);
   });
 
-  test("plain ULW is an arming request rather than automatic native goal creation", async () => {
+  test("plain SUPER requests arming rather than automatic native goal creation", async () => {
     const { runtime, store, main } = fixture();
     await runtime.start();
-    await admit(runtime, headMessage("plain-ulw", route(), " /ULW inspect the repository"));
-    expect(main.prompts[0]!.command.message).toStartWith(" /ULW inspect the repository\n");
+    await admit(runtime, headMessage("plain-super", route(), " /SUPER inspect the repository"));
+    expect(main.prompts[0]!.command.message).toStartWith(" /SUPER inspect the repository\n");
     expect(main.commands.some(command => command.type === "goal")).toBe(false);
-    expect(store.input("plain-ulw")?.workflow?.name).toBe("ulw");
+    expect(store.input("plain-super")?.workflow?.name).toBe("super");
     expect(main.state.goal).toBeNull();
+  });
+
+  test("canonical slash SUPER and graph select distinct modes on the current Host", async () => {
+    const { runtime, store, main } = fixture();
+    await runtime.start();
+    const plan = headMessage("slash-super-plan", route(), "/super-plan inspect the repository");
+    await admit(runtime, plan);
+    expect(main.prompts[0]!.command.message).toStartWith("/super-plan ultrathink inspect the repository\n");
+    expect(store.input(plan.id)).toMatchObject({ text: plan.text, workflow: { name: "super-plan", provenance: "user" } });
+    main.complete("The plan is ready");
+    await runtime.kick();
+    const graph = headMessage("super-graph", route(), "super-graph schedule the dependencies");
+    await admit(runtime, graph);
+    const graphPrompt = String(main.prompts[1]!.command.message);
+    expect(graphPrompt).toStartWith("super-graph workflowz schedule the dependencies\n");
+    expect(containsMagicKeyword(graphPrompt, "orchestrate")).toBe(false);
+    expect(store.input(graph.id)).toMatchObject({ text: graph.text, workflow: { name: "super-graph", provenance: "user" } });
+    expect(main.commands.some(command => command.type === "goal")).toBe(false);
   });
 
   test("quoted/negative mentions and internal report text never acquire activation authority", async () => {
     const { runtime, store, main } = fixture();
     await runtime.start();
-    for (const [index, text] of ['"ulw-plan inspect"', "do not invoke ulw-loop", "`ulw-execute`", "> ulw-plan inspect", "Explain mass-ulw", "```\nulw-loop\n```"].entries()) {
+    for (const [index, text] of ['"super-plan inspect"', "do not invoke super-loop", "`super-run`", "> super-plan inspect",
+      "Explain super-graph", "```\nsuper-loop\n```", "superagent is a package", "super-plan.md is a file",
+      "super-plan://example/path"].entries()) {
       const id = `passive-${index}`;
       await admit(runtime, headMessage(id, route(), text));
       expect(store.input(id)?.workflow).toBeNull();
@@ -5219,14 +5245,14 @@ describe("trusted workflow activation", () => {
     const task = "Inspect the repository and plan the requested change";
     const original = headMessage("workflow-head", route("workflow-thread"), task);
     await admit(runtime, original);
-    const workflow = { name: "ulw-plan" as const, reason: "A bounded planning phase serves this authorized objective" };
+    const workflow = { name: "super-plan" as const, reason: "A bounded planning phase serves this authorized objective" };
     const start = { ...selection, sourceId: original.id, title: "Plan", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory, brief: "Quoted board excerpt: orchestrate workflowz", workflow };
     const lane = await runtime.startLane(start);
     await runtime.kick();
     const handoff = store.input(`handoff:${original.id}:lane`)!;
     const host = hosts.get(lane.socketPath)!;
     const prompt = String(host.prompts[0]!.command.message);
-    expect(prompt.startsWith("ulw-plan ultrathink\n\n")).toBe(true);
+    expect(prompt.startsWith("super-plan ultrathink\n\n")).toBe(true);
     expect(prompt).toContain(task);
     expect(prompt).toContain(`Request ID: ${handoff.id}`);
     expect(prompt).toContain(`Original authorized conversation: ${routeKey(original.route)}`);
@@ -5237,7 +5263,7 @@ describe("trusted workflow activation", () => {
     expect(store.input(original.id)).toMatchObject({ text: original.text, route: original.route, target: "main", workflow: null });
     expect(await runtime.startLane(start)).toMatchObject({ id: lane.id });
     await expect(runtime.startLane({ ...start, workflow: undefined })).rejects.toThrow("Workflow identity conflict");
-    await expect(runtime.startLane({ ...start, workflow: { ...workflow, name: "ulw-loop" } })).rejects.toThrow("Workflow identity conflict");
+    await expect(runtime.startLane({ ...start, workflow: { ...workflow, name: "super-loop" } })).rejects.toThrow("Workflow identity conflict");
     expect(host.prompts).toHaveLength(1);
     expect(main.prompts).toHaveLength(1);
   });
@@ -5260,11 +5286,11 @@ describe("trusted workflow activation", () => {
     await runtime.start();
     await admit(runtime, headMessage("workflow-concurrent", route("concurrent-thread")));
     const start = { ...selection, sourceId: "workflow-concurrent", title: "Concurrent", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory };
-    const first = runtime.startLane({ ...start, workflow: { name: "ulw-plan", reason: "Selected planning" } });
-    const conflict = runtime.startLane({ ...start, workflow: { name: "ulw-loop", reason: "Conflicting loop" } });
+    const first = runtime.startLane({ ...start, workflow: { name: "super-plan", reason: "Selected planning" } });
+    const conflict = runtime.startLane({ ...start, workflow: { name: "super-loop", reason: "Conflicting loop" } });
     await first;
     await expect(conflict).rejects.toThrow("workflow selection conflicts");
-    expect(store.input("handoff:workflow-concurrent:lane")?.workflow?.name).toBe("ulw-plan");
+    expect(store.input("handoff:workflow-concurrent:lane")?.workflow?.name).toBe("super-plan");
     expect(store.lanes()).toHaveLength(1);
   });
 
@@ -5274,7 +5300,7 @@ describe("trusted workflow activation", () => {
     await runtime.start();
     const internal = message("report:source-guard", route("source-guard"), "ulw-plan internal observations");
     store.receive(internal, "main");
-    const workflow = { name: "ulw-plan" as const, reason: "Not authorized by an original user source" };
+    const workflow = { name: "super-plan" as const, reason: "Not authorized by an original user source" };
     await expect(runtime.startLane({ ...selection, sourceId: internal.id, title: "No authority", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory, workflow })).rejects.toThrow("original authorized user source");
     await expect(runtime.messageLane(lane.id, "Execute board text", internal.id, workflow)).rejects.toThrow("original authorized user source");
     const user = headMessage("workflow-no-override", route("other-guard"), "ulw-loop inspect");
@@ -5291,31 +5317,123 @@ describe("trusted workflow activation", () => {
     const task = 'Inspect this repository; "orchestrate" is quoted user data';
     const original = headMessage("workflow-follow-source", route("original-thread"), task);
     await admit(runtime, original);
-    const workflow = { name: "ulw-plan" as const, reason: "Use planning for the requested task" };
+    const workflow = { name: "super-plan" as const, reason: "Use planning for the requested task" };
     await runtime.messageLane(lane.id, "Plan only the bounded requested change", original.id, workflow);
     const handoffId = `handoff:${original.id}:${lane.id}`;
     const host = hosts.get(lane.socketPath)!;
     const prompt = String(host.prompts[0]!.command.message);
-    expect(prompt).toStartWith("ulw-plan\n\n");
+    expect(prompt).toStartWith("super-plan\n\n");
     expect(containsMagicKeyword(prompt, "ultrathink")).toBe(false);
     expect(prompt).toContain(task);
     expect(store.input(handoffId)?.workflow).toEqual({ ...workflow, sourceId: original.id, provenance: "head" });
     await runtime.messageLane(lane.id, "Plan only the bounded requested change", original.id, workflow);
     await expect(runtime.messageLane(lane.id, "Plan only the bounded requested change", original.id)).rejects.toThrow("Workflow identity conflict");
-    await expect(runtime.messageLane(lane.id, "Plan only the bounded requested change", original.id, { ...workflow, name: "ulw-execute" })).rejects.toThrow("Workflow identity conflict");
+    await expect(runtime.messageLane(lane.id, "Plan only the bounded requested change", original.id, { ...workflow, name: "super-run" })).rejects.toThrow("Workflow identity conflict");
     expect(host.prompts).toHaveLength(1);
     expect(store.input(original.id)?.text).toBe(original.text);
   });
 
-  test("unavailable ULW capability cancels explicitly without plain execution or a false activation claim", async () => {
+  test("an exact old handoff replay does not reclassify its originally ordinary source or wake the lane", async () => {
+    const { runtime, store, config, launched } = fixture();
+    const lane = savedLane(store, config, "old-handoff-lane", route("old-handoff-thread"));
+    const original = headMessage("old-ordinary-source", route("old-source-thread"), "super-plan was an ordinary heading then");
+    store.receive(original, "main", { [`user-source:${original.id}`]: "true" });
+    store.settle(original.id, "done");
+    const handoff = { ...original, route: lane.route, id: `handoff:${original.id}:${lane.id}`, text: "Execute the existing plan" };
+    const reason = "The head selected execution for this original authorized objective";
+    const db = new Database(join(config.stateDir, "coordination.sqlite"));
+    try {
+      db.query("INSERT INTO inputs(id,data,target,state,request_id,generation) VALUES (?,?,?,'done',?,?)").run(
+        handoff.id, JSON.stringify({ ...handoff, workflow: { name: "ulw-execute", reason, sourceId: original.id, provenance: "head" } }),
+        lane.id, "completed-native-ticket", 0);
+    } finally {
+      db.close();
+    }
+    store.setMeta(`handoff-source:${handoff.id}`, original.id);
+    await runtime.start();
+    await expect(runtime.messageLane(lane.id, handoff.text, original.id, { name: "super-run", reason }))
+      .resolves.toMatchObject({ inputId: handoff.id, state: "done" });
+    await expect(runtime.messageLane(lane.id, handoff.text, original.id, { name: "super-plan", reason }))
+      .rejects.toThrow("Workflow identity conflict");
+    expect(store.input(original.id)).toMatchObject({ text: original.text, workflow: null });
+    expect(store.input(handoff.id)).toMatchObject({ state: "done", target: lane.id, requestId: "completed-native-ticket", generation: 0 });
+    expect(launched).toEqual([]);
+  });
+
+  test("a pending pre-rename planning handoff does not interpret its ordinary source heading as a delimiter", async () => {
+    const { runtime, store, config, hosts } = fixture();
+    const lane = savedLane(store, config, "pending-old-handoff", route("pending-old-handoff-thread"));
+    const heading = "super-plan: inspect this repository";
+    const original = headMessage("pending-old-source", route("pending-old-source-thread"), heading);
+    store.receive(original, "main", { [`user-source:${original.id}`]: "true" });
+    store.settle(original.id, "done");
+    const handoff = { ...original, route: lane.route, id: `handoff:${original.id}:${lane.id}`, text: "Plan the bounded change" };
+    const db = new Database(join(config.stateDir, "coordination.sqlite"));
+    try {
+      db.query("INSERT INTO inputs(id,data,target) VALUES (?,?,?)").run(handoff.id, JSON.stringify({ ...handoff,
+        workflow: { name: "ulw-plan", reason: "The head selected planning", sourceId: original.id, provenance: "head" },
+      }), lane.id);
+    } finally {
+      db.close();
+    }
+    store.setMeta(`handoff-source:${handoff.id}`, original.id);
+    await runtime.start();
+    await runtime.kick();
+    const host = hosts.get(lane.socketPath)!;
+    expect(host.prompts).toHaveLength(1);
+    const prompt = String(host.prompts[0]!.command.message);
+    expect(prompt).toStartWith(`super-plan ultrathink\n\n${heading}\n\n`);
+    expect(containsMagicKeyword(prompt, "ultrathink")).toBe(true);
+    expect(store.input(original.id)).toMatchObject({ text: original.text, workflow: null, state: "done" });
+    expect(store.input(handoff.id)).toMatchObject({ state: "submitted", target: lane.id, workflow: {
+      name: "super-plan", sourceId: original.id, provenance: "head",
+    } });
+  });
+
+  test("unavailable SUPER capability cancels explicitly without plain execution or a false activation claim", async () => {
     const { runtime, store, main, messenger } = fixture();
     main.workflowAvailable = false;
     await runtime.start();
-    await admit(runtime, headMessage("workflow-missing", route(), "ulw inspect this"));
+    await admit(runtime, headMessage("workflow-missing", route(), "super inspect this"));
     expect(main.prompts).toEqual([]);
     expect(store.input("workflow-missing")?.state).toBe("cancelled");
     expect(messenger.sent[0]?.text).toContain("확인할 수 없어 실행하지 않았습니다");
     expect(main.commands.some(command => command.type === "goal")).toBe(false);
+  });
+
+  test("an already running pre-SUPER Host uses the graph-only old registration, not a new alias description", async () => {
+    const old = fixture();
+    old.main.workflowCommands = [
+      { name: "mass-ulw", source: "extension", description: "Run the OMP-adapted mass-ulw workflow" },
+      { name: "ulw-plan", source: "extension", description: "Run the OMP-adapted ulw-plan workflow" },
+    ];
+    await old.runtime.start();
+    const source = headMessage("old-workflow-host", route(), "super-graph schedule the dependencies");
+    await admit(old.runtime, source);
+    expect(old.main.prompts[0]!.command.message).toStartWith("mass-ulw workflowz\n\nsuper-graph schedule the dependencies\n");
+    expect(old.store.input(source.id)).toMatchObject({ text: source.text, workflow: {
+      name: "super-graph", sourceId: source.id, provenance: "user",
+    } });
+    await admit(old.runtime, source);
+    expect(old.main.prompts).toHaveLength(1);
+    old.main.complete("The dependency plan is ready");
+    await old.runtime.kick();
+    const compact = headMessage("old-workflow-compact", route(), "ulwplan inspect the repository");
+    await admit(old.runtime, compact);
+    expect(old.main.prompts[1]!.command.message).toStartWith("ulwplan ultrathink inspect the repository\n");
+    expect(old.store.input(compact.id)).toMatchObject({ text: compact.text, workflow: { name: "super-plan", provenance: "user" } });
+    expect(old.main.commands.some(command => command.type === "goal")).toBe(false);
+
+    const current = fixture();
+    current.main.workflowCommands = [
+      { name: "super-graph", source: "skill", description: "Run the super-graph workflow" },
+      { name: "mass-ulw", source: "extension", description: "Legacy alias for /super-graph" },
+    ];
+    await current.runtime.start();
+    await admit(current.runtime, source);
+    expect(current.main.prompts).toEqual([]);
+    expect(current.store.input(source.id)?.state).toBe("cancelled");
+    expect(current.messenger.sent[0]?.text).toContain("SUPER");
   });
 
   test("cancelled source cannot activate selected handoffs, including cancellation while reading capability", async () => {
@@ -5323,7 +5441,7 @@ describe("trusted workflow activation", () => {
     await runtime.start();
     const original = headMessage("workflow-cancelled", route("cancel-thread"));
     await admit(runtime, original);
-    const workflow = { name: "ulw-plan" as const, reason: "Bounded planning" };
+    const workflow = { name: "super-plan" as const, reason: "Bounded planning" };
     const lane = await runtime.startLane({ ...selection, sourceId: original.id, title: "Cancelled source", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory, workflow });
     const host = hosts.get(lane.socketPath);
     if (host) {
@@ -5337,7 +5455,7 @@ describe("trusted workflow activation", () => {
     const other = fixture();
     await other.runtime.start();
     other.main.beforeCapabilities = () => { other.store.settle("workflow-cancel-race", "cancelled"); };
-    await admit(other.runtime, headMessage("workflow-cancel-race", route(), "ulw inspect"));
+    await admit(other.runtime, headMessage("workflow-cancel-race", route(), "super inspect"));
     expect(other.main.prompts).toEqual([]);
     expect(other.store.input("workflow-cancel-race")?.state).toBe("cancelled");
   });
@@ -7437,6 +7555,7 @@ describe("real Store runtime coordination", () => {
     host.state.goal = { enabled: true, mode: "active", goal: { status: "active" } };
     await runtime.pause(lane.id);
     const source: Inbound = { ...message("resume-correction-source", lane.route, "Resume, but apply this exact correction."),
+      discordOriginalText: "<@2> Resume, but apply this exact correction.",
       attachments: [{ id: "correction", name: "correction.txt", url: "adapter-file:correction", size: 16 }] };
     store.receive(source, "main");
     store.settle(source.id, "done");
@@ -7453,7 +7572,11 @@ describe("real Store runtime coordination", () => {
     await runtime.messageLane(lane.id, source.text, source.id);
     expect(host.prompts).toHaveLength(2);
     expect(host.prompts[1]?.command.message).toContain(source.text);
-    expect(store.input(`handoff:${source.id}:${lane.id}`)?.attachments).toEqual(source.attachments);
+    expect(store.input(source.id)?.discordOriginalText).toBe(source.discordOriginalText);
+    expect(store.input(`resume:${source.id}:${lane.id}`)?.discordOriginalText).toBeUndefined();
+    const handoff = store.input(`handoff:${source.id}:${lane.id}`);
+    expect(handoff?.attachments).toEqual(source.attachments);
+    expect(handoff?.discordOriginalText).toBeUndefined();
     expect(downloads).toEqual([source.route]);
     expect(host.commands.filter(command => command.type === "goal" && command.op === "resume")).toHaveLength(1);
     host.complete("Correction applied");
@@ -8189,7 +8312,7 @@ describe("real Store runtime coordination", () => {
     const initial = activateSource("active-lane");
     await runtime.messageLane(lane.id, initial.text, initial.id);
     const workflow = activateSource("queued-workflow");
-    const choice = { name: "ulw-plan" as const, reason: "Select the planning workflow for this follow-up." };
+    const choice = { name: "super-plan" as const, reason: "Select the planning workflow for this follow-up." };
     await runtime.messageLane(lane.id, workflow.text, workflow.id, choice);
     const steer = activateSource("later-steer");
     host.beforePrompt = () => { throw new Error("Native steering acknowledgement was lost"); };
@@ -8358,6 +8481,206 @@ describe("real Store runtime coordination", () => {
     expect(store.getMeta(`cursor:${routeKey(destination)}`)).toBe("161");
   });
 
+  test.each(["fetch failure", "admission conflict"] as const)(
+    "Discord catchup survives %s, newer live intake and head restart without replaying effects",
+    async failure => {
+      const { runtime, config, directory, messenger, errors } = fixture();
+      const parent = route(null);
+      const thread = route();
+      const previous = message("180", parent, "/status");
+      const partial = message("181", parent, "/status");
+      const missed = message("182", parent, "/status");
+      const newer = message("183", parent, "/status");
+      const failureMessage = failure === "fetch failure" ? "Discord reply lookup unavailable" : `Inbound identity conflict: ${previous.id}`;
+      messenger.backlog.set(routeKey(parent), failure === "fetch failure"
+        ? new DeliveryError(failureMessage) : [partial, { ...missed, id: previous.id }]);
+      await runtime.start();
+      expect(messenger.fetched).toEqual([]);
+      await messenger.handlers!.message(previous);
+      await messenger.handlers!.message(message("190", thread, "/status"));
+      await messenger.handlers!.reconnect!();
+      expect(messenger.fetched).toEqual([{ route: parent, cursor: "180" }, { route: thread, cursor: "190" }]);
+      expect(errors).toEqual([expect.objectContaining({ message: failureMessage })]);
+      await messenger.handlers!.message(newer);
+      await messenger.handlers!.message(message("191", thread, "/status"));
+      await messenger.whenSent(failure === "fetch failure" ? 4 : 5);
+      await runtime.stop();
+
+      const reopened = new Store(join(directory, "coordination.sqlite"));
+      const transport = new MessengerTransport();
+      const head = new HostTransport(hostPaths(config, "main").sessionFile, "session-main");
+      const restarted = new Superagent(config, reopened, transport, join(directory, "extension.ts"),
+        error => errors.push(error), { connect: async () => head });
+      fixtures.find(entry => entry.runtime === runtime)!.runtime = restarted;
+      transport.backlog.set(routeKey(parent), failure === "fetch failure" ? [newer, missed] : [newer, missed, partial]);
+      await restarted.start();
+      expect(transport.fetched).toEqual([{ route: parent, cursor: "180" }, { route: thread, cursor: "191" }]);
+      await transport.handlers!.reconnect!();
+      expect(transport.fetched.slice(2)).toEqual([{ route: parent, cursor: "183" }, { route: thread, cursor: "191" }]);
+      expect(transport.attempted.map(output => output.sourceId)).toEqual([missed.id]);
+      expect(reopened.output(`${missed.id}:head-control`)).toMatchObject({ state: "sent", sourceId: missed.id, route: parent });
+      expect(errors).toEqual([expect.objectContaining({ message: failureMessage })]);
+    },
+  );
+
+  test("Discord startup keeps the original cursor if live intake outruns an in-flight history scan", async () => {
+    const { runtime, store, messenger } = fixture();
+    const destination = route();
+    store.setMeta("messenger:routes", JSON.stringify([destination]));
+    store.setMeta(`cursor:${physicalRouteKey(destination)}`, "160");
+    const fetching = Promise.withResolvers<void>();
+    const snapshot = Promise.withResolvers<Inbound[]>();
+    const fetchAfter = messenger.fetchAfter.bind(messenger);
+    messenger.fetchAfter = (route, cursor) => {
+      const history = fetchAfter(route, cursor);
+      if (messenger.fetched.length !== 1) return history;
+      fetching.resolve();
+      return snapshot.promise;
+    };
+    const starting = runtime.start();
+    try {
+      await Promise.race([fetching.promise, starting]);
+      await messenger.handlers!.message(headMessage("162", destination));
+    } finally {
+      snapshot.resolve([]);
+      await starting;
+    }
+
+    const missed = headMessage("161", destination);
+    messenger.backlog.set(routeKey(destination), [missed]);
+    await messenger.handlers!.reconnect!();
+    expect(messenger.fetched).toEqual([{ route: destination, cursor: "160" }, { route: destination, cursor: "160" }]);
+    expect(store.input(missed.id)?.text).toBe(missed.text);
+  });
+
+  test("a live Discord connection recovers pinned history without another reconnect", async () => {
+    const { runtime, store, messenger, errors } = fixture();
+    const parent = route(null);
+    const thread = route();
+    const missed = message("181", parent, "/status");
+    const newer = message("182", parent, "/status");
+    const unavailable = new DeliveryError("Discord reply lookup unavailable");
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await runtime.start();
+      await messenger.handlers!.message(message("180", parent, "/status"));
+      await messenger.handlers!.message(message("190", thread, "/status"));
+      messenger.backlog.set(routeKey(parent), unavailable);
+      await messenger.handlers!.reconnect!();
+      await messenger.handlers!.message(newer);
+      await runtime.kick();
+      expect(errors).toEqual([unavailable]);
+      expect(store.input(missed.id)).toBeNull();
+      expect(messenger.fetched).toEqual([{ route: parent, cursor: "180" }, { route: thread, cursor: "190" }]);
+
+      messenger.backlog.set(routeKey(parent), [newer, missed]);
+      clock.mockReturnValue(now + 60_000);
+      await messenger.whenSent(4);
+      await runtime.kick();
+
+      expect(messenger.fetched.slice(2)).toEqual([{ route: parent, cursor: "180" }]);
+      expect(messenger.attempted.filter(output => output.sourceId === newer.id)).toHaveLength(1);
+      expect(store.output(`${missed.id}:head-control`)).toMatchObject({ state: "sent", route: parent });
+    } finally {
+      clock.mockRestore();
+    }
+  }, 10_000);
+
+  test("a definitively deleted Discord thread leaves the history retry and reconnect sweeps", async () => {
+    const maintenance = Promise.withResolvers<void>();
+    let observeMaintenance = false;
+    const { runtime, store, messenger, errors } = fixture(3, undefined, {
+      syncPresetRoles: async () => { if (observeMaintenance) maintenance.resolve(); },
+    });
+    const deleted = route("10");
+    const sibling = route("11");
+    const prior = message("180", deleted, "/status");
+    const unavailable = new DeliveryError("Discord reply lookup unavailable");
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await runtime.start();
+      await admit(runtime, prior);
+      await admit(runtime, message("190", sibling, "/status"));
+      messenger.backlog.set(routeKey(deleted), unavailable);
+      await messenger.handlers!.reconnect!();
+
+      const missing = Promise.withResolvers<void>();
+      const fetchAfter = messenger.fetchAfter.bind(messenger);
+      messenger.fetchAfter = async (route, cursor) => {
+        const history = await fetchAfter(route, cursor);
+        if (history === null) missing.resolve();
+        return history;
+      };
+      messenger.backlog.set(routeKey(deleted), null);
+      clock.mockReturnValue(now + 60_000);
+      await missing.promise;
+
+      // A late durable intake receipt cannot make the deleted ID recoverable.
+      await messenger.handlers!.message(message("181", deleted, "/status"));
+      await messenger.handlers!.reconnect!();
+      observeMaintenance = true;
+      clock.mockReturnValue(now + 120_000);
+      await maintenance.promise;
+
+      expect(messenger.fetched).toEqual([
+        { route: deleted, cursor: "180" }, { route: sibling, cursor: "190" },
+        { route: deleted, cursor: "180" }, { route: sibling, cursor: "190" },
+      ]);
+      expect(store.input(prior.id)).toMatchObject({ route: deleted, state: "done" });
+      expect(errors).toEqual([unavailable]);
+    } finally {
+      clock.mockRestore();
+    }
+  }, 10_000);
+
+  test("shutdown does not wait for or admit a late response from a scheduled Discord history retry", async () => {
+    const { runtime, directory, messenger, errors } = fixture();
+    const destination = route();
+    const prior = message("180", destination, "/status");
+    const missed = message("181", destination, "/status");
+    const unavailable = new DeliveryError("Discord reply lookup unavailable");
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    const fetching = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Inbound[]>();
+    try {
+      await runtime.start();
+      await admit(runtime, prior);
+      messenger.backlog.set(routeKey(destination), unavailable);
+      await messenger.handlers!.reconnect!();
+      messenger.backlog.delete(routeKey(destination));
+      const fetchAfter = messenger.fetchAfter.bind(messenger);
+      messenger.fetchAfter = async (route, cursor) => {
+        await fetchAfter(route, cursor);
+        fetching.resolve();
+        return response.promise;
+      };
+      clock.mockReturnValue(now + 60_000);
+      await fetching.promise;
+      const stopping = runtime.stop();
+      try {
+        const deadline = new Promise<never>((_, reject) => AbortSignal.timeout(3000).addEventListener("abort",
+          () => reject(new Error("Head shutdown waited for the pending history response"))));
+        await Promise.race([stopping, deadline]);
+      } finally {
+        response.resolve([missed]);
+        await stopping;
+      }
+
+      const reopened = new Store(join(directory, "coordination.sqlite"));
+      try { expect(reopened.input(missed.id)).toBeNull(); }
+      finally { reopened.close(); }
+      expect(messenger.fetched).toEqual([{ route: destination, cursor: "180" }, { route: destination, cursor: "180" }]);
+      expect(messenger.attempted.map(output => output.sourceId)).toEqual([prior.id]);
+      expect(errors).toEqual([unavailable]);
+    } finally {
+      response.resolve([]);
+      clock.mockRestore();
+    }
+  }, 10_000);
+
   test("migrated route metadata never resurrects obsolete legacy destinations", async () => {
     const { runtime, store, messenger } = fixture();
     const legacy = route(null, { guildId: null });
@@ -8468,6 +8791,31 @@ describe("real Store runtime coordination", () => {
     expect(worker.prompts).toHaveLength(2);
     expect(main.prompts).toHaveLength(2);
     expect(messenger.threadSources).toEqual([original.messageId]);
+  });
+
+  test("HEAD delegates an addressed Discord parent request to an authorized Slack thread", async () => {
+    const { runtime, config, store, directory, messenger, hosts } = fixture();
+    config.slack = { botTokenEnv: "TEST_SLACK_BOT_TOKEN", appTokenEnv: "TEST_SLACK_APP_TOKEN", ownerId: "UOWNER",
+      teamId: "TTEAM", allowedChannelIds: ["CWORK"] };
+    const destination = route("1750000000.000030", { platform: "slack", accountId: "TTEAM:UBOT",
+      authorityId: "UOWNER", guildId: "TTEAM", channelId: "CWORK" });
+    const original = { ...message("170", route(null), "Inspect release validation."),
+      discordOriginalText: "<@2> Inspect release validation." };
+    await runtime.start();
+    await admit(runtime, original);
+
+    const lane = await runtime.startLane({ ...selection, sourceId: original.id, destination, title: "Release validation",
+      cwd: directory, kickoff: "I will verify the release in this thread." });
+    await runtime.kick();
+
+    const handoffId = `handoff:${original.id}:lane`;
+    expect(store.ownerSource(handoffId)).toMatchObject({ id: original.id, route: original.route,
+      discordOriginalText: original.discordOriginalText });
+    expect(store.input(handoffId)).toMatchObject({ route: destination, target: lane.id, state: "submitted", text: original.text });
+    expect(store.input(handoffId)?.discordOriginalText).toBeUndefined();
+    expect(messenger.threads).toEqual([]);
+    expect(messenger.sent).toMatchObject([{ id: `${original.id}:kickoff`, route: destination, sourceId: handoffId }]);
+    expect(hosts.get(lane.socketPath)?.prompts[0]?.command.message).toContain(original.text);
   });
 
   test("HEAD lookup and pinned context verify the original bot of a receipt-bound manager journal opening", async () => {

@@ -103,7 +103,7 @@ service or an OS sandbox; see [Design](DESIGN.md).
 
 | Step | What it changes |
 | --- | --- |
-| [Install](#1-install) | Prepares dependencies and the managed ULW integration. Does not start a bot or replace OMP. |
+| [Install](#1-install) | Prepares dependencies and the managed omp-superkit integration. Does not start a bot or replace OMP. |
 | [`setup`](#2-configure) | Writes `config.local.json` and the owner-only, plaintext `config.local.json.env` (`0600`). The final save discloses any needed OMP global memory change and bot avatar updates. Starts no bot or model session. |
 | [`doctor`](#3-start) | Checks local configuration and whether the effective OMP memory backend is enabled, without writing settings or logging into the messengers. |
 | [`start`](#3-start) | Applies the native memory fallback if needed, then starts the detached Gateway and head and connects all configured messengers. |
@@ -161,7 +161,7 @@ bun add --global --trust omp-superagent@0.1.6
 omp-sa --help
 ```
 
-`--trust` allows package lifecycle scripts, including preparation of the managed ULW integration.
+`--trust` allows package lifecycle scripts, including preparation of the managed omp-superkit integration.
 Ensure `bun pm bin --global` is on `PATH`.
 
 <details>
@@ -173,7 +173,7 @@ Alternatively, with Bun on `PATH`:
 npm install --global omp-superagent@0.1.6
 ```
 
-Keep lifecycle scripts enabled for the managed ULW integration.
+Keep lifecycle scripts enabled for the managed omp-superkit integration.
 
 </details>
 
@@ -295,7 +295,10 @@ checkout, use the source installation above, not an older npm release).
    `omp-sa setup` or `omp-sa start` is needed on the worker.
 2. **On the head:** verify the worker's SSH host-key fingerprint with its operator
    and trust it in the head account's `known_hosts`. Use a directly resolvable DNS
-   name/IP, not a nickname from `~/.ssh/config`. Create the enrollment:
+   name/IP, not a nickname from `~/.ssh/config`. If Tailscale SSH handles port 22,
+   use a separate OpenSSH listener on the private network, pin its host key as
+   `[host]:port` in `known_hosts`, and use `dev@linux-box:port` in both `worker add`
+   calls. For the default SSH port:
    ```sh
    omp-sa worker add dev@linux-box --config ./config.local.json
    ```
@@ -314,6 +317,13 @@ checkout, use the source installation above, not an older npm release).
    repeat `worker add` with `--default --local-repo /path/on/head/my-app`.
    Omitting `--local-repo` uses the configured `headCwd`. Other checkouts with
    the same Git origin do not inherit permission to send ordinary tasks there.
+
+Use `omp-sa worker list --config ./config.local.json` to see verified enrollments
+without contacting the workers. To check one now, run
+`omp-sa worker doctor dev@linux-box --config ./config.local.json` using the exact
+enrolled destination, including its port if specified. It checks the worker identity
+and available slots. For a default worker it also verifies the current revision of
+the approved head checkout. A blocked check exits nonzero; neither command starts a lane.
 
 Now ask for a remote lane or name the required platform in chat. Superagent matches
 the repository by Git origin, not folder name; local edits and ignored files are
@@ -387,11 +397,18 @@ See [commands, approvals, and everyday use](docs/OPERATIONS.md#4-명령과-일�
 for command registration, restart and recovery semantics, and platform differences.
 Repository changes alone do not update a running service.
 
-## ULW included
+## SUPER workflows
 
-[omp-superkit](https://github.com/dbc-hbin/omp-superkit) is installed and loaded as a managed integration.
-Use a workflow explicitly, or let the head select one when the authorized task genuinely
-benefits from it. Ordinary work can stay in a direct session, native task, or regular lane.
+[omp-superkit](https://github.com/dbc-hbin/omp-superkit) is installed and loaded as a managed integration;
+loading it does not activate a workflow. To request one in chat, begin the work request
+with `super`, `super-plan`, `super-run`, `super-loop`, `super-research`, or `super-graph`.
+These correspond to the upstream OMP commands `/super`, `/super-plan`, `/super-run`,
+`/super-loop`, `/super-research`, and `/super-graph`, not messenger slash commands.
+See the [workflow table](docs/design/execution.md#workflow-selection) for their purposes,
+installed skill IDs, and exact upstream revision.
+
+The head may select a workflow when the authorized task genuinely benefits from it.
+Ordinary work can stay in a direct session, native task, or regular lane.
 
 Updates apply to new Hosts, not running heads or lanes. See
 [managed integration operations](docs/OPERATIONS.md#필수-관리형-omp-superkit-설치와-갱신)
@@ -428,6 +445,14 @@ recorded versions and scenarios. Offline CI does not verify live accounts or pro
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.
 The mascot reimagines OMP's pi mark as a little superhero.
+
+[Jay (@Momentum96)](https://github.com/Momentum96) contributed the original
+[Discord addressing filter (#29)](https://github.com/dbc-hbin/omp-superagent/pull/29)
+and proposed [remote lane parity (#30)](https://github.com/dbc-hbin/omp-superagent/pull/30),
+[worker onboarding and diagnostics (#32)](https://github.com/dbc-hbin/omp-superagent/pull/32),
+and [macOS GUI workers (#33)](https://github.com/dbc-hbin/omp-superagent/pull/33).
+The enrolled SSH worker keeps its existing launch model; the diagnostics, custom SSH
+port, and remote decision checks build on those proposals, not the GUI launcher.
 
 ## License
 

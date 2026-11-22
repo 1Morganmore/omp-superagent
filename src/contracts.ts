@@ -100,6 +100,8 @@ export interface Inbound {
     readonly option: number;
   };
   text: string;
+  /** Physical Discord content when `text` is an addressed command or a confirmed voice draft. */
+  readonly discordOriginalText?: string;
   /** Adapter-verified routing-only view; an empty string excludes the entire message. */
   readonly routingText?: string;
   receivedAt: number;
@@ -180,7 +182,7 @@ export interface Lane {
 
 export type InputState = "pending" | "submitted" | "done" | "uncertain" | "cancelled";
 export type ActiveInputState = Extract<InputState, "pending" | "submitted" | "uncertain">;
-export const WORKFLOW_NAMES = ["ulw", "mass-ulw", "ulw-plan", "ulw-loop", "ulw-execute", "ulw-research", "jevify"] as const;
+export const WORKFLOW_NAMES = ["super", "super-plan", "super-loop", "super-run", "super-graph", "super-research", "jevify"] as const;
 export type WorkflowName = typeof WORKFLOW_NAMES[number];
 export interface WorkflowChoice {
   name: WorkflowName;

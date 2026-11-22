@@ -6,20 +6,39 @@ import { getBundledModel, getBundledProviders } from "@oh-my-pi/pi-catalog";
 import { ModelRegistry, Settings, AuthStorage, SessionManager, createAgentSession } from "@oh-my-pi/pi-coding-agent";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { listPackageExtensionModules, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { WORKFLOW_NAMES } from "./contracts";
+import { readManagedUlwPackage } from "./managed-ulw";
+import { advertisedWorkflow } from "./workflow";
 
-const packagePath = process.argv[2];
-if (!packagePath) throw new Error("Managed ULW probe requires a package path");
+const packageArg = process.argv[2];
+if (!packageArg) throw new Error("Managed Superkit probe requires a package path");
+const { packagePath, extensionFiles } = readManagedUlwPackage(packageArg);
 const home = process.env.HOME;
 const agentDir = process.env.PI_CODING_AGENT_DIR;
 assert(home && agentDir && resolve(dirname(agentDir)) === resolve(home) && resolve(process.cwd()) === resolve(home),
-  "Managed ULW probe requires the updater's isolated HOME, agent directory and working directory");
+  "Managed Superkit probe requires the updater's isolated HOME, agent directory and working directory");
 let networkAttempts = 0;
-const refuseNetwork = () => { networkAttempts++; throw new Error("Managed ULW probe forbids network and provider calls"); };
+const refuseNetwork = () => { networkAttempts++; throw new Error("Managed Superkit probe forbids network and provider calls"); };
 globalThis.fetch = Object.assign(async () => refuseNetwork(), { preconnect: refuseNetwork });
 
+// Public command names changed; installed skill IDs (also legacy commands,
+// except ultrawork) and the prompt/journal protocol did not.
+const workflows = [
+  ["super-plan", "ulw-plan"],
+  ["super-run", "ulw-execute"],
+  ["super-loop", "ulw-loop"],
+  ["super-graph", "mass-ulw"],
+  ["super-research", "ulw-research"],
+] as const;
+const skillPath = (id: string) => join(packagePath, "skills", id, "SKILL.md");
+const directive = /<ultrawork-mode>([\s\S]*?)<\/ultrawork-mode>/.exec(await readFile(skillPath("ultrawork"), "utf8"))?.[1];
+assert(directive?.trim(), "Managed Superkit must ship a directive in its installed ultrawork skill");
+
 const modules = await listPackageExtensionModules([packagePath], process.cwd(), { plugins: false });
-if (!modules.length) throw new Error("Managed ULW has no discoverable extension");
+assert.deepEqual(await Promise.all(modules.map(module => realpath(module.path))), extensionFiles,
+  "Native OMP discovery must resolve exactly the advertised managed Superkit modules");
 // Use the same supported identity as the native composition fixture, but take
 // every model field from the declared published catalog rather than inventing a provider.
 const model = getBundledModel("xai", "grok-4.5");
@@ -36,8 +55,9 @@ const authStorage = await AuthStorage.create(":memory:");
 try {
   const sessionManager = SessionManager.inMemory(home);
   const loaded = await loadExtensions(modules.map(module => module.path), home);
-  assert.deepEqual(loaded.errors, [], "Native OMP rejected managed ULW");
-  assert.equal(loaded.extensions.length, modules.length, "Native OMP must load every advertised extension");
+  assert.deepEqual(loaded.errors, [], "Native OMP rejected managed Superkit");
+  assert.deepEqual(await Promise.all(loaded.extensions.map(extension => realpath(extension.resolvedPath))), extensionFiles,
+    "Native OMP must load every advertised managed Superkit extension");
   // Render the published SDK's bundled template in the isolated HOME without
   // tools, memory backend, SDK Agent, services, or provider/model execution.
   const { systemPrompt: nativeBase } = await buildSystemPrompt({
@@ -49,7 +69,7 @@ try {
     new ModelRegistry(authStorage, join(home, "models.yml"), { settings }), undefined, settings);
   const errors: unknown[] = [];
   const refuseEffect = (): never => {
-    const error = new Error("Managed ULW prompt probe forbids agent, tool, service and session-control effects");
+    const error = new Error("Managed Superkit prompt probe forbids agent, tool, service and session-control effects");
     errors.push(error);
     throw error;
   };
@@ -88,22 +108,33 @@ try {
       assert.match(preset, /Grok 4\.5/, "Supported model-specific instructions must actually be selected");
       assert(!text.includes(nativeRole), "Model preset did not replace the native role");
       assert.equal(occurrences(text, "<omp-ulw-policy>"), workflow ? 1 : 0,
-        workflow ? "Expected exactly one explicitly activated ULW policy" : "Model-profile loading must not activate ULW");
+        workflow ? "Expected exactly one explicitly activated SUPER policy" : "Ordinary or quoted text must not activate SUPER policy");
       assert.equal(occurrences(text, "</omp-ulw-policy>"), workflow ? 1 : 0);
       if (workflow) {
         const policy = /<omp-ulw-policy>\s*<ultrawork-mode>([\s\S]*?)<\/ultrawork-mode>\s*<\/omp-ulw-policy>/.exec(text)?.[1];
-        assert(policy && policy.trim().length > 200, "Activated ULW policy must contain the workflow directive");
+        assert(policy && policy.trim().length > 200, "Activated SUPER policy must contain the workflow directive");
+        assert.equal(policy, directive, "Activated SUPER policy must use the installed ultrawork directive");
         assert(!nativeBase.join("\n\n").includes(policy), "Workflow policy must come from the candidate hook");
       }
-      assert.deepEqual(errors, [], "Managed ULW native hooks failed");
+      assert.deepEqual(errors, [], "Managed Superkit native hooks failed");
       assert.equal(networkAttempts, 0);
     };
-    const compose = async (prompt: string, base: string[], workflow: boolean) => {
+    const compose = async (prompt: string, base: string[], workflow: boolean, selected?: typeof workflows[number]) => {
       currentSystemPrompt = [...base];
       const result = await runner.emitBeforeAgentStart(prompt, undefined, [...base]);
       const blocks = result?.systemPrompt ?? base;
       currentSystemPrompt = blocks;
       check(blocks, workflow);
+      const pointers = (result?.messages ?? []).flatMap(message =>
+        typeof message === "object" && "customType" in message && message.customType === "omo-ultrawork:directive" ? [message] : []);
+      assert.equal(pointers.length, selected ? 1 : 0, "Only an explicitly selected specialized SUPER invocation may add a workflow directive");
+      if (selected) {
+        const [command, skill] = selected;
+        const content = pointers[0]?.content;
+        assert(typeof content === "string" && content.startsWith(`<omp-${skill}-pointer>`) && content.endsWith(`</omp-${skill}-pointer>`)
+          && content.includes(command) && content.includes(skillPath(skill)),
+          `SUPER command /${command} must point to its installed ${skill} skill`);
+      }
       return blocks;
     };
     // Fresh turns and recomposition must both retain exactly one preset. No
@@ -112,10 +143,20 @@ try {
     for (let turn = 0; turn < 2; turn++) {
       await compose(ordinary, await compose(ordinary, nativeBase, false), false);
     }
-    assert.deepEqual(sessionManager.getBranch(), initialBranch, "Ordinary profile loading must not arm workflow state");
-    const activated = `ulw ${ordinary}`;
+    await compose(`> /super-plan Do not run the quoted task.\n${ordinary}`, nativeBase, false);
+    assert.deepEqual(sessionManager.getBranch(), initialBranch, "Ordinary or quoted input must not arm workflow state");
+    // Graph selects its specialized workflow without arming plain SUPER.
+    await compose(`/super-graph ${ordinary}`, nativeBase, false, ["super-graph", "mass-ulw"]);
+    assert.deepEqual(sessionManager.getBranch(), initialBranch, "SUPER graph selection must not arm plain SUPER state");
     for (let turn = 0; turn < 2; turn++) {
+      const activated = `${turn === 0 ? "super" : "/super"} ${ordinary}`;
       await compose(activated, await compose(activated, nativeBase, true), true);
+    }
+    assert.deepEqual(sessionManager.getBranch().slice(initialBranch.length).flatMap(entry =>
+      entry.type === "custom" && entry.customType === "omo-ultrawork:state" ? [entry.data] : []), [true],
+      "Plain SUPER must arm exactly once under the existing native journal type");
+    for (const selection of workflows) {
+      await compose(`${selection[0]} ${ordinary}`, nativeBase, true, selection);
     }
     assert(sessionManager.getBranch().every(entry => entry.type !== "message"),
       "Workflow activation inspection must not create user/model messages");
@@ -132,16 +173,30 @@ try {
     });
     const resourceReads: string[] = [];
     try {
-      assert.deepEqual(extensionsResult.errors, [], "Published SDK rejected managed ULW resources");
+      assert.deepEqual(extensionsResult.errors, [], "Published SDK rejected managed Superkit resources");
       assert.deepEqual(extensionsResult.extensions.filter(extension => !extension.path.startsWith("<inline-"))
         .map(extension => extension.resolvedPath), loaded.extensions.map(extension => extension.resolvedPath),
       "Resource inspection must load exactly the candidate modules, apart from SDK-owned inline factories");
+      // Use the same native catalog as get_available_commands. A matching file
+      // template or an extension with a mismatched descriptor is not routable.
+      const commands = await buildAvailableSlashCommands(resources);
+      for (const name of WORKFLOW_NAMES) {
+        if (name !== "jevify") assert(advertisedWorkflow({ commands }, name),
+          `Managed Superkit extension command /${name} is not advertised with its canonical descriptor`);
+      }
+      for (const name of ["ulw", ...workflows.map(([, skill]) => skill)]) {
+        assert(commands.some(command => command.name === name && command.source === "extension"),
+          `Managed Superkit legacy extension alias /${name} was not registered`);
+      }
       assert(resources.getEnabledToolNames().includes("read"), "Native read must remain available");
       assert(resources.getEnabledToolNames().includes("task"), "Native task must remain available");
-      const root = await realpath(packagePath);
-      const skills = resources.skills.filter(skill => skill.filePath.startsWith(root + "/"));
-      assert(skills.length, "Managed ULW must expose its actual skills through native discovery");
-      const read = resources.getToolByName("read")!;
+      const skills = resources.skills.filter(skill => skill.filePath.startsWith(packagePath + "/"));
+      for (const id of ["ultrawork", ...workflows.map(([, skill]) => skill)]) {
+        assert.equal(skills.find(skill => skill.name === id)?.filePath, skillPath(id),
+          `Native Superkit skill discovery must retain skill://${id} and its installed path`);
+      }
+      const read = resources.getToolByName("read");
+      assert(read, "Native read tool must be resolvable");
       for (const skill of skills) {
         const uri = `skill://${skill.name}:raw`;
         const output = await read.execute(`managed-ulw-resource-${resourceReads.length}`, { path: uri });
@@ -161,7 +216,7 @@ try {
   } finally {
     try {
       await runner.emit({ type: "session_shutdown" });
-      assert.deepEqual(errors, [], "Managed ULW native hooks failed");
+      assert.deepEqual(errors, [], "Managed Superkit native hooks failed");
       assert.equal(networkAttempts, 0);
     } finally {
       runner.clearManagedTimers();

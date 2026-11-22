@@ -29,14 +29,15 @@ impl Drop for Task {
 impl Task {
     pub async fn start(state: Arc<State>) -> Result<Self> {
         let login = Login::discover(&state).await?;
+        let backlog = state.ctx.discord_intake().last()?;
         let (started, startup) = oneshot::channel();
         let cancel = CancellationToken::new();
         let child = cancel.clone();
         let handle = tokio::spawn(async move {
             let interactions = TaskTracker::new();
             let (ready, admission) = oneshot::channel();
-            // Only plausible owner input enters this queue. Do not backpressure
-            // the socket, whose heartbeats and voice revocations remain live.
+            // Owner markers point at committed rows. Only live effects still
+            // require the volatile queue; the socket never waits for REST.
             let (incoming, receiver) = mpsc::channel(1024);
             let intake_state = Arc::clone(&state);
             let intake_cancel = child.clone();
@@ -44,7 +45,7 @@ impl Task {
                 tokio::select! {
                     biased;
                     () = intake_cancel.cancelled() => (),
-                    () = ordered_intake(intake_state, receiver, ready) => (),
+                    () = ordered_intake(intake_state, receiver, ready, backlog) => (),
                 }
             });
             let dispatcher = Dispatcher::new(state, incoming, interactions.clone(), child.clone());

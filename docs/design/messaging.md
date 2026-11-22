@@ -23,6 +23,26 @@ topic is a binding key, not a fabricated conversation or thread ID.
 | [Telegram](../../gateway/src/telegram.rs) | Bot API `getMe` identifies the bot. Use the configured real owner and allowed chats; anonymous, forwarded, bot-mediated and business identities do not confer authority. Long poll only after startup approval reconciliation; refuse an active webhook without removing it. |
 | [Slack](../../gateway/src/slack.rs) | Socket Mode and the Web API, with bot/workspace and active human owner checks and actual channel membership. No group DMs or public HTTP endpoint. Known-route history is limited by cursors, scopes, membership, retention and rate limits. |
 
+Set `discord.requireAddressing` to `true` to filter ordinary owner messages in
+allowed Discord guild parent channels, including message edits and history
+catch-up. The default is `false`. A message must actually mention the
+authenticated bot or be a verified reply in that conversation to a message it
+authored. Typing the bot's name, mentioning a different bot, or copying a bot
+message without actually addressing the bot does not count.
+Authorized thread conversations can continue without addressing. When enabled,
+verified inline mentions of this bot are removed from ordinary owner input in
+guild parent channels and threads, so a text command still parses as a command.
+The owner, guild and parent-channel checks still apply. Owner DMs, Discord
+application commands, approval components and restricted group rooms retain
+their existing policies.
+
+The Gateway records pending owner-message candidates before advancing the
+Discord WebSocket sequence. Until it verifies the sender and route, it keeps
+only lookup coordinates and revision evidence, not message or attachment
+content. A reply lookup can be retried; it must not substitute a newer edit
+or replay a voice command. The head pins a failed Discord history scan to its
+original cursor so that later live messages cannot hide the missed interval.
+
 ## Restricted group rooms
 
 `groupRooms` opts a specific server/workspace/chat and parent channel into a

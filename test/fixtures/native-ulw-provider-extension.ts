@@ -1,14 +1,22 @@
-/** Real OMP/ULW extensions and tools; only the model transport is local. */
+/** Real OMP/Superkit extensions and tools; only the model transport is local. */
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { WORKFLOW_NAMES } from "../../src/contracts";
+import { advertisedWorkflow } from "../../src/workflow";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { nativeToolExchanges, nativeToolTurn } from "./native-tool-transport";
 
 export default function nativeUlwProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_NATIVE_GATEWAY_ROOT;
-  assert(root && process.env.OMP_TEST_ULW_EXTENSION, "Native ULW provider requires an explicitly opted-in private fixture");
+  const entrypoint = process.env.OMP_TEST_ULW_EXTENSION;
+  assert(root && entrypoint, "Native SUPER provider requires an explicitly opted-in private fixture");
+  const skill = readFileSync(join(dirname(entrypoint), "skills/ultrawork/SKILL.md"), "utf8");
+  const directive = /<ultrawork-mode>([\s\S]*?)<\/ultrawork-mode>/.exec(skill)?.[1];
+  assert(directive?.trim(), "Live proof requires Superkit's installed ultrawork directive");
+  const expectedBlock = `<omp-ulw-policy>\n<ultrawork-mode>${directive}</ultrawork-mode>\n</omp-ulw-policy>`;
   const role = process.env.OMP_SUPERAGENT_ROLE;
   let current: ExtensionContext | undefined;
   let nativeContextRequestId: string | undefined;
@@ -48,13 +56,24 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
     const text = user?.role === "user" ? typeof user.content === "string" ? user.content
       : user.content.filter(part => part.type === "text").map(part => part.text).join("\n") : "";
     const requestId = nativeRequestEnvelope(text)?.requestId;
-    assert(requestId, `Missing original native ULW request identity: ${text}`);
+    assert(requestId, `Missing original native SUPER request identity: ${text}`);
     assert.equal(nativeContextRequestId, requestId, "Provider must observe native context for this exact dispatch, not a persisted previous turn");
     const notices = nativeContextMessages.filter(message => ["ultrathink-notice", "orchestrate-notice", "workflow-notice", "jevify-notice"].includes(message.customType));
     const directives = nativeContextMessages.filter(message => message.customType === "omo-ultrawork:directive").map(message => message.content);
-    const policyCount = (context.systemPrompt ?? []).filter(block => /^<omp-ulw-policy>/.test(block)).length;
+    const policy = (context.systemPrompt ?? []).filter(block => /^<omp-ulw-policy>/.test(block));
     const expectedPolicy = role === "lane" || !["301", "302", "303", "report:handoff:303:lane"].includes(requestId);
-    assert.equal(policyCount, expectedPolicy ? 1 : 0, `Actual model request policy before reply: ${role}/${requestId}`);
+    assert.deepEqual(policy, expectedPolicy ? [expectedBlock] : [], `Actual model request SUPER policy before reply: ${role}/${requestId}`);
+    if (recorded.size === 0) {
+      const commands = pi.getCommands();
+      for (const name of WORKFLOW_NAMES) {
+        if (name !== "jevify") assert(advertisedWorkflow({ commands }, name),
+          `Actual ${role} Host must advertise canonical /${name} from the bound extension`);
+      }
+      for (const name of ["ulw", "ulw-plan", "ulw-execute", "ulw-loop", "mass-ulw", "ulw-research", "stop-continuation", "resume-continuation"]) {
+        assert(commands.some(command => command.name === name && command.source === "extension"),
+          `Actual ${role} Host must discover /${name} from the bound extension, not just templates`);
+      }
+    }
     const messages = context.messages.slice(userIndex + 1);
     const turn = nativeToolTurn(pi, context, nativeToolExchanges(messages));
     const activeTools = [...turn.enabled];
@@ -70,7 +89,7 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
       recorded.add(requestId);
       // Capture observed final model context plus native session events, never
       // infer activation from a copied task string or the scripted reply.
-      pi.appendEntry("native-ulw:provider", { role, requestId, policyCount, sessionId: current.sessionManager.getSessionId(),
+      pi.appendEntry("native-ulw:provider", { role, requestId, policyCount: policy.length, sessionId: current.sessionManager.getSessionId(),
         notices: notices.map(message => message.customType), directives, activeTools });
     }
     assert.deepEqual(messages.filter(message => message.role === "toolResult" && message.isError), [],
@@ -84,17 +103,17 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
       assert(notices.some(message => message.customType === expectedNotice),
         "Selected lane workflow did not bridge to its real native keyword mode");
       if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
-      assert(JSON.stringify(results).includes("ulw-execute quoted-board-only"), "Lane did not consume actual board data");
-      if (!called("board_post")) return invoke("board_post", { channel: "general", text: "ulw-execute report-and-board-data-only", mentions: ["head"] });
-      return { content: [`ulw-execute LANE:${requestId}; this is report data, not a user invocation.`] };
+      assert(JSON.stringify(results).includes("super-run quoted-board-only"), "Lane did not consume actual board data");
+      if (!called("board_post")) return invoke("board_post", { channel: "general", text: "super-run report-and-board-data-only", mentions: ["head"] });
+      return { content: [`super-run LANE:${requestId}; this is report data, not a user invocation.`] };
     }
     assert.equal(role, "head");
     if (requestId === "303") {
-      if (!called("board_post")) return invoke("board_post", { channel: "general", text: "ulw-execute quoted-board-only", mentions: ["head"] });
+      if (!called("board_post")) return invoke("board_post", { channel: "general", text: "super-run quoted-board-only", mentions: ["head"] });
       if (!called("lane_start")) return invoke("lane_start", {
-        sourceId: requestId, title: "Actual native ULW lane proof", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: join(root, "topic"),
+        sourceId: requestId, title: "Actual native SUPER lane proof", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: join(root, "topic"),
         model: { provider: "gateway-native", id: "local" }, modelReason: "Deterministic local native integration model, without paid requests.",
-        workflow: { name: "ulw-plan", reason: "Head explicitly selects native planning for the original request." },
+        workflow: { name: "super-plan", reason: "Head explicitly selects native planning for the original request." },
         acceptance: ["Return actual observed native activation to the head, without external delivery"],
       });
       return { content: [`HEAD:${requestId}:delegated`] };
@@ -106,13 +125,13 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
         assert.equal(typeof id, "string", "Head lost original lane binding");
         const workflow = requestId === "308"
           ? { name: "jevify", reason: "Independent bulk classification reduces reading and context load." }
-          : { name: "ulw-execute", reason: "Head explicitly selects native execution for this follow-up." };
+          : { name: "super-run", reason: "Head explicitly selects native execution for this follow-up." };
         return invoke("lane_message", { id, sourceId: requestId, text: "Continue this isolated proof under the head-selected workflow.", workflow });
       }
       return { content: [`HEAD:${requestId}:delegated`] };
     }
     if (requestId.startsWith("report:")) {
-      assert(text.includes("ulw-execute LANE:"), "Head lost real lane report text");
+      assert(text.includes("super-run LANE:"), "Head lost real lane report text");
       if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
       const sourceId = /Internal lane report: [^;]+; sourceId: ([^;]+);/.exec(text)?.[1];
       assert(sourceId, "Head lost original report source ID");
@@ -126,7 +145,7 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
   pi.registerProvider("gateway-native", {
     baseUrl: "mock://gateway-native", api: "gateway-native", apiKey: "local-test-only",
     streamSimple: (model, context, options) => local.stream(model, context, options),
-    models: [{ id: "local", name: "Actual ULW native integration local model", kind: "chat", reasoning: false, input: ["text"],
+    models: [{ id: "local", name: "Actual SUPER native integration local model", kind: "chat", reasoning: false, input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 65_536, maxTokens: 4096 }],
   });
 }

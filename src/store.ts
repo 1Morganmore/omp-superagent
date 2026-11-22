@@ -32,7 +32,7 @@ import type { ApprovalResolution } from "./contracts";
 import { captureDecision, resolveDecision } from "./decisions";
 import { isLaneModel, laneModelArgument, sameLaneModel } from "./lane-models";
 import { laneData, readLaneRows, toLane, type LaneRow } from "./lane-rows";
-import { workflowChoice } from "./workflow";
+import { storedWorkflowName, workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
 import { existingWorkspace, TOPIC_CHOICE_WAIT_MS, topicRequest } from "./topic-request";
 import type { CronUpdate } from "./cron-jobs";
@@ -111,8 +111,8 @@ interface OutputRow {
 interface ApprovalRow { data: string; state: Approval["state"]; remote_id: string | null }
 
 const toInput = (row: InputRow): InputRecord => {
-  const input = JSON.parse(row.data) as Inbound & { workflow?: WorkflowActivation };
-  return { ...input, workflow: input.workflow ?? null, target: row.target, state: row.state,
+  const { workflow, ...input } = JSON.parse(row.data) as Inbound & { workflow?: Omit<WorkflowActivation, "name"> & { name: string } };
+  return { ...input, workflow: workflow ? { ...workflow, name: storedWorkflowName(workflow.name) } : null, target: row.target, state: row.state,
     requestId: row.request_id, generation: row.generation };
 };
 const toOutput = (row: OutputRow): OutputRecord => ({
@@ -127,6 +127,7 @@ const toApproval = (row: ApprovalRow): Approval => ({
 });
 const inboundData = (input: Inbound): Inbound => ({
   id: input.id, route: input.route, messageId: input.messageId, text: input.text,
+  ...(input.discordOriginalText === undefined ? {} : { discordOriginalText: input.discordOriginalText }),
   ...(input.routingText === undefined ? {} : { routingText: input.routingText }),
   ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
   ...(input.invocationId === undefined ? {} : { invocationId: input.invocationId }),
@@ -211,6 +212,10 @@ export class Store implements StorePort {
   }
 
   receive(input: Inbound, target: string | null, metadata: Readonly<Record<string, string>> = {}, workflow: WorkflowActivation | null = null): boolean {
+    if (input.discordOriginalText !== undefined && (input.route.platform !== "discord" || input.messageId === null
+      || input.interactionId !== undefined || typeof input.discordOriginalText !== "string")) {
+      throw new Error("Original Discord text requires a physical Discord message");
+    }
     const slackInvocation = input.route.platform === "slack" && typeof input.invocationId === "string" && /^[a-f0-9]{64}$/.test(input.invocationId);
     const selection = input.pickerSelection;
     if (selection ? input.messageId !== null || input.interactionId !== undefined || input.invocationId !== undefined
@@ -236,8 +241,10 @@ export class Store implements StorePort {
             return file.url === url ? file : { ...file, url };
           });
           if (attachments.some((file, index) => file !== existing.attachments[index])) {
-            this.db.query("UPDATE inputs SET data = ? WHERE id = ? AND state = 'pending'")
-              .run(JSON.stringify({ ...inboundData(existing), attachments, workflow: existing.workflow }), input.id);
+            // Refresh only URLs. In particular, do not rewrite the original
+            // activation in a pre-rename input as a side effect of redelivery.
+            this.db.query("UPDATE inputs SET data = json_set(data, '$.attachments', json(?)) WHERE id = ? AND state = 'pending'")
+              .run(JSON.stringify(attachments), input.id);
           }
         }
         return false; // A replay never changes its current assignment or state.
