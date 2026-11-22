@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { activeManagedUlw, managedUlwLaunchExtensions, managedUlwStatus, updateManagedUlw, type UlwManifest } from "../src/managed-ulw";
 import { connect, startHost, type HostOptions } from "../src/host";
@@ -67,6 +67,18 @@ async function fixture(packageName = "omp-ulw") {
   await command(["git", "config", "user.name", "Managed ULW fixture"], remote);
   await mkdir(join(remote, "skills/fixture"), { recursive: true });
   await writeFile(join(remote, "skills/fixture/SKILL.md"), "---\nname: ulw-local-fixture\ndescription: Local git install fixture.\n---\nRead only fixture.\n");
+  for (const id of ["ultrawork", "ulw-plan", "ulw-execute", "ulw-loop", "mass-ulw", "ulw-research"]) {
+    await mkdir(join(remote, "skills", id));
+    const body = id === "ultrawork" ? `<ultrawork-mode>
+The current session is in SUPER mode.
+Carry the explicitly requested objective through the authorized work. Establish
+concrete completion criteria, inspect the implementation, and resolve dependent
+steps in order. Preserve approval boundaries and cancellation. Finish with
+evidence for completed criteria and an honest account of blocked requirements.
+</ultrawork-mode>` : "Independent fixture for native skill discovery.";
+    await writeFile(join(remote, "skills", id, "SKILL.md"),
+      `---\nname: ${id}\ndescription: Local git install fixture for ${id}.\n---\n${body}\n`);
+  }
   await writeFile(join(remote, "resource.txt"), "resource-v1");
   await writeFile(join(remote, "package.json"), JSON.stringify({ name: packageName, version: "0.0.0-fixture", type: "module",
     omp: { extensions: ["./index.ts"] }, scripts: { postinstall: "exit 91", build: "exit 92" } }));
@@ -349,7 +361,7 @@ test("stock launch refuses to change project package resource scope while exclud
   await expect(f.launch()).rejects.toThrow(`change project resource scope to user scope: ${f.unrelated}`);
 }, 60_000);
 
-test("real preparation CLI installs, reads back provenance/resources/skills, and ignores arbitrary package scripts", async () => {
+test("real preparation CLI accepts reworded policy, preserves provenance and skills, and ignores arbitrary package scripts", async () => {
   const f = await fixture();
   const original = await readFile(join(f.remote, "index.ts"), "utf8");
   const output = JSON.parse(await f.cli());
@@ -412,7 +424,19 @@ test("changed remote activates atomically; unchanged remote and failed updates r
   expect(await readFile(join(secondPath, "index.ts"), "utf8")).toBe(secondBytes);
 }, 90_000);
 
-for (const defect of ["no-effect", "empty-preset", "missing-workflow", "duplicate-preset", "duplicate-workflow"]) {
+for (const [defect, rejection] of [
+  ["no-effect", "exactly one applied model preset"],
+  ["empty-preset", "working instructions"],
+  ["missing-workflow", "exactly one explicitly activated SUPER policy"],
+  ["duplicate-preset", "exactly one applied model preset"],
+  ["duplicate-workflow", "exactly one explicitly activated SUPER policy"],
+  ["missing-command", "extension command /super-run is not advertised with its canonical descriptor"],
+  ["missing-descriptor", "extension command /super-run is not advertised with its canonical descriptor"],
+  ["mismatched-policy", "Activated SUPER policy must use the installed ultrawork directive"],
+  ["quoted-workflow", "Ordinary or quoted text must not activate SUPER policy"],
+  ["plain-pointer", "Only an explicitly selected specialized SUPER invocation may add a workflow directive"],
+  ["renamed-skill", "Native Superkit skill discovery must retain skill://ulw-execute and its installed path"],
+] as const) {
   test(`loadable ${defect} candidate fails native prompt composition before changing the active pointer`, async () => {
     const f = await fixture();
     await updateManagedUlw(f.options);
@@ -420,6 +444,11 @@ for (const defect of ["no-effect", "empty-preset", "missing-workflow", "duplicat
     const pointer = await readFile(join(f.managed, "active.json"), "utf8");
     const installed = await readFile(join(active, "index.ts"), "utf8");
     await writeFile(join(f.remote, "index.ts"), await promptExtension("incompatible", defect));
+    if (defect === "renamed-skill") {
+      const path = join(f.remote, "skills/ulw-execute/SKILL.md");
+      const original = await readFile(path, "utf8");
+      await writeFile(path, original.replace("name: ulw-execute", "name: super-run"));
+    }
     const candidate = await f.commit();
     await expect(updateManagedUlw(f.options)).rejects.toThrow("previous active revision retained");
     expect(await readFile(join(f.managed, "active.json"), "utf8")).toBe(pointer);
@@ -429,9 +458,7 @@ for (const defect of ["no-effect", "empty-preset", "missing-workflow", "duplicat
     expect(status.revision).toBe(f.first);
     expect(status.upstreamRevision).toBe(candidate);
     expect(status.updating).toBe(false);
-    expect(status.error).toContain(defect === "missing-workflow" || defect === "duplicate-workflow"
-      ? "exactly one explicitly activated ULW policy" : defect === "empty-preset"
-        ? "working instructions" : "exactly one applied model preset");
+    expect(status.error).toContain(rejection);
     expect((await readdir(f.managed)).filter(entry => entry.startsWith(".stage-"))).toEqual([]);
     expect(await readdir(join(f.managed, "revisions"))).toEqual([f.first]);
   }, 90_000);
@@ -447,7 +474,8 @@ test("a previously prepared loadable no-op revision must pass the new compositio
   // Simulate an immutable package accepted by the former import-only gate.
   const revisionRoot = join(f.managed, "revisions", candidate);
   const prepared = join(revisionRoot, "package");
-  await mkdir(join(prepared, "skills"), { recursive: true });
+  await mkdir(prepared, { recursive: true });
+  await cp(join(f.remote, "skills"), join(prepared, "skills"), { recursive: true });
   for (const file of ["index.ts", "package.json", "resource.txt"]) {
     await writeFile(join(prepared, file), await readFile(join(f.remote, file)), { mode: 0o444 });
   }

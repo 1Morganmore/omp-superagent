@@ -93,7 +93,7 @@ OS 샌드박스가 아닙니다. 자세한 내용은 [설계(영문)](DESIGN.md)
 
 | 단계 | 바뀌는 것 |
 | --- | --- |
-| [설치](#1-설치) | 관리형 의존성과 ULW 통합을 준비합니다. 봇을 시작하거나 설치된 OMP를 교체하지 않습니다. |
+| [설치](#1-설치) | 의존성과 관리형 omp-superkit 통합을 준비합니다. 봇을 시작하거나 설치된 OMP를 교체하지 않습니다. |
 | [`setup`](#2-설정과-자격-증명) | `config.local.json`과 소유자 전용 평문 파일 `config.local.json.env`(`0600`)를 만듭니다. 최종 저장 전에 필요한 OMP 전역 메모리 변경과 봇 프로필 사진 교체를 안내합니다. 봇·모델 세션은 시작하지 않습니다. |
 | [`doctor`](#3-진단-후-명시적으로-시작) | 메신저에 로그인하거나 설정을 변경하지 않고 로컬 설정과 OMP 메모리 백엔드의 실효 상태를 진단합니다. |
 | [`start`](#3-진단-후-명시적으로-시작) | 필요한 경우 OMP 메모리 기본값을 저장한 뒤 detached Gateway와 헤드를 시작하고 설정한 모든 플랫폼에 연결합니다. |
@@ -144,7 +144,7 @@ bun add --global --trust omp-superagent@0.1.6
 omp-sa --help
 ```
 
-`--trust`는 관리형 ULW 통합 준비 등 패키지 설치 스크립트 실행을 허용합니다.
+`--trust`는 관리형 omp-superkit 통합 준비 등 패키지 설치 스크립트 실행을 허용합니다.
 `bun pm bin --global`의 출력 경로를 `PATH`에 포함하세요.
 
 <details>
@@ -156,7 +156,7 @@ Bun이 `PATH`에 있다면 npm으로도 설치할 수 있습니다.
 npm install --global omp-superagent@0.1.6
 ```
 
-postinstall이 필수 관리형 ULW 통합을 준비하므로 설치 스크립트를 생략하지 마세요.
+postinstall이 필수 관리형 omp-superkit 통합을 준비하므로 설치 스크립트를 생략하지 마세요.
 
 </details>
 
@@ -357,11 +357,18 @@ Codex 구독 음성 또는 별도 과금되는 API 음성 중 하나를 선택�
 [명령과 일상 사용](docs/OPERATIONS.md#4-명령과-일상-사용)을 참고하세요.
 저장소를 편집했다고 현재 운영 서비스에 반영되는 것은 아닙니다.
 
-## ULW
+## SUPER 워크플로
 
 공식 [omp-superkit](https://github.com/dbc-hbin/omp-superkit)은 필수 관리형 통합입니다.
-사용자의 명시적 요청이나 허가된 작업에 구체적으로 도움이 된다는 헤드의 판단으로 workflow를
-선택합니다. 일반 작업은 직접 세션·native task·일반 레인으로 처리할 수 있습니다.
+통합을 로드하는 것만으로 워크플로가 활성화되지는 않습니다. 메신저에서 워크플로를 요청하려면
+작업 요청의 첫 단어로 `super`, `super-plan`, `super-run`, `super-loop`, `super-research`,
+`super-graph` 중 하나를 사용하세요. 이에 대응하는 `/super`, `/super-plan`, `/super-run`,
+`/super-loop`, `/super-research`, `/super-graph`는 OMP 명령이지 메신저 슬래시 명령이 아닙니다.
+각 용도와 설치된 스킬 ID, 기준 upstream 리비전은 [워크플로 표(영문)](docs/design/execution.md#workflow-selection)를
+참고하세요.
+
+헤드는 허가된 작업에 구체적으로 도움이 될 때 워크플로를 선택할 수 있습니다.
+일반 작업은 직접 세션·native task·일반 레인으로 처리할 수 있습니다.
 
 업데이트는 새 Host에 적용하며 실행 중인 헤드·레인의 버전은 유지합니다.
 [관리형 통합 운영](docs/OPERATIONS.md#필수-관리형-omp-superkit-설치와-갱신)에서 갱신·활성화 동작을 확인하세요.

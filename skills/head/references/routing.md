@@ -193,30 +193,34 @@ entrusted objective, not permission to expand it or impersonate the user.
   select it without that token. Follow the native notice and the judge help topic
   advertised by `eval` (`help://eval/judge` on OMP 19.1). Admission is not
   activation: native settings and eval availability apply.
-  No ULW skill lookup, model change, extra lane, goal, or artifacts are required.
+  No SUPER skill lookup, model change, extra lane, goal, or artifacts are required.
   Require coverage and directly checked flagged evidence, not just a batch result.
-- **ULW:** For a head-selected method, name the lighter direct/task/plain-lane
+- **SUPER:** For a head-selected method, name the lighter direct/task/plain-lane
   alternative, its evidenced limitation, and the durable artifact, review gate,
   dependency or recovery benefit worth the overhead. For ambiguous choices use
   native advisory judge where available. Read the selected installed skill before
-  dispatch (`skill://ultrawork` for `ulw`) and follow its own artifacts, approvals,
-  attempt bounds, and review/recovery rules. Don't ask for brand consent; real
-  cost, scope, and approval decisions still belong to the owner.
+  dispatch using the exact `skill://` identifier below. Follow its artifact,
+  approval, attempt and review/recovery rules. Don't ask for brand consent;
+  real cost, scope, and approval decisions still belong to the owner.
 
-| `workflow.name` | Choose for |
-| --- | --- |
-| `ulw` | Explicit native-goal working policy; no specialty mode or implicit RPC goal. |
-| `ulw-plan` | A decision-complete plan and review as the deliverable; not implementation. |
-| `ulw-execute` | Authorized execution of a selected plan requiring durable resume and evidence. Native plan approval alone does not select it. |
-| `ulw-loop` | Multiple real goals with dependencies, verified checkpoints, and recovery; not waiting or a watchdog. |
-| `mass-ulw` | Consumed producer artifacts or dependency-ordered work with durable handoffs; not ordinary parallelism. |
-| `ulw-research` | Deep/contested inquiry needing independent evidence, counter-search, and cited synthesis; not ordinary lookup. |
+Use the command without `/` as `workflow.name`. Upstream skill identifiers are
+different from invocation names; do not derive a skill URL from `workflow.name`.
+
+| Operator invocation | `workflow.name` | Installed skill | Choose for |
+| --- | --- | --- | --- |
+| `/super` | `super` | `skill://ultrawork` | Explicit working policy; no specialty mode or implicit RPC goal. |
+| `/super-plan` | `super-plan` | `skill://ulw-plan` | A decision-complete plan and review as the deliverable; not implementation. |
+| `/super-run` | `super-run` | `skill://ulw-execute` | Authorized execution of a selected plan requiring durable resume and evidence. Native plan approval alone does not select it. |
+| `/super-loop` | `super-loop` | `skill://ulw-loop` | Multiple real goals with dependencies, verified checkpoints, and recovery; not waiting or a watchdog. |
+| `/super-research` | `super-research` | `skill://ulw-research` | Deep/contested inquiry needing independent evidence, counter-search, and cited synthesis; not ordinary lookup. |
+| `/super-graph` | `super-graph` | `skill://mass-ulw` | Consumed producer artifacts or dependency-ordered work with durable handoffs; not ordinary parallelism. |
 
 Reuse the existing objective and artifact owner. Runtime puts the actual native
 invocation outside fenced context and applies the installed bridge's default
 mode only when original keywords allow it; don't rewrite/replay the envelope or
-strip quoted/negated keywords. ULW requires native advertisement of the exact
-extension command; missing capability cancels rather than degrading to plain
-work. `jevify` has no ULW command preflight. Selection, skill loading, native mode
-activation, and goal creation are separate facts. Preserve native settings,
-permissions, approvals, and stop semantics; never claim an unobserved activation.
+strip quoted/negated keywords. Runtime checks the Host's exact extension command
+advertisement for the selected SUPER workflow; missing capability cancels rather
+than degrading to plain work. `jevify` has no SUPER command preflight.
+Selection, skill loading, native mode activation, and goal creation are separate
+facts. Preserve native settings, permissions, approvals, and stop semantics;
+never claim an unobserved activation.

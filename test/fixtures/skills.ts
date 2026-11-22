@@ -77,7 +77,7 @@ const hostArgs = await buildHostArgs({
 const extensionPaths = hostArgs.flatMap((arg, index) => arg === "-e" ? [hostArgs[index + 1]!] : []);
 if (ulwPath) {
   const managedIndex = extensionPaths.indexOf(path.dirname(ulwPath));
-  assert(managedIndex >= 0, "Managed ULW package must be explicitly loaded");
+  assert(managedIndex >= 0, "Managed omp-superkit package must be explicitly loaded");
   const [managedPackage] = extensionPaths.splice(managedIndex, 1);
   if (extensionOrder === "ulw-first") extensionPaths.unshift(managedPackage!);
   else extensionPaths.push(managedPackage!);
@@ -130,7 +130,7 @@ try {
       .filter(extension => extension.resolvedPath === ulwPath || extension.resolvedPath === extensionPath)
       .map(extension => extension.resolvedPath);
     assert.deepEqual(executableOrder, extensionOrder === "ulw-first" ? [ulwPath, extensionPath] : [extensionPath, ulwPath],
-      "The actual native loader must preserve the requested ULW/role hook order");
+      "The actual native loader must preserve the requested omp-superkit/role hook order");
   }
   const runner = session.extensionRunner!;
   assert.equal(runner.createContext().agent.kind, kind);
@@ -182,7 +182,7 @@ try {
       assert(!combined.includes("# Lane operating contract"));
     }
     if (ulwPath) {
-      assert.equal(occurrences(combined, "<omp-model-preset>"), 1, "A real supported ULW preset must be active");
+      assert.equal(occurrences(combined, "<omp-model-preset>"), 1, "A real supported omp-superkit preset must be active");
       const preset = /<omp-model-preset>([\s\S]*?)<\/omp-model-preset>/.exec(combined)?.[1];
       assert(preset?.includes(compositionModel.name), "Composed preset must contain instructions for the selected model");
       assert(!combined.includes("<omp-ulw-policy>"), "Loading a model profile is not workflow activation");
@@ -491,12 +491,19 @@ try {
     check("lane_inspect", {}, true);
     check("lane_message", { id: "lane", text: "instruction", sourceId: "source" }, true);
     check("lane_message", { id: "lane", text: "instruction" }, false);
-    for (const name of ["ulw", "ulw-plan", "ulw-execute", "ulw-loop", "mass-ulw", "ulw-research", "jevify"]) {
-      const workflow = { name, reason: "Selected method serves the authorized objective" };
+    // OMP's real tool validator must expose canonical workflow choices, not input aliases or skill IDs.
+    const reason = "Selected method serves the authorized objective";
+    for (const name of ["super", "super-plan", "super-run", "super-loop", "super-research", "super-graph", "jevify"]) {
+      const workflow = { name, reason };
       check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, workflow }, true);
       check("lane_message", { id: "lane", text: "instruction", sourceId: "source", workflow }, true);
     }
-    for (const workflow of [{ name: "arbitrary", reason: "unknown" }, { name: "ulw-plan" }, { name: "ulw", reason: "" }]) {
+    for (const workflow of [
+      ...["arbitrary", "/super", "ulw", "ultrawork", "ulw-plan", "ulw-execute", "ulw-loop", "ulw-research", "mass-ulw"]
+        .map(name => ({ name, reason })),
+      { name: "super-plan" },
+      { name: "super", reason: "" },
+    ]) {
       check("lane_start", { sourceId: "source", title: "title", cwd: workspace, kickoff, ...modelChoice, workflow }, false);
       check("lane_message", { id: "lane", text: "instruction", sourceId: "source", workflow }, false);
     }

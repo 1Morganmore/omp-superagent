@@ -378,15 +378,17 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   OMP. Registration is distinct from Gateway readiness and does not establish
   successful reboot or operational-account round-trip verification.
 
-## Managed ULW: separately licensed package and bundled skills
+## Managed omp-superkit: separately licensed package and bundled skills
 
 - Source: [dbc-hbin/omp-superkit](https://github.com/dbc-hbin/omp-superkit) (formerly `omp-ulw`);
   management configuration: `upstream/ulw.json`. Packages are prepared separately
   under `.upstream/ulw/revisions/<revision>/package`; `active.json` identifies the
-  selected revision. The inspected snapshot was
+  selected revision. The previously inspected snapshot was
   [`1625e0de2e4807f1cfdac19e6b54578af1329951`](https://github.com/dbc-hbin/omp-superkit/tree/1625e0de2e4807f1cfdac19e6b54578af1329951).
+  The current SUPER command and skill contract was inspected at
+  [`c11a6e4e185f9c31f484a05a13528ef724337bc1`](https://github.com/dbc-hbin/omp-superkit/tree/c11a6e4e185f9c31f484a05a13528ef724337bc1).
 - This project's MIT license does not grant a license to that separate package or
-  override its per-file licenses and attribution. The inspected snapshot has no
+  override its per-file licenses and attribution. Neither inspected snapshot has a
   root LICENSE or `package.json` license declaration; no blanket package license
   is asserted here.
 - Bundled `skills/{browser,coding-agent-sessions,ultimate-browsing}/LICENSE.md`
@@ -400,7 +402,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   (`Copyright (c) 2026 T3 Tools Inc.`).
 - Consult the selected package's license and attribution files before using or
   redistributing it. Preserve those files and applicable modification notices;
-  the Dori non-copy statements above do not imply that ULW's bundled skills are MIT.
+  the Dori non-copy statements above do not imply that omp-superkit's bundled skills are MIT.
 
 ## OMP: installed runtime and published SDK
 

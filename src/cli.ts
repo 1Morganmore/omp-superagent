@@ -7,7 +7,7 @@ import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, loadSta
 import { inspectInstalledOmp } from "./installed-omp";
 import { requireHostOwner } from "./host-owner-path";
 import { loadCredentials } from "./credentials";
-import type { Lane } from "./contracts";
+import { WORKFLOW_NAMES, type Lane } from "./contracts";
 import type { HostConnection } from "./host";
 import { readLaneRows } from "./lane-rows";
 
@@ -113,7 +113,7 @@ Capabilities to request from HEAD in chat (not CLI subcommands):
     note. Notes do not edit Discord's channel description or authorize work.
   Shared board: registered HEAD and lane sessions can post, read and subscribe to informational updates
     within this instance. Board posts are not commands or approvals.
-  Workflows: begin a request with ulw, ulw-plan, ulw-execute, ulw-loop, ulw-research or mass-ulw.
+  Workflows: begin a request with one of: ${WORKFLOW_NAMES.filter(name => name !== "jevify").join(", ")}.
     For batch judging against one rubric, begin with lowercase jevify (not /jevify).
   Operations guide and native tool names: ${join(import.meta.dir, "../docs/OPERATIONS.md")}
 

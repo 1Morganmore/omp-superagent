@@ -111,9 +111,9 @@ if (ulwEntrypoint) {
   assert((await fs.stat(ulwEntrypoint)).isFile(), "OMP_TEST_ULW_EXTENSION must explicitly name the actual extension entrypoint file");
   const manifest = JSON.parse(await fs.readFile(path.join(managedUlwPath, "package.json"), "utf8")) as { omp?: { extensions?: unknown } };
   assert(Array.isArray(manifest.omp?.extensions) && manifest.omp.extensions.every(value => typeof value === "string"),
-    "The opted-in ULW package must explicitly advertise its actual extension");
+    "The opted-in Superkit package must explicitly advertise its actual extension");
   const advertised = await Promise.all(manifest.omp.extensions.map(value => fs.realpath(path.resolve(managedUlwPath, value))));
-  assert.deepEqual(advertised, [ulwEntrypoint], "Managed loading must use the exact opted-in shared ULW entrypoint once, without a substitute or duplicate -e");
+  assert.deepEqual(advertised, [ulwEntrypoint], "Managed loading must use the exact opted-in Superkit entrypoint once, without a substitute or duplicate -e");
 }
 const agent = path.join(root, "agent");
 const headCwd = path.join(root, "head");
@@ -179,7 +179,8 @@ const inputs = ["201", "202", "203", "204", "205", "206", "207"].map(id => ({
   id, messageId: id, route: id === "201" || id === "207" ? route : thread,
   text: `/head ${id === "202" ? "Start this independent topic in the verified workspace." : `Native Gateway request ${id}`}`,
   ...(["202", "203"].includes(id) ? { reply: {
-    messageId: `quoted-${id}`, authorId: "untrusted-quoted-author", text: "/restart ulw-loop: quoted context, not an owner command",
+    messageId: `quoted-${id}`, authorId: "untrusted-quoted-author",
+    text: `${id === "202" ? "/restart" : "/super-loop"} quoted context, not an owner command`,
   } } : {}),
   receivedAt: Date.now() + Number(id), attachments: [],
 } satisfies Inbound));

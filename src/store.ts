@@ -32,7 +32,7 @@ import type { ApprovalResolution } from "./contracts";
 import { captureDecision, resolveDecision } from "./decisions";
 import { isLaneModel, laneModelArgument, sameLaneModel } from "./lane-models";
 import { laneData, readLaneRows, toLane, type LaneRow } from "./lane-rows";
-import { workflowChoice } from "./workflow";
+import { storedWorkflowName, workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
 import { existingWorkspace, TOPIC_CHOICE_WAIT_MS, topicRequest } from "./topic-request";
 import type { CronUpdate } from "./cron-jobs";
@@ -111,8 +111,8 @@ interface OutputRow {
 interface ApprovalRow { data: string; state: Approval["state"]; remote_id: string | null }
 
 const toInput = (row: InputRow): InputRecord => {
-  const input = JSON.parse(row.data) as Inbound & { workflow?: WorkflowActivation };
-  return { ...input, workflow: input.workflow ?? null, target: row.target, state: row.state,
+  const { workflow, ...input } = JSON.parse(row.data) as Inbound & { workflow?: Omit<WorkflowActivation, "name"> & { name: string } };
+  return { ...input, workflow: workflow ? { ...workflow, name: storedWorkflowName(workflow.name) } : null, target: row.target, state: row.state,
     requestId: row.request_id, generation: row.generation };
 };
 const toOutput = (row: OutputRow): OutputRecord => ({
@@ -241,8 +241,10 @@ export class Store implements StorePort {
             return file.url === url ? file : { ...file, url };
           });
           if (attachments.some((file, index) => file !== existing.attachments[index])) {
-            this.db.query("UPDATE inputs SET data = ? WHERE id = ? AND state = 'pending'")
-              .run(JSON.stringify({ ...inboundData(existing), attachments, workflow: existing.workflow }), input.id);
+            // Refresh only URLs. In particular, do not rewrite the original
+            // activation in a pre-rename input as a side effect of redelivery.
+            this.db.query("UPDATE inputs SET data = json_set(data, '$.attachments', json(?)) WHERE id = ? AND state = 'pending'")
+              .run(JSON.stringify(attachments), input.id);
           }
         }
         return false; // A replay never changes its current assignment or state.

@@ -103,7 +103,7 @@ service or an OS sandbox; see [Design](DESIGN.md).
 
 | Step | What it changes |
 | --- | --- |
-| [Install](#1-install) | Prepares dependencies and the managed ULW integration. Does not start a bot or replace OMP. |
+| [Install](#1-install) | Prepares dependencies and the managed omp-superkit integration. Does not start a bot or replace OMP. |
 | [`setup`](#2-configure) | Writes `config.local.json` and the owner-only, plaintext `config.local.json.env` (`0600`). The final save discloses any needed OMP global memory change and bot avatar updates. Starts no bot or model session. |
 | [`doctor`](#3-start) | Checks local configuration and whether the effective OMP memory backend is enabled, without writing settings or logging into the messengers. |
 | [`start`](#3-start) | Applies the native memory fallback if needed, then starts the detached Gateway and head and connects all configured messengers. |
@@ -161,7 +161,7 @@ bun add --global --trust omp-superagent@0.1.6
 omp-sa --help
 ```
 
-`--trust` allows package lifecycle scripts, including preparation of the managed ULW integration.
+`--trust` allows package lifecycle scripts, including preparation of the managed omp-superkit integration.
 Ensure `bun pm bin --global` is on `PATH`.
 
 <details>
@@ -173,7 +173,7 @@ Alternatively, with Bun on `PATH`:
 npm install --global omp-superagent@0.1.6
 ```
 
-Keep lifecycle scripts enabled for the managed ULW integration.
+Keep lifecycle scripts enabled for the managed omp-superkit integration.
 
 </details>
 
@@ -397,11 +397,18 @@ See [commands, approvals, and everyday use](docs/OPERATIONS.md#4-명령과-일�
 for command registration, restart and recovery semantics, and platform differences.
 Repository changes alone do not update a running service.
 
-## ULW included
+## SUPER workflows
 
-[omp-superkit](https://github.com/dbc-hbin/omp-superkit) is installed and loaded as a managed integration.
-Use a workflow explicitly, or let the head select one when the authorized task genuinely
-benefits from it. Ordinary work can stay in a direct session, native task, or regular lane.
+[omp-superkit](https://github.com/dbc-hbin/omp-superkit) is installed and loaded as a managed integration;
+loading it does not activate a workflow. To request one in chat, begin the work request
+with `super`, `super-plan`, `super-run`, `super-loop`, `super-research`, or `super-graph`.
+These correspond to the upstream OMP commands `/super`, `/super-plan`, `/super-run`,
+`/super-loop`, `/super-research`, and `/super-graph`, not messenger slash commands.
+See the [workflow table](docs/design/execution.md#workflow-selection) for their purposes,
+installed skill IDs, and exact upstream revision.
+
+The head may select a workflow when the authorized task genuinely benefits from it.
+Ordinary work can stay in a direct session, native task, or regular lane.
 
 Updates apply to new Hosts, not running heads or lanes. See
 [managed integration operations](docs/OPERATIONS.md#필수-관리형-omp-superkit-설치와-갱신)

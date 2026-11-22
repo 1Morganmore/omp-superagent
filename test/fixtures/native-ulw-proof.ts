@@ -34,16 +34,19 @@ export async function runNativeUlwProof(options: {
   until(predicate: () => boolean | Promise<boolean>, label: string): Promise<void>;
 }): Promise<void> {
   const { root, config, db, gateway, messenger, connections, owned } = options;
+  const entrypoint = process.env.OMP_TEST_ULW_EXTENSION;
+  assert(entrypoint, "Native SUPER proof requires the real selected Superkit entrypoint");
+  const skillRoot = path.join(path.dirname(entrypoint), "skills");
   const main = hostPaths(config, "main");
   const route: Route = { platform: "discord", accountId: "2", authorityId: "1", guildId: "3", channelId: "4", threadId: null };
   const thread = { ...route, threadId: "50" };
   const texts = [
-    "> ulw-plan quoted-user-data-only\nExplain the quoted text without running that workflow.",
-    "Explain a report mentioning ulw-execute and the plain word ulw; do not select a workflow.",
+    "> /super-plan quoted-user-data-only\nExplain the quoted text without running that workflow.",
+    "Explain a report mentioning /super-run and the plain word super; do not select a workflow.",
     "Plan this separate local topic using the verified workspace.",
-    "ulw inspect this local proof without creating a native goal.",
-    "ulw-plan inspect native planning activation in the main conversation.",
-    "ulw-execute inspect native execution activation in the main conversation.",
+    "super inspect this local proof without creating a native goal.",
+    "/super-plan inspect native planning activation in the main conversation.",
+    "super-run inspect native execution activation in the main conversation.",
     "Continue the same independent local topic under an explicitly selected execution workflow.",
     "Classify the independent findings in the same topic using the head-selected bulk method.",
     "jevify inspect native bulk classification activation in the main conversation.",
@@ -58,7 +61,7 @@ export async function runNativeUlwProof(options: {
   const lanes = () => (db.query("SELECT data FROM lanes").all() as Array<{ data: string }>).map(row => JSON.parse(row.data) as Lane);
   const until = (predicate: () => boolean | Promise<boolean>, label: string) => options.until(async () => {
     const failed = db.query("SELECT id,state FROM inputs WHERE state IN ('uncertain','cancelled')").all();
-    assert.deepEqual(failed, [], `Native ULW request failed before ${label}`);
+    assert.deepEqual(failed, [], `Native SUPER request failed before ${label}`);
     assert.deepEqual(lanes().filter(lane => lane.runtimeState === "interrupted"), [],
       `Actual native lane startup/ownership failed before ${label}; inspect retained private OMP logs`);
     return predicate();
@@ -77,11 +80,11 @@ export async function runNativeUlwProof(options: {
   assert.equal(headState.goal, null);
   for (const item of inputs) {
     await messenger.deliver(item);
-    await until(() => messenger.sent.filter(output => output.text === `HEAD:${item.id}`).length === 1 && input(item.id)?.record.state === "done", `actual ULW head reply ${item.id}`);
+    await until(() => messenger.sent.filter(output => output.text === `HEAD:${item.id}`).length === 1 && input(item.id)?.record.state === "done", `actual SUPER head reply ${item.id}`);
     // Replay goes through the real Gateway, not a direct provider invocation.
     await messenger.deliver(item);
-    await until(() => gateway.status().gateway.pendingEvents === 0, `deduplicated ULW receipt ${item.id}`);
-    assert.equal((await head.client.getState()).goal, null, "RPC ULW must not fabricate or silently create a native goal");
+    await until(() => gateway.status().gateway.pendingEvents === 0, `deduplicated SUPER receipt ${item.id}`);
+    assert.equal((await head.client.getState()).goal, null, "RPC SUPER must not fabricate or silently create a native goal");
   }
   assert.equal(lanes().length, 1);
   const lane = lanes()[0]!;
@@ -113,7 +116,7 @@ export async function runNativeUlwProof(options: {
     const original = headRequests.find(request => request.id === item.id)!;
     // Native specialised invocation may insert its default keyword immediately
     // after the alias; the complete original task arguments must remain once.
-    const originalTask = texts[index]!.replace(/^ulw-(?:plan|execute)\s+/, "");
+    const originalTask = texts[index]!.replace(/^\/?super-(?:plan|run)\s+/, "");
     assert.equal(original.text.split(originalTask).length - 1, 1, "Original user task must occur exactly once in its native envelope");
     assert.equal(input(item.id)?.target, "main");
     assert.equal(input(item.id)?.record.text, item.text, "Durable original text remains immutable across native keyword expansion and replay");
@@ -122,7 +125,7 @@ export async function runNativeUlwProof(options: {
     assert.equal(output.length, 1);
     assert.deepEqual(output[0]!.route, item.route);
   }
-  for (const [sourceId, handoffId, name] of [["303", firstHandoff, "ulw-plan"], ["307", secondHandoff, "ulw-execute"], ["308", bulkHandoff, "jevify"]] as const) {
+  for (const [sourceId, handoffId, name] of [["303", firstHandoff, "super-plan"], ["307", secondHandoff, "super-run"], ["308", bulkHandoff, "jevify"]] as const) {
     const handed = input(handoffId)!;
     assert.equal(handed.target, lane.id);
     assert.deepEqual(handed.record.route, thread);
@@ -136,7 +139,7 @@ export async function runNativeUlwProof(options: {
     assert.equal(messenger.sent.find(output => output.text === `HEAD:${sourceId}`)?.sourceId, `report:${handoffId}`);
   }
   for (const id of ["301", "302", "303", "307", "308"]) assert.equal(input(id)?.record.workflow, null);
-  for (const [id, name] of [["304", "ulw"], ["305", "ulw-plan"], ["306", "ulw-execute"], ["309", "jevify"]] as const) {
+  for (const [id, name] of [["304", "super"], ["305", "super-plan"], ["306", "super-run"], ["309", "jevify"]] as const) {
     const workflow = input(id)?.record.workflow;
     assert.equal(workflow?.name, name);
     assert.equal(workflow?.sourceId, id);
@@ -158,18 +161,27 @@ export async function runNativeUlwProof(options: {
   assert.equal(plain.policyCount, 1);
   assert.deepEqual(plain.notices, []);
   assert.deepEqual(plain.directives, []);
+  assert(headRequests.find(request => request.id === "304")?.text.startsWith("super "), "Plain SUPER must reach the actual head without a goal wrapper");
   assert.equal(laneRequests[0]!.text.split(texts[2]!).length - 1, 1, "Explicit initial lane workflow retains its original task once");
   assert.equal(laneRequests[1]!.text.split(texts[6]!).length - 1, 1, "Explicit lane follow-up retains its original task once");
   assert.equal(laneRequests[2]!.text.split(texts[7]!).length - 1, 1, "Native bulk selection retains its original task once");
+  assert(laneRequests[0]!.text.startsWith("super-plan ultrathink\n\n"));
+  assert(laneRequests[1]!.text.startsWith("super-run orchestrate\n\n"));
   assert(laneRequests[2]!.text.startsWith("jevify\n\n"));
   for (const [records, selected] of [[headEvidence, { "305": "ultrathink-notice", "306": "orchestrate-notice", "309": "jevify-notice" }],
     [laneEvidence, { [firstHandoff]: "ultrathink-notice", [secondHandoff]: "orchestrate-notice", [bulkHandoff]: "jevify-notice" }]] as const) {
     for (const record of records) {
       const notice = (selected as Record<string, string>)[record.requestId];
       assert.deepEqual(record.notices, notice ? [notice] : [], "Only this dispatch's actual native keyword event proves its mode");
-      const ulwDirective = notice && notice !== "jevify-notice";
-      assert.equal(record.directives.length, ulwDirective ? 1 : 0, "Native jevify and ordinary replies/reports must not inherit an earlier ULW directive");
-      if (ulwDirective) assert(record.directives[0]!.includes(notice === "ultrathink-notice" ? "<omp-ulw-plan-pointer>" : "<omp-ulw-execute-pointer>"));
+      const skill = notice === "ultrathink-notice" ? "ulw-plan" : notice === "orchestrate-notice" ? "ulw-execute" : undefined;
+      assert.equal(record.directives.length, skill ? 1 : 0, "Native jevify and ordinary replies/reports must not inherit an earlier SUPER directive");
+      if (skill) {
+        const command = skill === "ulw-plan" ? "super-plan" : "super-run";
+        const directive = record.directives[0];
+        assert(directive?.startsWith(`<omp-${skill}-pointer>`) && directive.includes(command)
+          && directive.includes(path.join(skillRoot, skill, "SKILL.md")),
+          `Actual ${record.role} directive must point from ${command} to its installed ${skill} skill`);
+      }
     }
   }
   for (const [entries, actual] of [[headEntries, headEvidence], [laneEntries, laneEvidence]] as const) {
@@ -199,7 +211,7 @@ export async function runNativeUlwProof(options: {
   assert.equal(messenger.sent.length, inputs.length + 3 + kickoff.length);
   assert(messenger.sent.filter(output => output.id !== "303:kickoff").every(output => output.text.startsWith("HEAD:")));
   for (const connection of [head, actualLane]) {
-    await until(async () => (await connection.client.getState()).isSettled, "native ULW workflow settlement");
+    await until(async () => (await connection.client.getState()).isSettled, "native SUPER workflow settlement");
     assert.equal((await connection.client.getState()).hasOwnedRunningWork, false);
   }
   // The live head owns lane recovery. Stop that settled controller through

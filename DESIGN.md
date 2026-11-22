@@ -82,7 +82,8 @@ part of the native build.
    admitting authorized input while the head is absent. `head.connected` is not
    `head.ready`: readiness also requires a live head, a ready controller, and
    completed preset initialization. A managed Host must also verify the selected
-   superkit modules in its actual root OMP session before exposing its socket.
+   omp-superkit modules in its actual root OMP session before exposing its socket.
+   Loading the package does not select a [SUPER workflow](docs/design/execution.md#workflow-selection).
    Check `gateway.unresolvedEvents` for held ingress.
 4. Automatic recovery reconnects only after verifying native PID, session ID/file,
    and socket ownership. Start a replacement only after confirming the old process
@@ -201,6 +202,7 @@ for design ideas, not a promise of compatibility or permission to copy code. The
 | [OMP prior review](https://github.com/can1357/oh-my-pi/tree/aece16f78fad7e9e777b4aeaa1ca583544a17723) | Native sessions, tools, approvals, tasks, goals and discovery; inspected Collab hosting was TUI-coupled. |
 | [omp-dori](https://github.com/vntrevx/omp-dori/tree/3b5487df12540cdd428ebcf7455375d72921e2dc) and its [receiver/lifecycle review](https://github.com/vntrevx/omp-dori/tree/93bff33007af9da4ea8479bfad4ea7cc9f658a17) | Delegation, reporting and receiver separation are references. No mandatory delegation, duty model, or herdr execution backend. Do not treat SUL-derived code as MIT. |
 | [ompbot](https://github.com/gimso2x/ompbot/tree/ddd0f854e8e8d395b7ed43104ec541f909a52ad4) | Head tools and independent lanes: `ompbot_work_start` is distinct from herdr-dependent `ompbot_dispatch` (`taskSpec`/`[TASK]`). Do not assume an installed private RPC module. |
+| [omp-superkit](https://github.com/dbc-hbin/omp-superkit/tree/c11a6e4e185f9c31f484a05a13528ef724337bc1) | Managed integration; this is the inspected SUPER command and skill contract, not a fixed installation pin. OMP still owns native execution and approvals. |
 | [TerrifiedBug](https://github.com/TerrifiedBug/omp-telegram/tree/4f9f288f44dfa5dc8afed4f245edceb926d4a54a), [tickernelz](https://github.com/tickernelz/omp-telegram/tree/852938e32aeecf0ef2727230aecc2b3d35e8e1de), [fcying](https://github.com/fcying/omp-telegram/tree/eb693c89d29310c277a9947e36f6e8fe30cc4b88) Telegram bridges | Topic, journal, UI and outbox patterns; neither terminal keystroke simulation nor another per-conversation execution backend. Verify licenses before reuse. |
 | [agentix](https://github.com/tenfyzhong/agentix/tree/d0fcc56685fae638a20c46514b4a10b7c8650b69) and [DSH prototype](https://github.com/deepseek-ai/dsh-superagent-prototype/tree/8c32a9dc5d72c033816c6a8110b37f40cf94fba4) | Local ownership, execution slots and durable effects, not headless TUI attach or a replacement agent engine. |
 

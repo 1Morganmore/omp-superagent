@@ -90,26 +90,31 @@ HEAD가 저장소와 작업 범위를 판단하는 데 참고하며, 메모를 �
 
 ### 일반 모델 프로필과 역할 특화
 
-관리형 ULW 설치·일반 프로필 로드만으로 workflow를 선택하거나 goal을 만들지 않는다.
+관리형 omp-superkit 설치·일반 프로필 로드만으로 SUPER 워크플로를 선택하거나 goal을 만들지 않는다.
 일반 작업은 직접 처리·native task·일반 레인으로 충분할 수 있다. 사용자의 명시적 선택 또는
-허가 목표 안에서의 헤드 판단으로만 workflow를 선택한다. `lane_start`/`lane_message`의 실제
-`workflow: {name, reason}`에 `jevify` 또는 여섯 ULW 값과 비어 있지 않은 이유를 전달한다.
+허가 목표 안에서의 헤드 판단으로만 workflow를 선택한다. 메신저에서는 작업 요청을 `super`,
+`super-plan`, `super-run`, `super-loop`, `super-research`, `super-graph` 중 하나로 시작한다.
+`/super` 등은 OMP 확장 명령이며 메신저에 등록하는 별도 명령이 아니다.
+`lane_start`/`lane_message`의 실제 `workflow: {name, reason}`에는 `jevify` 또는 위 여섯 이름
+중 하나와 비어 있지 않은 이유를 전달한다. 기존 ULW 호출은 원본 사용자 요청에서만 호환되며,
+새 구조화 선택에는 쓰지 않는다.
 기존 source/provenance·dedupe를 유지하며 workflow 선택은 실행 중 steering이 아닌 직렬
-dispatch다. ULW는 더 가벼운 대안보다 유용한 이유를 남기고 실제 선택 SKILL을 읽는다.
+dispatch다. SUPER 워크플로는 더 가벼운 대안보다 유용한 이유를 남기고 선택한 스킬을 읽는다.
+호출 이름과 스킬 ID는 다르다. 예를 들어 `super-run`은 `skill://ulw-execute`를 읽는다.
 jevify는 충분히 큰 동질적 자료에 고정 rubric을 독립 적용하여 읽기/context 비용을 줄일 때만
 선택하며 개수·난이도로 고정하지 않는다. 정확한 규칙·작은 묶음·항목 간 추론·실제 검증은
 각각 deterministic 처리·직접 읽기·contextual 조사·테스트/runtime 검증을 쓴다.
 계획만 요청받았으면 구현하지 않으며 native 승인·artifact
 review·비용·범위·pause/cancel·불확실성 보류를 우회하지 않는다.
-방법별 선택 기준·구조화된 인계·native mode 매핑은
+방법별 선택·구조화된 인계·정확한 스킬 ID와 native mode 매핑 및 기준 upstream 리비전은
 [설계의 workflow 계약](design/execution.md#workflow-selection)에 모은다.
 사용자 jevify 선택은 원래 입력 선두의 소문자 독립 prose `jevify`만 인정하며 `/jevify`·대문자·
 인용/code/path·부정·뒤쪽 언급은 아니다. 호출 없는 일반 원문에도 헤드 선택 필드는 사용 가능하다.
-runtime의 `workflowPrompt`는 fenced context 밖에 소문자 native `jevify`를 prefix하며 ULW
+runtime의 `workflowPrompt`는 fenced context 밖에 소문자 native `jevify`를 prefix하며 SUPER
 extension-command capability 조회를 하지 않는다. 레인은 실제 OMP jevify notice와 `eval`이 안내하는
 judge 도움말(OMP 19.1에서는 `help://eval/judge`)을 따른다. notice 활성화는 native `magicKeywords.enabled`·`magicKeywords.jevify`와
 eval 가용성에 달리므로 admission만으로 보장하지 않는다. 전역 설정을 바꾸지 않으며 jevify에는
-ULW 스킬 조회·브랜드·추가 레인·goal·모델 변경·workflow artifact가 필요하지 않다.
+SUPER 스킬 조회·추가 레인·goal·모델 변경·workflow artifact가 필요하지 않다.
 레인의 보고는 헤드용이며 외부 발송이 아니다. 내부 지시·보고는 영어, 헤드의 외부 답변은
 사용자 언어를 사용한다.
 
@@ -180,7 +185,7 @@ bun add --global --trust omp-superagent@0.1.6
 omp-sa --help
 ```
 
-`--trust`는 관리형 ULW 준비 등 패키지 설치 스크립트를 허용한다.
+`--trust`는 관리형 omp-superkit 준비 등 패키지 설치 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
 `npm install --global omp-superagent@0.1.6`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
@@ -213,8 +218,8 @@ export PATH="$PWD/.upstream/toolchain/node_modules/.bin:$PATH"
 ### 필수 관리형 omp-superkit 설치와 갱신
 
 설치에는 공식 [dbc-hbin/omp-superkit](https://github.com/dbc-hbin/omp-superkit)이 항상 포함된다.
-루트 `bun install`의 postinstall이 ULW를 준비한다. 활성화 검사는 배포된 native SDK의
-실제 prompt composition을 사용한다. ULW만 다시 준비하거나 확인할 때는 다음을 사용한다.
+루트 `bun install`의 postinstall이 관리형 패키지를 준비한다. 활성화 검사는 배포된 native SDK의
+실제 prompt composition을 사용한다. omp-superkit만 다시 준비할 때는 다음을 사용한다.
 
 ```sh
 bun run prepare:ulw
@@ -225,8 +230,8 @@ bun run prepare:ulw
 필요하다. 이를 확인하면 IPC/head를 먼저 시작하고 startup 원격 확인은 백그라운드로 수행하며,
 이후 매시간 새 커밋을 확인해 준비·활성화한다. 느리거나 접근 불가능한 upstream 때문에 정상
 active가 있는 Gateway 시작을 기다리게 하지 않는다. 이는 일반 코드의 업데이트 확인이지 모델 watchdog·작업 레인 실행이나
-메신저 봇 로그인 허가가 아니다. Git·의존성 다운로드에 네트워크가 필요하며 사용자 ULW checkout,
-전역 OMP 설치·설정, 공유 ULW 프롬프트 원본은 수정하지 않는다.
+메신저 봇 로그인 허가가 아니다. Git·의존성 다운로드에 네트워크가 필요하며 사용자 omp-superkit
+checkout, 전역 OMP 설치·설정, 공유 프롬프트 원본은 수정하지 않는다.
 
 준비·offline composition probe가 성공한 immutable revision만 원자적으로 활성화한다.
 기존 active 이후에는 같은 원격의 fast-forward만 허용하며, 공식 `omp-ulw` → `omp-superkit`
@@ -257,7 +262,7 @@ Gateway 상태 응답의 `ulw`는 `revision`, `packagePath`, `upstreamRevision`,
 **실행 중 Host의 revision과 다음 Host의 revision은 다를 수 있다.** 이미 실행 중인 head/lane은
 자신이 로드한 정확한 package 경로를 유지하며 업데이트 때문에 재시작·hot reload하지 않는다.
 각 새 Host 시작은 그 시점의 active package를 해석한다. 따라서 오래 실행된 head가 나중에 새
-lane을 시작해도 head의 과거 ULW 경로를 새 lane에 강제로 상속하지 않는다. 기존 Host의 제어
+lane을 시작해도 head의 과거 패키지 경로를 새 lane에 강제로 상속하지 않는다. 기존 Host의 제어
 연결 재접속은 새 revision 적용이 아니다. 설치·업데이트 성공은 native workflow 선택,
 mode 활성화·goal 생성·실제 모델 응답의 검증과 별개다.
 
@@ -1359,9 +1364,9 @@ OMP_SUPERAGENT_WORKER_SSH_TEST=1 bun test test/native-worker-ssh.test.ts
 
 일반 회귀는 `bun run check`와 `bun test test`(`bun run test`와 같음)로 실행한다.
 기본 테스트는 opt-in native/PTY 시나리오를 제외한다. `.upstream`까지 탐색하는 인수 없는
-`bun test`로 대체하지 않는다. 설치 OMP와 ULW가 준비된 checkout의 `bun run test:ci`는
-타입 검사와 모든 로컬 project/native/PTY·관리형 ULW 회귀를 실행한다. `scripts/ci.ts`는 활성
-ULW entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선택기로 PATH의 현재 설치
+`bun test`로 대체하지 않는다. OMP와 관리형 omp-superkit이 준비된 checkout의 `bun run test:ci`는
+타입 검사와 모든 로컬 project/native/PTY·omp-superkit 통합 회귀를 실행한다. `scripts/ci.ts`는 활성
+패키지의 entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선택기로 PATH의 현재 설치
 standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
 선택한 OMP 버전·실행 경로를 출력하고 공개 RPC·프로세스 관측 기능을 메타데이터로 확인한다.
 `test:ci` 자체는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
@@ -1386,12 +1391,12 @@ upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macO
 뜻하지 않는다. 실행 결과는 [릴리즈 검증 기록](releases/0.1.0.md#verification-records)에 모은다.
 이전 stock 18.20.2와 패치된 18.20.0의 결과는 현재 기준 버전의 검증과 구분하며 이후 변경의 증거로 재사용하지 않는다.
 
-### 대상별 native·ULW 회귀
+### 대상별 native·omp-superkit 회귀
 
 native 시나리오는 기존 opt-in을 명시적으로 켜며 `OMP_TEST_COMMAND`가 없으면 PATH에서 현재
 설치 stock CLI를 자동 선택한다. 실제 CLI/소켓·결정적인 로컬 provider·기록용 Messenger를
 사용한다. 사용자 설정·인증은 분리하며 실제 메신저 로그인이나 동일 프로세스 TUI/herdr attach의
-검증 명령이 아니다. CLI 자동 선택은 native/PTY·외부 ULW opt-in을 대신 켜지 않는다.
+검증 명령이 아니다. CLI 자동 선택은 native/PTY·외부 패키지 opt-in을 대신 켜지 않는다.
 
 ```sh
 OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-host.test.ts test/native-runtime.test.ts test/native-model-selection.test.ts test/native-board.test.ts test/native-gateway.test.ts
@@ -1406,8 +1411,8 @@ PTY 새 설정 테스트는 선택된 실행 파일을 격리된 PATH에 연결�
 발견하게 한다. 새 설정은 제품 계약대로 실행 파일 하나만 저장하며 테스트 override의 추가
 CLI 옵션을 자동 주입하지 않는다. 기존 설정의 명시된 옵션은 그대로 보존한다.
 
-ULW 병합 회귀는 외부 checkout을 수정하거나 설치하지 않고 명시한 entrypoint를 읽어 실행한다.
-환경변수를 생략하면 외부 ULW 조합은 건너뛴다.
+omp-superkit 합성 회귀는 외부 checkout을 수정하거나 설치하지 않고 명시한 entrypoint를 읽어 실행한다.
+환경변수를 생략하면 외부 패키지 조합은 건너뛴다.
 
 ```sh
 OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-superkit/index.ts bun test test/skills.test.ts
@@ -1415,13 +1420,13 @@ OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-superkit/index.ts bun test test/ski
 
 새 revision과 기존 revision 재활성화는 배포된 OMP SDK의 실제 prompt renderer·ExtensionRunner를
 사용하는 격리된 offline composition probe도 통과해야 한다. 상세 검사는
-[ULW 설치 계약](design/execution.md#managed-omp-superkit-integration)을 따르며 import·합성 성공을
+[관리형 통합 계약](design/execution.md#managed-omp-superkit-integration)을 따르며 import·합성 성공을
 모델 호출·Agent 실행·goal 생성·workflow 완료의 증거로 확대하지 않는다.
 
 ### 소스·npm 릴리즈
 
 0.1.1부터 GitHub 소스 아카이브와 npm 패키지를 함께 배포한다. 실행에는 Bun이 필요하다.
-OMP·ULW·node_modules·native addon·사용자 설정·세션은 아카이브에 포함하지 않는다.
+OMP·omp-superkit·node_modules·native addon·사용자 설정·세션은 아카이브에 포함하지 않는다.
 `package.json`의 버전과 `docs/releases/<version>.md`를 준비하고 의도한 변경을 커밋한 뒤:
 
 ```sh

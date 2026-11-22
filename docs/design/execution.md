@@ -259,8 +259,8 @@ profiles can guide methods, not redefine the topology, routing or approvals.
 
 Use direct work, native `task` or an ordinary lane unless a workflow has a
 concrete advantage. `jevify` uses native Eval to classify independent
-homogeneous items under a fixed rubric; it is not ULW or a verification
-substitute. Select ULW only when its specific durable plan, evidence gates,
+homogeneous items under a fixed rubric; it is not a SUPER workflow or a verification
+substitute. Select SUPER only when its specific durable plan, evidence gates,
 dependency handoff, or recovery artifacts justify the extra work. The head
 may select a method inside an already authorized objective without claiming the
 operator selected it. Read the installed skill and preserve its approval and
@@ -272,15 +272,37 @@ source and an explicit `workflow: {name, reason}` on every workflow-selecting
 or report is not the selection field. Preserve the original text and native
 keyword interpretation; keep generated metadata fenced. Selection is
 serialized, not injected as steering. A conflict or missing advertised
-capability does not silently downgrade a selected ULW request to ordinary work.
+capability does not silently downgrade a selected SUPER request to ordinary work.
 
-`jevify` uses the native notice (subject to native settings and Eval availability);
-plain `ulw` arms ULW without choosing a specialized mode or implicitly creating
-a goal. `ulw-plan` maps to `ultrathink`; `ulw-execute` and `ulw-loop` map to
-`orchestrate`; `ulw-research` and `mass-ulw` map to `workflowz`, subject to
-the original source's native keywords. Installation, profile load, selected
-skill application, actual native activation, goal creation, and work completion
-are separate facts.
+SUPER's command, skill and native-keyword contracts are based on
+[omp-superkit `c11a6e4e185f9c31f484a05a13528ef724337bc1`](https://github.com/dbc-hbin/omp-superkit/tree/c11a6e4e185f9c31f484a05a13528ef724337bc1).
+Use a leading invocation; the `/` is optional in request text. These are OMP
+extension commands, not registered messenger controls.
+
+| OMP command | `workflow.name` | Discoverable OMP skill | Default native keyword |
+| --- | --- | --- | --- |
+| `/super` | `super` | `skill://ultrawork` | None |
+| `/super-plan` | `super-plan` | `skill://ulw-plan` | `ultrathink` |
+| `/super-run` | `super-run` | `skill://ulw-execute` | `orchestrate` |
+| `/super-loop` | `super-loop` | `skill://ulw-loop` | `orchestrate` |
+| `/super-research` | `super-research` | `skill://ulw-research` | `workflowz` |
+| `/super-graph` | `super-graph` | `skill://mass-ulw` | `workflowz` |
+
+Plain SUPER arms the session without selecting a specialty workflow or implicitly
+creating a goal in RPC. SUPER Graph selects the graph workflow, not plain SUPER
+activation. Defaults apply only when the original request has no native keyword;
+leave quoted and negated keywords to native OMP interpretation. `jevify` uses
+the native notice, subject to native settings and Eval availability, with no
+extension-command preflight. Installation, profile load, skill application,
+actual native activation, goal creation, and work completion are separate facts.
+
+On upgrade, old ULW invocations remain valid in original user text and are
+preserved there. New structured choices use only the canonical values above
+(or `jevify`), not legacy aliases or a `skill://` ID. Existing durable workflow
+records, skill IDs, flags and native journal types are not renamed. A resident
+pre-upgrade Host can still receive the mapped old command if it advertises
+that original extension registration; a compatibility alias on a current Host
+does not stand in for its missing canonical command.
 
 ## Managed omp-superkit integration
 
@@ -313,7 +335,7 @@ not a match against a newer active pointer; an unverified older Host can still
 be inspected and stopped. Gateway status distinguishes `head.loadedSuperkitPath`
 (the attached head's startup receipt) from `ulw.packagePath` (next launch).
 This is not a continuous check of workflow mode or prompt execution. Managed discovery preserves
-unrelated native resources and avoids loading a duplicate ULW instance. Refuse
+unrelated native resources and avoids loading a duplicate omp-superkit instance. Refuse
 configurations the stock CLI cannot express without silently changing scope,
 discarding custom commands or enabling disabled extensions.
 

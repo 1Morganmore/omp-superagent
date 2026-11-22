@@ -32,24 +32,33 @@ substitute or unobserved activation.
 
 - **`jevify`:** Follow the actual OMP notice and the judge help topic advertised
   by `eval` (`help://eval/judge` on OMP 19.1).
-  Runtime uses lowercase native prose outside fenced context, not an ULW command.
+  Runtime uses lowercase native prose outside fenced context, not a SUPER command.
   Native settings and eval availability still matter. Neither admission nor a
   batch result proves activation, verified coverage, or correctness. Report actual
-  coverage and checked flagged evidence. No ULW read, extra lane/goal, artifacts,
-  model or settings change needed.
-- **ULW:** Read only the selected installed skill (`skill://ultrawork` for `ulw`,
-  otherwise `skill://<workflow.name>`) and its required references before acting.
+  coverage and checked flagged evidence. No SUPER skill read, extra lane/goal,
+  artifacts, model or settings change needed.
+- **SUPER:** Read only the selected installed skill from the table below and its
+  required references before acting. Do not build the URL from `workflow.name`.
   Follow its actual artifact ownership, stop rules, approval, review and recovery
   gates. Planning selection doesn't permit implementation. In native plan mode,
   write `local://<slug>-plan.md` and submit that same slug as the mode instructs:
   on OMP 19.1, run `propose <slug>` in OMP's `bash` if listed as a command,
   or call `propose` directly if offered as a tool. Do not substitute a chat
-  question for plan approval. Approval doesn't select `ulw-execute` or grant
+  question for plan approval. Approval doesn't select `super-run` or grant
   permission to ship. Nested workflow state doesn't create a second objective
   or goal. Preserve source keywords and runtime's fenced context; don't force a
   native mode. Report separately whether the skill was loaded, a native mode
-  actually activated, and a goal exists. Plain ULW selects no specialty mode and
+  actually activated, and a goal exists. Plain SUPER selects no specialty mode and
   RPC activation alone creates no goal.
+
+| `workflow.name` | Installed skill |
+| --- | --- |
+| `super` | `skill://ultrawork` |
+| `super-plan` | `skill://ulw-plan` |
+| `super-run` | `skill://ulw-execute` |
+| `super-loop` | `skill://ulw-loop` |
+| `super-research` | `skill://ulw-research` |
+| `super-graph` | `skill://mass-ulw` |
 
 ## Implement and verify
 

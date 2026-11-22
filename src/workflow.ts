@@ -1,32 +1,41 @@
-import { WORKFLOW_NAMES, type WorkflowActivation, type WorkflowChoice, type WorkflowName } from "./contracts";
+import { WORKFLOW_NAMES, type InputRecord, type WorkflowActivation, type WorkflowChoice, type WorkflowName } from "./contracts";
 
-// Boundary contract inspected against omp-ulw/ulw.ts (2026-11-14). This bridge
-// recognizes its six ULW workflows and native jevify, not arbitrary mentions or skill prose.
+// Public commands and leading delimiters match omp-superkit ulw.ts at c11a6e4.
+// Skill paths and persisted native keys are deliberately not public selectors.
+const legacyCommands = {
+  super: "ulw", "super-plan": "ulw-plan", "super-loop": "ulw-loop", "super-run": "ulw-execute",
+  "super-graph": "mass-ulw", "super-research": "ulw-research",
+} as const satisfies Record<Exclude<WorkflowName, "jevify">, string>;
+type LegacyWorkflowName = typeof legacyCommands[keyof typeof legacyCommands];
+const canonical = new RegExp(String.raw`^(${Object.keys(legacyCommands).join("|")})\b(?![-_.]?[A-Za-z0-9])(?=[\s:.,!?]|$)`, "i");
 const aliases: Array<[WorkflowName, RegExp]> = [
-  ["ulw-research", /^(?:ulw|mass[\s-]*ulw|ulw[\s-]*mass|mulw|meth)[\s-]*research\b/i],
-  ["mass-ulw", /^(?:mass[\s-]*ulw|ulw[\s-]*mass|mulw|meth)\b/i],
-  ["ulw-plan", /^ulw[\s-]*plan\b/i],
-  ["ulw-loop", /^ulw[\s-]*loop\b/i],
-  ["ulw-execute", /^ulw[\s-]*execute\b/i],
+  ["super-research", /^(?:ulw|mass[\s-]*ulw|ulw[\s-]*mass|mulw|meth)[\s-]*research\b/i],
+  ["super-graph", /^(?:mass[\s-]*ulw|ulw[\s-]*mass|mulw|meth)\b/i],
+  ["super-plan", /^ulw[\s-]*plan\b/i],
+  ["super-loop", /^ulw[\s-]*loop\b/i],
+  ["super-run", /^ulw[\s-]*execute\b/i],
 ];
 const identifierTail = /^(?:[-_][A-Za-z0-9]|\.[A-Za-z0-9]|[-_.]?[A-Za-z0-9]*[/\\])/;
+const leadingUri = /^\s*\/?[a-z][a-z0-9+.-]*:\/\//i;
 const nativeWords = /(?<![\p{L}\p{N}_./\\-])(?<!::)(?:ultrathink|orchestrate|workflowz|jevify)(?![\p{L}\p{N}_/\\-])(?!\.[\p{L}\p{N}_-])(?!\()/u;
 const nativeWord: Partial<Record<WorkflowName, string>> = {
-  "ulw-plan": "ultrathink", "ulw-loop": "orchestrate", "ulw-execute": "orchestrate",
-  "mass-ulw": "workflowz", "ulw-research": "workflowz",
+  "super-plan": "ultrathink", "super-loop": "orchestrate", "super-run": "orchestrate",
+  "super-graph": "workflowz", "super-research": "workflowz",
 };
 
-/** Only the original authorized user's leading invocation is eligible. */
-function invocation(text: string): { name: WorkflowName; length: number } | null {
-  // Unlike ULW commands, native jevify is lowercase prose, never a slash command.
+/** Parse the spelling of an invocation; only admission may choose it. */
+function invocation(text: string): { name: WorkflowName; length: number; legacy?: true } | null {
+  // Unlike SUPER commands, native jevify is lowercase prose, never a slash command.
   const native = /^\s*jevify(?=$|[\s:.,!?])/.exec(text);
   if (native && !identifierTail.test(text.slice(native[0].length))) return { name: "jevify", length: native[0].length };
   const prefix = /^\s*\/?/.exec(text)![0].length;
   const leading = text.slice(prefix);
+  const primary = canonical.exec(leading);
+  if (primary) return { name: primary[0].toLowerCase() as WorkflowName, length: prefix + primary[0].length };
   for (const [name, expression] of aliases) {
     const match = expression.exec(leading);
     if (match && /^(?:[\s:.,!?]|$)/.test(leading.slice(match[0].length))
-      && !identifierTail.test(leading.slice(match[0].length))) return { name, length: prefix + match[0].length };
+      && !identifierTail.test(leading.slice(match[0].length))) return { name, length: prefix + match[0].length, legacy: true };
   }
   const plain = /^(?:ultrawork|ulw)\b/i.exec(leading);
   if (!plain) return null;
@@ -35,11 +44,22 @@ function invocation(text: string): { name: WorkflowName; length: number } | null
   // Native ULW permits a suffix only for its named workflow family; unsupported
   // identifiers and paths are data. Do not search past quotes or negations.
   if (identifierTail.test(tail) && !/^[-_](?:loop|plan|research|execute|mass)(?![-_.]?[A-Za-z0-9])/i.test(tail)) return null;
-  return { name: "ulw", length: prefix + plain[0].length };
+  return { name: "super", length: prefix + plain[0].length, legacy: true };
 }
 
 export function leadingWorkflow(text: string): WorkflowName | null {
-  return invocation(text)?.name ?? null;
+  const match = invocation(text);
+  // Upstream masks URLs before reading its SUPER/ULW selectors. Do not
+  // accidentally admit one just because a real command may use a colon.
+  return match && (match.name === "jevify" || !leadingUri.test(text)) ? match.name : null;
+}
+
+/** Read old coordination identities without making aliases valid manager inputs. */
+export function storedWorkflowName(name: string): WorkflowName {
+  for (const canonical of WORKFLOW_NAMES) {
+    if (canonical === name || canonical !== "jevify" && legacyCommands[canonical] === name) return canonical;
+  }
+  throw new Error("Unknown stored workflow identity");
 }
 
 export function workflowChoice(value: WorkflowChoice | undefined): WorkflowChoice | null {
@@ -52,13 +72,21 @@ export function workflowChoice(value: WorkflowChoice | undefined): WorkflowChoic
   return { name: value.name, reason: value.reason };
 }
 
-/** Head selection is typed authority; a brief/message is never a selector. */
-export function headWorkflow(sourceId: string, originalText: string, choice: WorkflowChoice | undefined): WorkflowActivation | null {
+type WorkflowSource = Pick<InputRecord, "id" | "workflow">;
+
+function admittedUserWorkflow(source: WorkflowSource): WorkflowName | null {
+  const workflow = source.workflow;
+  return workflow?.provenance === "user" && workflow.sourceId === source.id ? workflow.name : null;
+}
+
+/** Head selection is typed authority; use the original admission, not today's parser. */
+export function headWorkflow(source: WorkflowSource, choice: WorkflowChoice | undefined): WorkflowActivation | null {
   const selected = workflowChoice(choice);
   if (!selected) return null;
-  const user = leadingWorkflow(originalText);
-  if (user && user !== selected.name) throw new Error("Head workflow conflicts with the original user's workflow invocation");
-  return { ...selected, sourceId, provenance: "head" };
+  const user = admittedUserWorkflow(source);
+  if (user && user !== selected.name)
+    throw new Error("Head workflow conflicts with the original user's workflow invocation");
+  return { ...selected, sourceId: source.id, provenance: "head" };
 }
 
 /** Native matchers must not treat routing/brief/report prose as user keywords. */
@@ -70,25 +98,46 @@ export function workflowContext(envelope: string): string {
 }
 
 /** Keep user native keywords (including quoted/negative ones) byte-for-byte. */
-export function workflowPrompt(activation: WorkflowActivation | null, originalText: string, envelope: string): string {
-  if (!activation) return envelope;
-  const leading = invocation(originalText);
-  let request = leading?.name === activation.name ? originalText : `${activation.name}\n\n${originalText}`;
-  const selected = invocation(request)!;
+export function workflowPrompt(activation: WorkflowActivation, source: WorkflowSource & { text: string }, envelope: string,
+  { legacyCommand, worker = false }: { legacyCommand?: LegacyWorkflowName; worker?: boolean } = {}): string {
+  // A pending handoff can predate the current vocabulary. An ordinary task
+  // heading is not a user's selector or a reason to suppress a native default.
+  const leading = admittedUserWorkflow(source) === activation.name ? invocation(source.text) : null;
+  const selected = leading?.name === activation.name ? leading : null;
+  const invocationText = selected ? source.text.slice(0, selected.length) : "";
+  const argumentsText = source.text.slice(invocationText.length);
+  const explicitDelimiter = selected ? /^\S/.exec(argumentsText)?.[0] ?? "" : "";
   const keyword = nativeWord[activation.name];
   // Apply only the native bridge's default. A raw user mention, even quoted or
   // negated, suppresses that default and is left for OMP's native prose matcher.
   // Check before adding context, whose metadata must not change this decision.
-  if (keyword && !nativeWords.test(originalText.slice(leading?.length ?? 0))
-    && /^(?:\s|$)/.test(request.slice(selected.length))) {
-    request = `${request.slice(0, selected.length)} ${keyword}${request.slice(selected.length)}`;
-  }
+  const nativeDefault = keyword && !explicitDelimiter && !nativeWords.test(argumentsText) ? ` ${keyword}` : "";
+  // A resident old Host still understands the original ULW user aliases. Keep
+  // their spelling, because e.g. "ulwplan" does not arm the same session policy
+  // as "ulw-plan". Only synthesized selectors use the old registration name.
+  const keepInvocation = selected && (!legacyCommand || selected.legacy);
+  // A worker takes ordinary prose, not native slash-command dispatch.
+  const prefix = worker ? invocationText.replace(/^(\s*)\//, "$1") : invocationText;
+  const request = keepInvocation
+    ? `${prefix}${nativeDefault}${argumentsText}`
+    : `${legacyCommand ?? activation.name}${explicitDelimiter}${nativeDefault}\n\n${source.text}`;
   return `${request}\n\n${workflowContext(envelope)}`;
 }
 
-export function advertisedWorkflow(value: unknown, name: WorkflowName): boolean {
+function advertisedCommand(value: unknown, name: string, description: string): boolean {
   if (!value || typeof value !== "object" || !("commands" in value) || !Array.isArray(value.commands)) return false;
   return value.commands.some(command => command && typeof command === "object"
     && command.name === name && command.source === "extension"
-    && command.description === `Run the OMP-adapted ${name} workflow`);
+    && command.description === description);
+}
+
+export function advertisedWorkflow(value: unknown, name: WorkflowName): boolean {
+  return name !== "jevify" && advertisedCommand(value, name, name === "super" ? "Enable SUPER mode" : `Run the ${name} workflow`);
+}
+
+/** Pre-rename extension registrations, not the new extension's legacy aliases. */
+export function advertisedLegacyWorkflow(value: unknown, name: WorkflowName): LegacyWorkflowName | undefined {
+  if (name === "jevify") return undefined;
+  const legacy = legacyCommands[name];
+  return advertisedCommand(value, legacy, `Run the OMP-adapted ${legacy} workflow`) ? legacy : undefined;
 }
