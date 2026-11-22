@@ -127,6 +127,7 @@ const toApproval = (row: ApprovalRow): Approval => ({
 });
 const inboundData = (input: Inbound): Inbound => ({
   id: input.id, route: input.route, messageId: input.messageId, text: input.text,
+  ...(input.discordOriginalText === undefined ? {} : { discordOriginalText: input.discordOriginalText }),
   ...(input.routingText === undefined ? {} : { routingText: input.routingText }),
   ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
   ...(input.invocationId === undefined ? {} : { invocationId: input.invocationId }),
@@ -211,6 +212,10 @@ export class Store implements StorePort {
   }
 
   receive(input: Inbound, target: string | null, metadata: Readonly<Record<string, string>> = {}, workflow: WorkflowActivation | null = null): boolean {
+    if (input.discordOriginalText !== undefined && (input.route.platform !== "discord" || input.messageId === null
+      || input.interactionId !== undefined || typeof input.discordOriginalText !== "string")) {
+      throw new Error("Original Discord text requires a physical Discord message");
+    }
     const slackInvocation = input.route.platform === "slack" && typeof input.invocationId === "string" && /^[a-f0-9]{64}$/.test(input.invocationId);
     const selection = input.pickerSelection;
     if (selection ? input.messageId !== null || input.interactionId !== undefined || input.invocationId !== undefined

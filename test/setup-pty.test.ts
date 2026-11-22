@@ -589,7 +589,10 @@ ptyTest("actual traced setup wrapper prepares all messengers privately; explicit
     expect(config.stateDir).toBe(context.state);
     expect(config.command).toEqual([context.nativeCommand[0]]);
     expect([config.maxHosts, config.maxSubagents, config.idleMs]).toEqual([4, 8, 300000]);
-    expect(config.discord).toEqual({ tokenEnv: defaultNames[0], ownerId: "123456789", allowedGuildIds: ["11111", "22222"], allowedChannelIds: ["33333"] });
+    expect(config.discord).toEqual({
+      tokenEnv: defaultNames[0], ownerId: "123456789", allowedGuildIds: ["11111", "22222"],
+      allowedChannelIds: ["33333"], requireAddressing: false,
+    });
     expect(config.telegram).toEqual({ tokenEnv: defaultNames[1], ownerId: "246813579", allowedChatIds: ["-97531"] });
     expect(config.slack).toEqual({ botTokenEnv: defaultNames[2], appTokenEnv: defaultNames[3], ownerId: "UOWNER123", teamId: "TTEAM123", allowedChannelIds: ["CCHANNEL123"] });
     const credentialBytes = await fs.readFile(`${context.config}.env`, "utf8");
@@ -1159,6 +1162,29 @@ ptyTest("profile setup uses start's shell precedence and preserves saved files o
     expect(terminal.transcript()).not.toContain(saved);
     expect(await fs.readFile(context.config, "utf8")).toBe(original.config);
     expect(parseEnv(await fs.readFile(`${context.config}.env`, "utf8"))[customName]).toBe(saved);
+    await context.inert();
+  } finally { await context.cleanup(); }
+}, 90_000);
+
+ptyTest("setup preserves an existing explicit Discord addressing opt-in byte-for-byte", async () => {
+  const context = await fixture({ memory: { backend: "mnemopi" } });
+  try {
+    const value = {
+      command: context.nativeCommand, stateDir: context.state, headCwd: context.root,
+      maxHosts: 4, maxSubagents: 8, idleMs: 300000,
+      discord: {
+        tokenEnv: "DISCORD_BOT_TOKEN", ownerId: "123456789", allowedGuildIds: ["11111"],
+        allowedChannelIds: ["33333"], requireAddressing: true,
+      },
+    };
+    const bytes = `\n${JSON.stringify(value, null, "\t")}\n\n`;
+    await fs.writeFile(context.config, bytes);
+    await fs.writeFile(`${context.config}.env`, "DISCORD_BOT_TOKEN=pty-existing-discord-token\n", { mode: 0o600 });
+    const terminal = context.terminal();
+    await terminal.secret("DISCORD_BOT_TOKEN", "", true);
+    await terminal.answer("Write configuration/credentials? [y/N]: ", "y");
+    await terminal.finished(true);
+    expect(await fs.readFile(context.config, "utf8")).toBe(bytes);
     await context.inert();
   } finally { await context.cleanup(); }
 }, 90_000);

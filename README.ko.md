@@ -273,7 +273,10 @@ Linux 서비스 설치는 제공하지 않습니다.
    `authorized_keys`의 지정 명령 제한을 사용하므로 Tailscale SSH 자체의 로그인 정책으로 대체할 수 없습니다.
    공개 포트, 두 번째 헤드, 워커에서의 `omp-sa setup`이나 `omp-sa start`는 필요 없습니다.
 2. **헤드에서:** 워커 운영자와 SSH 호스트 키 지문을 확인한 뒤 `known_hosts`에 등록합니다.
-   `~/.ssh/config` 별칭 대신 직접 접속할 수 있는 DNS 이름이나 IP를 사용하세요.
+   `~/.ssh/config` 별칭 대신 직접 접속할 수 있는 DNS 이름이나 IP를 사용하세요. Tailscale SSH가
+   22번 포트를 사용한다면 사설망에서 별도 포트로 수신하는 OpenSSH를 사용하세요. 해당 키는
+   `known_hosts`의 `[호스트]:포트`에 고정하고, 두 번의 `worker add` 모두 `dev@linux-box:포트`를
+   지정합니다. 기본 SSH 포트를 쓸 때는 다음과 같습니다.
    ```sh
    omp-sa worker add dev@linux-box --config ./config.local.json
    ```
@@ -290,6 +293,12 @@ Linux 서비스 설치는 제공하지 않습니다.
    이 워커를 우선 사용하려면 `--default --local-repo /헤드의/경로/my-app`을 붙입니다.
    `--local-repo`를 생략하면 설정의 `headCwd`를 사용합니다. 같은 Git 원격 주소라도
    다른 checkout에 이 기본 배치 권한이 넘어가지는 않습니다.
+
+등록 목록은 `omp-sa worker list --config ./config.local.json`으로 확인합니다. 목록 조회는
+워커에 접속하지 않습니다. 지금 연결되는지 확인하려면
+`omp-sa worker doctor dev@linux-box --config ./config.local.json`에 등록 때 쓴 주소와
+포트를 그대로 지정하세요. 워커 신원과 빈 슬롯을 확인하며, 기본 워커라면 승인된 헤드
+checkout의 현재 커밋도 대조합니다. 확인이 막히면 종료 코드는 0이 아니며, 레인을 시작하지 않습니다.
 
 이제 채팅에서 원격 실행이나 필요한 OS를 지정하면 됩니다. 저장소는 폴더 이름이 아니라
 Git 원격 주소로 매칭합니다. 커밋하지 않은 변경과 무시된 파일을 동기화하지 않으므로
@@ -386,6 +395,14 @@ bun run test:ci
 | 릴리즈 | [릴리즈 노트](docs/releases/0.1.6.md) 및 [과거 검증 기록](docs/releases/0.1.0.md#verification-records). |
 
 [oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-superkit](https://github.com/dbc-hbin/omp-superkit)을 사용합니다.
+
+[Jay (@Momentum96)](https://github.com/Momentum96)는
+[Discord 멘션·답글 필터(#29)](https://github.com/dbc-hbin/omp-superagent/pull/29)의 원안을 기여했고,
+[원격 레인 동작 검증(#30)](https://github.com/dbc-hbin/omp-superagent/pull/30),
+[워커 등록·진단(#32)](https://github.com/dbc-hbin/omp-superagent/pull/32),
+[macOS GUI 워커(#33)](https://github.com/dbc-hbin/omp-superagent/pull/33)를 제안했습니다.
+워커 진단·별도 SSH 포트·원격 의사결정 검증에는 이 제안을 반영했습니다.
+워커는 기존 SSH 실행 방식을 유지하며 GUI 런처는 포함하지 않습니다.
 
 ## License
 

@@ -19,7 +19,7 @@ use crate::{
     group::{Candidate, Request as GroupRequest, Room, Rooms},
     picker::{Pickers, Selection},
     slack::Slack,
-    store::Store,
+    store::{DiscordIntake, Store},
     telegram::Telegram,
 };
 
@@ -136,6 +136,18 @@ impl Context {
     }
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.store.set_meta(key, value)
+    }
+    pub(crate) fn discord_intake(&self) -> DiscordIntake<'_> {
+        DiscordIntake(&self.store)
+    }
+    pub(crate) fn discord_admitted_input(&self, input: &Value, require_original_text: bool) -> Result<Option<Value>> {
+        let route = &input["route"];
+        ensure!(
+            self.platform == "discord" && route["platform"] == self.platform,
+            "Discord source crossed platform boundary"
+        );
+        self.rooms.owner_route(route)?;
+        self.store.discord_admitted_input(input, require_original_text)
     }
     pub(crate) fn insert_meta_if_absent(
         &self,

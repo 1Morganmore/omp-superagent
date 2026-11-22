@@ -9,7 +9,7 @@ import { hostPaths, loadConfig, type Config } from "../src/config";
 import { HostConnection, startHost } from "../src/host";
 import { Superagent } from "../src/runtime";
 import { Store } from "../src/store";
-import { RecordingMessenger } from "./fixtures/model-native-runtime";
+import { DecisionParityMessenger, verifyWorkerDecisionParity } from "./fixtures/native-worker-decision-parity";
 import { waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { selectWorkerPlacement } from "../src/worker-placement";
 import { lookupWorker, remoteLanePaths, workerConnect, workerOpen, workerProbe, type WorkerLaneRef } from "../src/worker-wire";
@@ -45,7 +45,7 @@ async function verifyChatLane(config: Config, enrollment: string, path: string) 
   await writeFile(join(agent, "config.yml"), JSON.stringify({ ...offlineMnemopi, disabledProviders: nativeDisabledProviders }));
   const main = hostPaths(config, "main");
   const store = new Store(join(config.stateDir, "coordination.sqlite"));
-  const messenger = new RecordingMessenger();
+  const messenger = new DecisionParityMessenger();
   const errors: unknown[] = [];
   const runtime = new Superagent(config, store, messenger, resolve(import.meta.dir, "../src/lane-extension.ts"), error => errors.push(error));
   const route = { platform: "discord" as const, accountId: "2", authorityId: "1", guildId: "3", channelId: "4", threadId: "50" };
@@ -84,6 +84,7 @@ async function verifyChatLane(config: Config, enrollment: string, path: string) 
     await wait(() => messenger.sent.some(output => output.sourceId === result), "Missing follow-up result");
     expect(messenger.sent.find(output => output.sourceId === result)).toMatchObject({ route, text: "Socket host smoke response" });
     expect(store.lane(lane.id)).toMatchObject({ sessionId: first?.sessionId, generation: first?.generation, pid: first?.pid });
+    await verifyWorkerDecisionParity({ runtime, store, messenger, lane, stateDir: config.stateDir });
   } finally {
     const lanes = store.lanes();
     try {
@@ -119,7 +120,7 @@ sshTest("enroll via the CLI, launch once over SSH, reconnect to the same stock O
   const git = (home: string, ...args: string[]) => command("git", ["-c", "core.hooksPath=/dev/null", ...args], home);
   const cliJson = (home: string, ...args: string[]) => JSON.parse(command(process.execPath, ["--no-env-file", cli, ...args], home, `${bin}:${path}`));
   await Promise.all([target,head,bin].map(dir => mkdir(dir, { mode: 0o700 })));
-  const configPath = join(head, "config.local.json"), destination = `${userInfo().username}@127.0.0.1`;
+  const configPath = join(head, "config.local.json");
   git(head, "init", "-q", workspace);
   await writeFile(join(workspace, "input.txt"), "pinned contents\n");
   git(workspace, "add", "input.txt");
@@ -137,10 +138,11 @@ sshTest("enroll via the CLI, launch once over SSH, reconnect to the same stock O
   await writeFile(join(agent, "worker-extensions.json"), JSON.stringify([join(repo, "test/fixtures/native-extension.ts")]), { mode: 0o600 });
   command("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", hostKey], head);
   const known = join(root, "known_hosts");
-  await writeFile(known, `worker-fixture ${await readFile(`${hostKey}.pub`, "utf8")}`);
   const reservation = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
   const port = reservation.port;
   reservation.stop(true);
+  const destination = `${userInfo().username}@127.0.0.1:${port}`;
+  await writeFile(known, `[127.0.0.1]:${port} ${await readFile(`${hostKey}.pub`, "utf8")}`);
   const serverConfig = join(root, "sshd_config");
   await writeFile(serverConfig, [
     `Port ${port}`, "ListenAddress 127.0.0.1", `HostKey ${hostKey}`, `PidFile ${root}/pid`,
@@ -149,9 +151,8 @@ sshTest("enroll via the CLI, launch once over SSH, reconnect to the same stock O
     `AllowUsers ${userInfo().username}`, "DisableForwarding yes", "PermitTTY no",
     `SetEnv HOME=${target} PATH=${path} PI_CODING_AGENT_DIR=${agent} OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH=${join(repo,"test/fixtures/managed-ulw")}`,
   ].join("\n") + "\n");
-  // Use real ssh plus only the fixture's ephemeral port and host-key store.
-  // Keep the production argv, including the fixed original command, untouched.
-  await writeFile(join(bin, "ssh"), `#!/bin/sh\nexec "${ssh}" -p ${port} -o HostKeyAlias=worker-fixture -o UserKnownHostsFile="${known}" "$@"\n`, { mode: 0o700 });
+  // Isolate the host-key store. The real client must use the enrolled port.
+  await writeFile(join(bin, "ssh"), `#!/bin/sh\nexec "${ssh}" -o UserKnownHostsFile="${known}" "$@"\n`, { mode: 0o700 });
   const server = Bun.spawn([sshdPath, "-D", "-e", "-f", serverConfig], { env: env(target), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
   const logs = createInterface({ input: Readable.fromWeb(server.stderr) });
   const ready = Promise.withResolvers<void>();
@@ -171,6 +172,12 @@ sshTest("enroll via the CLI, launch once over SSH, reconnect to the same stock O
     const config = await loadConfig(configPath);
     const placement = await selectWorkerPlacement(config, workspace);
     if (!placement) throw new Error("Approved default checkout did not select its ready worker");
+    expect(cliJson(head, "worker", "list", "--config", configPath).workers)
+      .toMatchObject([{ destination, workerId: placement.workerId, default: true }]);
+    expect(cliJson(head, "worker", "doctor", destination, "--config", configPath)).toMatchObject({
+      status: "ok", worker: { destination, workerId: placement.workerId }, live: { active: 0, available: 1 },
+      workspace: { repoId: placement.repoId, revision: placement.revision, subdir: placement.subdir },
+    });
     const reg = await lookupWorker(config.stateDir, placement);
     const ref: WorkerLaneRef = { laneId: "lane-ssh-qa", generation: 1, revision: placement.revision, repoId: placement.repoId, subdir: placement.subdir };
     const launch = { model: "socket-host-smoke/local", subagentConcurrency: 1 };

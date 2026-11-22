@@ -9,6 +9,7 @@ export interface DiscordConfig {
   ownerId: string;
   allowedGuildIds: string[];
   allowedChannelIds: string[];
+  readonly requireAddressing?: boolean;
   voice?: DiscordVoiceConfig;
 }
 
@@ -169,6 +170,16 @@ export async function loadConfig(path: string): Promise<Config> {
   return (await loadConfigSnapshot(path)).config;
 }
 
+function stateDirectory(raw: Record<string, unknown>, base: string): string {
+  return resolve(base, text(raw.stateDir, "stateDir"));
+}
+
+/** Inspect saved inventory even when the head checkout or OMP is unavailable. */
+export async function loadStateDirectory(path: string): Promise<string> {
+  const absolute = resolve(path);
+  return stateDirectory(record(await Bun.file(absolute).json(), "config"), dirname(absolute));
+}
+
 /** Bind lifecycle authority to the same bytes that produced the normalized configuration. */
 export async function loadConfigSnapshot(path: string) {
   const absolute = resolve(path);
@@ -202,6 +213,9 @@ export function parseConfig(value: unknown, path: string): Config {
   const maxHosts = integer(raw.maxHosts, "maxHosts", 2);
   const maxSubagents = integer(raw.maxSubagents, "maxSubagents", maxHosts);
   const discordChannels = discord ? ids(discord.allowedChannelIds, "discord.allowedChannelIds") : [];
+  const requireAddressing = discord?.requireAddressing;
+  if (requireAddressing !== undefined && typeof requireAddressing !== "boolean")
+    throw new Error("discord.requireAddressing must be a boolean");
   const voice = discord?.voice === undefined ? undefined : record(discord.voice, "discord.voice");
   let voiceConfig: DiscordVoiceConfig | undefined;
   if (voice) {
@@ -238,7 +252,7 @@ export function parseConfig(value: unknown, path: string): Config {
   }
   const config: Config = {
     path: absolute,
-    stateDir: pathValue(raw.stateDir, "stateDir"),
+    stateDir: stateDirectory(raw, base),
     headCwd,
     command,
     maxHosts,
@@ -250,6 +264,7 @@ export function parseConfig(value: unknown, path: string): Config {
       ownerId: id(discord.ownerId, "discord.ownerId", /^\d+$/),
       allowedGuildIds: ids(discord.allowedGuildIds, "discord.allowedGuildIds"),
       allowedChannelIds: discordChannels,
+      requireAddressing: requireAddressing ?? false,
       ...(voiceConfig ? { voice: voiceConfig } : {}),
     } } : {}),
     ...(telegram ? { telegram: {

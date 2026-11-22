@@ -47,6 +47,15 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const remoteReconnectIntervalMs = 10_000;
+const discordCatchupInitialDelayMs = 2_000;
+const discordCatchupMaxDelayMs = 60_000;
+
+interface DiscordCatchupRetry {
+  readonly route: Route;
+  readonly cursor: string;
+  readonly after: number;
+  readonly delayMs: number;
+}
 
 interface PastTopicRef {
   readonly laneId: string;
@@ -59,6 +68,10 @@ interface PastTopicRef {
 
 function discordWorkThread(route: Route): boolean {
   return route.platform === "discord" && route.guildId !== null && route.threadId !== null;
+}
+
+function discordCatchupBoundaryKey(route: Route): string | null {
+  return route.platform === "discord" ? `discord:catchup-boundary:${physicalRouteKey(route)}` : null;
 }
 
 /** Keep serialized evidence inert in stock OMP, which expands references even inside Markdown fences. */
@@ -363,6 +376,8 @@ export class Superagent {
   private pumping?: Promise<void>;
   private outbound?: Promise<void>;
   private catchupTask?: Promise<void>;
+  private discordCatchupRetry?: Promise<void>;
+  private readonly discordCatchupRetries = new Map<string, DiscordCatchupRetry>();
   private repeat = false;
   private stopped = false;
   private ready = false;
@@ -401,8 +416,8 @@ export class Superagent {
       for (const directory of ["run", "sessions", "logs", "attachments"]) privateDirectory(join(this.config.stateDir, directory));
       if (this.config.groupRooms?.length) this.groups = new GroupAccess(this.config, this.messenger);
       this.store.recoverDeliveries();
-      // Snapshot before streaming intake can advance a cursor past an offline gap.
-      const cursors = this.cursors();
+      // Reserve the recovery boundaries before opening streaming intake.
+      const cursors = this.reserveCatchupCursors();
       await this.messenger.start({
         ready: this.intakeReady.promise,
         message: input => this.intake(() => this.receive(input)),
@@ -525,6 +540,7 @@ export class Superagent {
       for (const live of this.live.values()) if (live.input) await this.finish(live);
       this.timer = setInterval(() => {
         this.reconnectRemoteLane();
+        this.retryDiscordCatchup();
         void this.kick().catch(this.report);
         this.observePrs();
         this.observePresetRoles();
@@ -2593,27 +2609,63 @@ export class Superagent {
     return routes;
   }
 
-  private cursors(): Array<{ route: Route; cursor: string }> {
+  private reserveCatchupCursors(): Array<{ route: Route; cursor: string }> {
     return this.knownRoutes().flatMap(route => {
       try { this.authorized(route); }
       catch { this.report(new Error("Skipping a stored messenger cursor whose authorization was revoked")); return []; }
-      const cursor = this.store.getMeta(`cursor:${physicalRouteKey(route)}`);
-      if (cursor && compareMessageIds(route.platform, cursor, cursor) === null) {
-        this.report(new Error("Skipping an unsupported stored messenger cursor"));
+      const latest = this.store.getMeta(`cursor:${physicalRouteKey(route)}`) || null;
+      const boundaryKey = discordCatchupBoundaryKey(route);
+      const boundary = boundaryKey ? this.store.getMeta(boundaryKey) || null : null;
+      const cursor = boundary ?? latest;
+      if (cursor === null) return [];
+      const order = latest === null ? null : compareMessageIds(route.platform, cursor, latest);
+      if (order === null || order > 0) {
+        this.report(new Error("Skipping an unsupported or inconsistent stored messenger cursor"));
         return [];
       }
-      return cursor ? [{ route: physicalRoute(route), cursor }] : [];
+      // Discord reply verification can fail partway through history. Pin the
+      // oldest boundary before I/O, independently of advances by live intake.
+      if (boundaryKey && boundary === null) this.store.setMeta(boundaryKey, cursor);
+      return [{ route: physicalRoute(route), cursor }];
     });
   }
 
-  /** Called at startup and by the messenger reconnect hook; no history bootstrap. */
-  async catchup(cursors = this.cursors()): Promise<void> {
+  private retryDiscordCatchup(): void {
+    if (!this.discordCatchupRetries.size || !this.ready || this.stopped || this.catchupTask || this.discordCatchupRetry
+      || this.restartFence() || this.headRotationHeld()) return;
+    const now = Date.now();
+    for (const [boundaryKey, retry] of this.discordCatchupRetries) {
+      if (retry.after > now) continue;
+      if (this.store.getMeta(boundaryKey) !== retry.cursor || !authorizeRoute(this.config, retry.route)) {
+        this.discordCatchupRetries.delete(boundaryKey);
+        continue;
+      }
+      // Only retry the pinned read. A healthy route, or one without an original
+      // cursor, never acquires a new recovery scan from background maintenance.
+      this.discordCatchupRetry = this.catchup([retry]).finally(() => { this.discordCatchupRetry = undefined; });
+      this.background(this.discordCatchupRetry);
+      return;
+    }
+  }
+
+  /** Startup and reconnect sweep known cursors; maintenance retries one pinned Discord route. */
+  async catchup(cursors?: Array<{ route: Route; cursor: string }>): Promise<void> {
+    // A reconnect still needs its full sweep, not just the single route a
+    // background retry already owns. Both reads stay serialized.
+    if (this.discordCatchupRetry) await this.discordCatchupRetry;
+    if (this.stopped) return;
     if (this.catchupTask) return this.catchupTask;
     this.catchupTask = (async () => {
-      for (const { route, cursor } of cursors) {
+      for (const { route, cursor } of cursors ?? this.reserveCatchupCursors()) {
+        if (this.stopped) return;
         this.authorized(route);
+        const boundaryKey = discordCatchupBoundaryKey(route);
+        const latestKey = `cursor:${physicalRouteKey(route)}`;
+        const latestBeforeScan = boundaryKey ? this.store.getMeta(latestKey) : null;
+        let retryAfterMs = 0;
         try {
-          const history = await this.messenger.fetchAfter(route, cursor);
+          const history = await untilAborted(boundaryKey ? this.stopSignal.signal : undefined, () => this.messenger.fetchAfter(route, cursor));
+          if (this.stopped) return;
           // Streaming-only platforms recover their durable intake in the adapter.
           // No history response is not proof that the offline gap was fetched.
           if (history === null) continue;
@@ -2625,9 +2677,34 @@ export class Superagent {
             return { input, messageId: input.messageId, order };
           }).filter(item => item.order > 0).sort((left, right) => compareMessageIds(route.platform, left.messageId, right.messageId)!);
           for (const { input } of ordered) {
+            if (this.stopped) return;
             await this.receive(input);
           }
-        } catch (error) { this.report(error); }
+          if (!this.stopped && boundaryKey && this.store.getMeta(boundaryKey) === cursor) {
+            const latest = this.store.getMeta(latestKey);
+            // Startup intake may race the scan. Keep the boundary if live
+            // intake advanced beyond what this scan can account for.
+            if (latest && (latest === latestBeforeScan || latest === ordered.at(-1)?.messageId)) {
+              this.store.setMeta(boundaryKey, "");
+            }
+          }
+        } catch (error) {
+          if (this.stopped) return;
+          if (error instanceof DeliveryError && error.retryAfterMs !== undefined && Number.isFinite(error.retryAfterMs)) {
+            retryAfterMs = error.retryAfterMs;
+          }
+          this.report(error instanceof Error ? error : new Error("Messenger history recovery failed", { cause: error }));
+        } finally {
+          if (boundaryKey && !this.stopped) {
+            const previous = this.discordCatchupRetries.get(boundaryKey);
+            this.discordCatchupRetries.delete(boundaryKey);
+            if (this.store.getMeta(boundaryKey) === cursor) {
+              const delayMs = previous?.cursor === cursor ? Math.min(previous.delayMs * 2, discordCatchupMaxDelayMs) : discordCatchupInitialDelayMs;
+              // Reinsert at the end so another already-due route can run first.
+              this.discordCatchupRetries.set(boundaryKey, { route, cursor, delayMs, after: Date.now() + Math.max(delayMs, retryAfterMs) });
+            }
+          }
+        }
       }
     })();
     try { await this.catchupTask; } finally { this.catchupTask = undefined; }
@@ -2887,7 +2964,8 @@ export class Superagent {
           this.store.setMeta(nativeKey, "true");
         }
         this.store.setMeta(destinationKey, JSON.stringify(destination));
-        handoff = { ...original, id: handoffId, route: destination };
+        const { discordOriginalText: _discordOriginalText, ...sourceFields } = original;
+        handoff = { ...sourceFields, id: handoffId, route: destination };
         handoffMetadata = {
           [`handoff-source:${handoffId}`]: original.id,
           ...(destination.topicId && destination.guildId === null && routeKey(destination) !== routeKey(original.route)
@@ -3395,8 +3473,9 @@ export class Superagent {
   private async resumeNativeGoal(live: Live, source: InputRecord, route: Route, inputId: string): Promise<void> {
     this.assertRestartOpen();
     if (this.store.input(inputId)) return; // A submitted or uncertain resume is never repeated.
+    const { discordOriginalText: _discordOriginalText, ...sourceFields } = source;
     this.store.receive({
-      ...source, id: inputId, route,
+      ...sourceFields, id: inputId, route,
       text: "Resume the existing native goal within its entrusted objective.", attachments: [],
     }, live.id, { [`handoff-source:${inputId}`]: source.id });
     const requestId = `sg-${key(inputId)}-${live.generation}`;
@@ -6234,6 +6313,7 @@ export class Superagent {
     this.ready = false;
     this.intakeReady.reject(new Error("Controller stopped before intake readiness"));
     if (this.timer) clearInterval(this.timer);
+    this.discordCatchupRetries.clear();
     this.stopSignal.abort();
     for (const live of this.live.values()) {
       for (const { input } of live.admitted.values()) this.activity(input, false);

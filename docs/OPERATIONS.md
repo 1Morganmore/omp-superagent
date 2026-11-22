@@ -281,6 +281,15 @@ Git 추적 파일에 쓰지 않는다. 아래 셋업은 별도 소유자 전용 
    서버 입력은 `allowedGuildIds`와 `allowedChannelIds`를 **모두** 통과해야 한다.
    스레드는 부모 채널 allowlist를 따른다. 빈 배열은 모든 서버 허용이 아니라 서버 입력 차단이다.
    소유자의 1:1 DM은 서버 allowlist와 별개이며 그룹 DM은 대상이 아니다.
+5. 채널을 다른 봇과 같이 쓰거나 소유자의 일상 대화를 제외하려면 설정 파일에서
+   `discord.requireAddressing`을 `true`로 바꾼다. 기본값은 `false`이며 변경은 다음 Gateway
+   시작부터 적용된다. 실행 중이면 `omp-sa stop main --config FILE`로 정상 종료가 확인된
+   뒤 `omp-sa start --config FILE`을 실행한다. 허용된 서버의 부모 채널에서는 소유자가
+   **이 봇을 실제로 멘션**하거나 **같은 채널에서 이 봇이 보낸 메시지에 답장**해야 일반 메시지가
+   접수된다. 봇 이름만 쓰거나 다른 봇을 멘션하는 것은 해당하지 않는다. 메시지 수정과 연결
+   복구 때 가져오는 메시지에도 같은 기준을 적용한다. 허용된 스레드에서는 멘션이나 답장 없이
+   계속 대화할 수 있다.
+   소유자 1:1 DM, Discord 앱 명령, 승인 버튼, 제한된 `groupRooms`의 규칙은 그대로다.
 
 ```sh
 read -r -s DISCORD_BOT_TOKEN
@@ -304,7 +313,9 @@ bun --no-env-file src/cli.ts discord-commands --config config.local.json --apply
 별도 guild 명령이 전역 명령을 가리는 경우 몰래 삭제하지 않고 충돌을 알린다.
 등록은 모델·메신저 연결을 시작하지 않으며 setup·doctor·start의 부수 효과로 실행되지 않는다.
 인수가 있는 명령은 선택적인 `text` 필드를 사용한다. 예를 들어 `/model`의 `text`에
-`preset high`, `/stop`의 `text`에 `head`를 넣는다. 일반 `/status` 메시지도 계속 지원한다.
+`preset high`, `/stop`의 `text`에 `head`를 넣는다. 일반 메시지로 쓰는 `/status`도 지원하며,
+`discord.requireAddressing`을 켠 부모 채널에서는 다른 일반 메시지와 마찬가지로 이 봇을
+멘션하거나 이 봇의 메시지에 답장해야 한다.
 
 명령은 기존 소유자와 허용 채널·스레드·1:1 DM 경계를 그대로 따른다. 영속 접수 뒤 비공개
 접수 확인을 보내고 실제 결과는 기존 outbox로 원래 대화에 보낸다. interaction ID는 실제
@@ -670,6 +681,7 @@ high/middle/low는 명시적 `start`의 전용 초기 설정 턴에서 기존 �
 | `idleMs` | 안전하게 정착한 유휴 레인을 회수하기까지의 시간(밀리초). 필수 0 이상 정수. 헤드는 대상이 아니며 세션 기록은 삭제하지 않는다. |
 | `model` | 선택 항목. 헤드 시작에 사용할 OMP 모델 식별자. 생략 시 기존 OMP 설정을 따른다. 모든 새 레인의 기본값이 아니며 새 레인은 `lane_start`의 model 또는 preset으로 각각 선택한다. 재개는 저장된 레인 선택을 유지한다. |
 | `discord` | 선택 블록. 존재하면 `tokenEnv`, `ownerId`, `allowedGuildIds`, `allowedChannelIds` 모두 필수. |
+| `discord.requireAddressing` | 선택 불리언, 기본값 `false`. `true`이면 허용된 서버의 부모 채널에서 이 봇의 실제 멘션 또는 이 봇이 보낸 메시지에 대한 답장이 포함된 소유자의 일반 메시지만 접수한다. |
 | `telegram` | 선택 블록. 존재하면 `tokenEnv`, `ownerId`, `allowedChatIds` 모두 필수. 그룹 chat ID의 음수 부호를 보존한다. |
 | `slack` | 선택 블록. 존재하면 `botTokenEnv`, `appTokenEnv`, `ownerId`, `teamId`, `allowedChannelIds` 모두 필수. |
 | `groupRooms` | 선택 목록. 등록한 방과 사용자에게만 아래 그룹 모드를 열며, 해당 방에서는 운영자도 일반 그룹 권한만 갖는다. 기본값은 빈 목록이다. |

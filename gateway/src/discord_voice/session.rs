@@ -50,6 +50,14 @@ pub(super) struct Active {
 }
 
 impl Active {
+    #[cfg(test)]
+    pub(super) fn fixture(call: &Call) -> Self {
+        let (joining, _) = mpsc::channel(1);
+        let (mut active, _) = Self::new(call, Permission::Call, joining, CancellationToken::new());
+        active.ready = true;
+        active
+    }
+
     pub(super) fn new(
         call: &Call,
         permission: Permission,

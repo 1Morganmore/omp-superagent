@@ -90,6 +90,13 @@ test("worker add leaves first-phase keys private and registers only a verified r
     .toEqual([{ destination: options.destination, description, default: true, defaultRepository: { root: cwd, repoId } }]);
 });
 
+test.each(["0", "65536", "22\n", "22:23", ""])("invalid SSH port %j is refused before a worker key is created", async port => {
+  const { options } = fixture();
+  await expect(addWorker({ ...options, destination: `${options.destination}:${port}` }, describeBeforeAuthorization))
+    .rejects.toThrow(/user@host/);
+  expect(existsSync(join(options.stateDir, "workers"))).toBe(false);
+});
+
 test.each([false, true])("add --default refuses incompatible worker inventory or revision (approved identity: %s)", async approved => {
   const { root, options } = fixture();
   const { cwd, description } = await defaultCheckout(root);
@@ -271,6 +278,10 @@ test("worker CLI rejects extra options before consulting account or configuratio
     .rejects.toThrow(/Usage: omp-sa worker add/);
   await expect(main(["worker", "add", "user@host", "--local-repo", "/unused"]))
     .rejects.toThrow(/Usage: omp-sa worker add/);
+  await expect(main(["worker", "list", "--config", "/unused", "--apply"]))
+    .rejects.toThrow(/Usage: omp-sa worker list/);
+  await expect(main(["worker", "doctor", "user@host", "--config", "/unused", "--local-repo", "/unused"]))
+    .rejects.toThrow(/Usage: omp-sa worker doctor/);
 });
 
 test.each([false, true])("worker add --default pins the configured or explicitly selected checkout (override: %s)", async override => {

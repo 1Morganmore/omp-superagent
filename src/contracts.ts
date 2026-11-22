@@ -100,6 +100,8 @@ export interface Inbound {
     readonly option: number;
   };
   text: string;
+  /** Physical Discord message content when stripping a verified mention changed `text`. */
+  readonly discordOriginalText?: string;
   /** Adapter-verified routing-only view; an empty string excludes the entire message. */
   readonly routingText?: string;
   receivedAt: number;

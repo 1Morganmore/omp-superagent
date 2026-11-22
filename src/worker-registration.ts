@@ -9,6 +9,7 @@ import { Type } from "@sinclair/typebox/type";
 import { Value } from "@sinclair/typebox/value";
 import { privateDirectory } from "./config";
 import { stagePrivateFile } from "./credentials";
+import { parseWorkerDestination } from "./worker-destination";
 import { workerRepositoryHead } from "./worker-repository";
 import { trustedWorkerPath } from "./worker-trust";
 import { WorkerDescriptionSchema, type WorkerDescription, type WorkerLaneRef, type WorkerRegistration } from "./worker-wire";
@@ -17,10 +18,8 @@ export class WorkerRegistrationError extends Error {
   override readonly name = "WorkerRegistrationError";
 }
 
-const destinationPattern = "^[A-Za-z0-9_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9_.-]*(?![\\s\\S])";
-const destinationRE = new RegExp(destinationPattern);
 const inventory = Type.Array(Type.Object({
-  destination: Type.String({ pattern: destinationPattern }),
+  destination: Type.String(),
   identityFile: Type.String(),
   description: WorkerDescriptionSchema,
   default: Type.Optional(Type.Boolean()),
@@ -155,7 +154,7 @@ export function listWorkers(stateDir: string): WorkerRegistration[] {
   let defaultSeen = false;
   return parsed.map(({ destination, identityFile, description, default: preferred, defaultRepository }) => {
     const verified = validateDescription(description);
-    if (identityFile !== endpointFor(stateDir, destination).identityFile ||
+    if (!parseWorkerDestination(destination) || identityFile !== endpointFor(stateDir, destination).identityFile ||
         ids.has(verified.workerId) || destinations.has(destination) ||
         (defaultRepository && (!preferred || defaultSeen || !canonicalPath(defaultRepository.root)
           || !verified.repos.some(repo => repo.id === defaultRepository.repoId))))
@@ -188,14 +187,20 @@ function sameEnrollment(before: WorkerDescription, after: WorkerDescription): bo
   return Bun.deepEquals(saved, observed);
 }
 
+/** A fresh activity count is meaningful only for the unchanged, verified enrollment. */
+export function matchWorkerDescription(verified: WorkerDescription, reply: unknown): WorkerDescription | null {
+  const observed = validateDescription(reply);
+  return sameEnrollment(verified, observed) ? observed : null;
+}
+
 /** Begin without network I/O; a separate invocation verifies the restricted SSH endpoint. */
 export async function addWorker(
   options: { readonly stateDir: string; readonly destination: string; readonly defaultRepositoryRoot?: string },
   describe: VerifyWorker,
 ): Promise<EnrollmentResult> {
   const { stateDir, destination, defaultRepositoryRoot } = options;
-  if (!destinationRE.test(destination) || destination.length > 320)
-    throw new WorkerRegistrationError("Worker destination must be an explicit user@host");
+  if (!parseWorkerDestination(destination))
+    throw new WorkerRegistrationError("Worker destination must be an explicit user@host with an optional numeric port (user@host:port)");
   const source = defaultRepositoryRoot === undefined ? null : await workerRepositoryHead(defaultRepositoryRoot);
   if (defaultRepositoryRoot !== undefined && (!source || source.subdir !== ""))
     throw new WorkerRegistrationError("A default worker requires the root of a clean head-side Git checkout with a verifiable network origin");

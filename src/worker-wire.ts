@@ -4,6 +4,7 @@ import { Type, type Static, type TSchema } from "@sinclair/typebox/type";
 import { Value } from "@sinclair/typebox/value";
 import type { Lane } from "./contracts";
 import type { HostOptions } from "./host";
+import { parseWorkerDestination } from "./worker-destination";
 
 /** Only the enrollment CLI chooses destinations/keys. Lane prompts never supply SSH argv. */
 export interface WorkerRepo { readonly id: string; readonly cwd: string }
@@ -73,7 +74,8 @@ function decode<S extends TSchema>(line: Buffer, schema: S): Static<S> {
 }
 
 function startSSH(endpoint: Endpoint) {
-  if (!/^(?:[A-Za-z0-9_][\w.-]*@)?[A-Za-z0-9][\w.-]*$/.test(endpoint.destination) || !isAbsolute(endpoint.identityFile)) {
+  const destination = parseWorkerDestination(endpoint.destination);
+  if (!destination || !isAbsolute(endpoint.identityFile)) {
     throw new Error("Invalid registered SSH endpoint");
   }
   // Never borrow a multiplexed connection authenticated with another key, or
@@ -82,7 +84,8 @@ function startSSH(endpoint: Endpoint) {
     "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
     "-o", "ControlPath=none", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
     "-o", "PreferredAuthentications=publickey", "-o", "ConnectTimeout=8",
-    "-i", endpoint.identityFile, "--", endpoint.destination, "omp-sa-worker-v1"], { stdio: "pipe" });
+    ...(destination.port ? ["-p", destination.port] : []),
+    "-i", endpoint.identityFile, "--", destination.login, "omp-sa-worker-v1"], { stdio: "pipe" });
   // Drain diagnostics without collecting or relaying possibly sensitive peer output.
   child.stderr.resume();
   return child;

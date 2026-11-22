@@ -12,12 +12,14 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod discord_intake;
 mod ingress;
 mod restart;
 mod rotation;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use discord_intake::DiscordIntake;
 pub use ingress::{GatewayReceipt, QueuedEvent, answer_digest};
 pub(crate) use restart::{AuthorityError, js_trim};
 pub(crate) use rotation::{HEAD_ROTATION, HEAD_SESSION_FILE};
@@ -79,6 +81,7 @@ impl Store {
             [],
         )?;
         tx.commit()?;
+        discord_intake::create(&db)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         fs::set_permissions(lock_path, fs::Permissions::from_mode(0o600))?;
         Ok(Self {

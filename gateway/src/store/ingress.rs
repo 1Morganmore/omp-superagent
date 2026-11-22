@@ -126,6 +126,79 @@ impl Store {
         Ok(true)
     }
 
+    /// Recover the original admitted representation, not a new policy
+    /// projection of that source. History is delivered directly to the head,
+    /// so some sources have a head receipt but no Gateway event.
+    pub(crate) fn discord_admitted_input(&self, input: &Value, require_original_text: bool) -> Result<Option<Value>> {
+        let id = string(input, "id")?;
+        let db = self.db()?;
+        let gateway = db.query_row(
+            "SELECT data FROM gateway_events WHERE identity=?",
+            [format!("message:{id}")],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        let mut saved = if let Some(data) = gateway {
+            let mut event: Value = serde_json::from_str(&data)?;
+            if event["kind"] != "message" {
+                bail!("Invalid recorded Discord Gateway message");
+            }
+            event["input"].take()
+        } else {
+            let has_head: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='inputs' AND type='table')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_head {
+                return Ok(None);
+            }
+            let data = db.query_row(
+                "SELECT inputs.data FROM inputs
+                 JOIN metadata ON metadata.key='user-source:'||inputs.id AND metadata.value='true'
+                 WHERE inputs.id=?",
+                [id],
+                |row| row.get::<_, String>(0),
+            ).optional()?;
+            let Some(data) = data else { return Ok(None) };
+            let mut value: Value = serde_json::from_str(&data)?;
+            value.as_object_mut().context("Invalid recorded Discord head input")?.remove("workflow");
+            // The head owns logical topic assignment. Never accept a different
+            // platform, account, authority, parent or physical thread.
+            value["route"].as_object_mut().context("Invalid recorded Discord head route")?.remove("topicId");
+            value
+        };
+        if require_original_text && saved.get("discordOriginalText").is_none() {
+            // Older voice confirmations stored draft text without the raw
+            // confirmation. An unprovable control cannot be replayed.
+            return Ok(None);
+        }
+        let mut source = saved.clone();
+        if let Some(original) = source.as_object_mut()
+            .context("Invalid recorded Discord input")?
+            .remove("discordOriginalText")
+        {
+            if !original.is_string() {
+                bail!("Invalid recorded original Discord text");
+            }
+            source["text"] = original;
+        }
+        // Use the existing Gateway identity check (including its narrowly
+        // scoped Discord CDN signature handling), with the exact original text.
+        let source = identity(serde_json::json!({"kind":"message","input":source}))?;
+        let observed = identity(serde_json::json!({"kind":"message","input":input}))?;
+        if saved["receivedAt"] != input["receivedAt"] || !json_equal(&source, &observed, false) {
+            bail!("Discord admitted source identity conflict");
+        }
+        let incoming = input["attachments"].as_array().context("Invalid Discord attachments")?;
+        let admitted = saved["attachments"].as_array_mut().context("Invalid recorded Discord attachments")?;
+        for file in admitted {
+            if let Some(fresh) = incoming.iter().find(|fresh| fresh["id"] == file["id"]) {
+                file["url"] = fresh["url"].clone();
+            }
+        }
+        Ok(Some(saved))
+    }
+
     pub(crate) fn group_request(&self, id: &str) -> Result<Option<GroupRequest>> {
         let data = self.db()?.query_row(
             "SELECT data FROM gateway_events WHERE identity=? AND delivery_error IS NOT 'rejected'",

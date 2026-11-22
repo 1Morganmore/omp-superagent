@@ -9,7 +9,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::{
     Identity, State,
+    ingress::{CandidateKind, LiveWire},
     model::{Channel, User, snowflake},
+    pending::Pending,
 };
 
 #[derive(Deserialize)]
@@ -51,15 +53,17 @@ impl Ready {
 }
 
 pub(super) enum Intake {
-    Message {
-        data: Value,
-        create: bool,
-        live: bool,
+    Owner {
+        through: i64,
+        wire: Option<LiveWire>,
     },
+    Group(Value),
     Voice {
         data: Value,
+        text: String,
         connection: mpsc::Sender<Value>,
     },
+    Authenticated,
     Reconnect,
 }
 
@@ -92,7 +96,10 @@ impl Dispatcher {
     pub async fn event(&self, event: &str, data: Value, connection: &Connection<'_>) -> Result<()> {
         let state = &self.state;
         match event {
-            "READY" => state.channels.write().await.clear(),
+            "READY" => {
+                state.channels.write().await.clear();
+                self.enqueue(Intake::Authenticated)?;
+            }
             "GUILD_CREATE" => {
                 if let Some(guild) = data["id"]
                     .as_str()
@@ -161,37 +168,56 @@ impl Dispatcher {
                 }
             }
             "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
-                if state.stopping.load(Ordering::Acquire) {
-                    return Ok(());
-                }
                 let create = event == "MESSAGE_CREATE";
-                if !state.intake_candidate(&data, create).await {
+                let Some(candidate) = state.intake_candidate(&data, create).await else {
                     return Ok(());
-                }
-                if let Some(voice) = state.voice.as_ref().filter(|voice| voice.is_control(&data)) {
-                    if create && connection.fresh && connection.admission_ready {
-                        if voice.is_priority_control(&data) {
+                };
+                let live = connection.fresh && connection.admission_ready
+                    && !state.stopping.load(Ordering::Acquire);
+                if let Some(voice) = &state.voice
+                    && let Some(command) = state.voice_control(&data, voice)
+                {
+                    if create && live {
+                        if super::voice::Voice::is_priority_control(&command) {
                             if state
-                                .voice_message(&data, connection.outbound)
+                                .voice_message(&data, &command, connection.outbound)
                                 .await
                                 .is_err()
                             {
                                 eprintln!("Discord priority voice command was not completed");
                             }
                         } else {
+                            let text = command.into_owned();
                             self.enqueue(Intake::Voice {
                                 data,
+                                text,
                                 connection: connection.outbound.clone(),
                             })?;
                         }
                     }
                     return Ok(());
                 }
-                self.enqueue(Intake::Message {
-                    data,
-                    create,
-                    live: connection.fresh && connection.admission_ready,
-                })?;
+                match candidate {
+                    CandidateKind::Group if create && live => self.enqueue(Intake::Group(data))?,
+                    CandidateKind::Group => (),
+                    CandidateKind::Owner(route) => {
+                        let unresolved = route.is_none();
+                        let Some(pending) = Pending::from_dispatch(state, &data, create, route) else {
+                            return Ok(());
+                        };
+                        // Reserve the ordering marker first. Neither an
+                        // overloaded queue nor a failed durable write may
+                        // advance the resumable websocket sequence.
+                        let permit = self.intake.try_reserve().map_err(|_| intake_full())?;
+                        let through = pending.record(state)
+                            .map_err(|_| anyhow::anyhow!("Discord candidate could not be recorded; resuming before this event"))?;
+                        let wire = (unresolved && data.get("author").is_some()).then_some(LiveWire {
+                            group: create && live,
+                            data,
+                        });
+                        permit.send(Intake::Owner { through, wire });
+                    }
+                }
                 return Ok(());
             }
             "INTERACTION_CREATE" => {
@@ -244,15 +270,12 @@ impl Dispatcher {
     }
 
     fn enqueue(&self, event: Intake) -> Result<()> {
-        self.intake.try_send(event).map_err(|_| {
-            // No REST or readiness waits on the websocket. In the exceptional
-            // case of candidate-owner overload, return before the current
-            // sequence is checkpointed, then resume it rather than drop it.
-            anyhow::anyhow!(
-                "Discord candidate intake is full or unavailable; resuming before this event"
-            )
-        })
+        self.intake.try_send(event).map_err(|_| intake_full())
     }
+}
+
+fn intake_full() -> anyhow::Error {
+    anyhow::anyhow!("Discord candidate intake is full or unavailable; resuming before this event")
 }
 
 pub(super) struct Connection<'a> {
@@ -265,6 +288,7 @@ pub(super) async fn ordered_intake(
     state: Arc<State>,
     mut incoming: mpsc::Receiver<Intake>,
     ready: oneshot::Sender<()>,
+    mut backlog: Option<i64>,
 ) {
     if state.ctx.ready().await.is_err() {
         eprintln!("Discord startup readiness failed; intake remains closed");
@@ -275,8 +299,18 @@ pub(super) async fn ordered_intake(
     }
     while let Some(event) = incoming.recv().await {
         let result = match event {
-            Intake::Message { data, create, live } => state.message_dispatch(data, create, live).await,
-            Intake::Voice { data, connection } => state.voice_message(&data, &connection).await,
+            Intake::Owner { through, wire } => {
+                state.drain_owner_intake(through, wire.as_ref()).await;
+                Ok(())
+            }
+            Intake::Group(data) => state.group_dispatch(&data).await,
+            Intake::Voice { data, text, connection } => state.voice_message(&data, &text, &connection).await,
+            Intake::Authenticated => {
+                if let Some(through) = backlog.take() {
+                    state.drain_owner_intake(through, None).await;
+                }
+                Ok(())
+            }
             Intake::Reconnect => state.admit(json!({ "kind": "reconnect" })),
         };
         if result.is_err() {

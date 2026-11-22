@@ -332,12 +332,13 @@ describe("durable coordination store", () => {
 
   test("Discord context snapshots survive reopen and metadata redelivery while each owner revision retains its own snapshot", () => {
     const { store, path } = fixture();
-    const original: Inbound = { ...inbound("discord-context"),
+    const original: Inbound = { ...inbound("discord-context"), discordOriginalText: "<@42> request discord-context",
       discordContext: { kind: "guild", channel: { id: "channel", name: "Original", topic: null, purpose: "Original purpose" },
         thread: { id: "thread", parentId: "channel", name: "Original thread" } },
     };
     store.receive(original, "main");
     const edited: Inbound = { ...original, id: "discord-context:edit", text: "Edited owner instruction",
+      discordOriginalText: "<@42> Edited owner instruction",
       discordContext: { kind: "guild", channel: { id: "channel", name: "Later", topic: "New topic" },
         thread: { id: "thread", parentId: "channel", name: "Renamed thread", purpose: "Later purpose" } },
     };
@@ -346,6 +347,9 @@ describe("durable coordination store", () => {
     const reopened = open(path);
     expect(reopened.receive({ ...original, discordContext: edited.discordContext }, "main")).toBe(false);
     expect(reopened.input(original.id)?.discordContext).toEqual(original.discordContext);
+    expect(reopened.input(original.id)?.discordOriginalText).toBe(original.discordOriginalText);
+    expect(() => reopened.receive({ ...original, discordOriginalText: `${original.text} <@42>` }, "main"))
+      .toThrow("identity conflict");
     expect(reopened.input(edited.id)?.discordContext).toEqual(edited.discordContext);
     expect(reopened.receive({ ...edited, discordContext: undefined }, "main")).toBe(false);
     expect(reopened.input(edited.id)?.discordContext).toEqual(edited.discordContext);

@@ -76,7 +76,7 @@ impl Route {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct User {
     pub id: String,
     #[serde(default)]
@@ -164,7 +164,7 @@ impl Channel {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Message {
     pub id: String,
     pub channel_id: String,
@@ -174,6 +174,7 @@ pub(super) struct Message {
     pub kind: u8,
     pub webhook_id: Option<String>,
     pub content: String,
+    pub mentions: Option<Vec<User>>,
     pub edited_timestamp: Option<String>,
     #[serde(default)]
     pub attachments: Vec<RemoteAttachment>,
@@ -195,23 +196,26 @@ pub(super) fn actual_guild(actual: Option<&str>, route: &Route) -> bool {
     actual.is_none_or(|id| Some(id) == route.guild_id.as_deref())
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct ReferencedMessage {
     pub id: String,
     pub channel_id: String,
     pub guild_id: Option<String>,
     pub author: User,
+    pub webhook_id: Option<String>,
     pub content: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Reference {
+    #[serde(rename = "type", default)]
+    pub kind: u8,
     pub message_id: Option<String>,
     pub channel_id: Option<String>,
     pub guild_id: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct RemoteAttachment {
     pub id: String,
     pub filename: String,

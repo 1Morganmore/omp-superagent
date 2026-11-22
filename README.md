@@ -295,7 +295,10 @@ checkout, use the source installation above, not an older npm release).
    `omp-sa setup` or `omp-sa start` is needed on the worker.
 2. **On the head:** verify the worker's SSH host-key fingerprint with its operator
    and trust it in the head account's `known_hosts`. Use a directly resolvable DNS
-   name/IP, not a nickname from `~/.ssh/config`. Create the enrollment:
+   name/IP, not a nickname from `~/.ssh/config`. If Tailscale SSH handles port 22,
+   use a separate OpenSSH listener on the private network, pin its host key as
+   `[host]:port` in `known_hosts`, and use `dev@linux-box:port` in both `worker add`
+   calls. For the default SSH port:
    ```sh
    omp-sa worker add dev@linux-box --config ./config.local.json
    ```
@@ -314,6 +317,13 @@ checkout, use the source installation above, not an older npm release).
    repeat `worker add` with `--default --local-repo /path/on/head/my-app`.
    Omitting `--local-repo` uses the configured `headCwd`. Other checkouts with
    the same Git origin do not inherit permission to send ordinary tasks there.
+
+Use `omp-sa worker list --config ./config.local.json` to see verified enrollments
+without contacting the workers. To check one now, run
+`omp-sa worker doctor dev@linux-box --config ./config.local.json` using the exact
+enrolled destination, including its port if specified. It checks the worker identity
+and available slots. For a default worker it also verifies the current revision of
+the approved head checkout. A blocked check exits nonzero; neither command starts a lane.
 
 Now ask for a remote lane or name the required platform in chat. Superagent matches
 the repository by Git origin, not folder name; local edits and ignored files are
@@ -428,6 +438,14 @@ recorded versions and scenarios. Offline CI does not verify live accounts or pro
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.
 The mascot reimagines OMP's pi mark as a little superhero.
+
+[Jay (@Momentum96)](https://github.com/Momentum96) contributed the original
+[Discord addressing filter (#29)](https://github.com/dbc-hbin/omp-superagent/pull/29)
+and proposed [remote lane parity (#30)](https://github.com/dbc-hbin/omp-superagent/pull/30),
+[worker onboarding and diagnostics (#32)](https://github.com/dbc-hbin/omp-superagent/pull/32),
+and [macOS GUI workers (#33)](https://github.com/dbc-hbin/omp-superagent/pull/33).
+The enrolled SSH worker keeps its existing launch model; the diagnostics, custom SSH
+port, and remote decision checks build on those proposals, not the GUI launcher.
 
 ## License
 

@@ -71,7 +71,29 @@ impl Rest {
     }
 
     pub async fn lookup<T: DeserializeOwned>(&self, path: &str) -> Effect<Lookup<T>> {
+        Self::lookup_response(send(self.request(Method::GET, path)).await?).await
+    }
+
+    /// Read-only intake retries an unproved read even when a request failed
+    /// before it was sent. Only Discord's explicit absence/access errors are
+    /// terminal evidence; a rate limit or transport error is not denial.
+    pub async fn evidence<T: DeserializeOwned>(&self, path: &str) -> Effect<Option<T>> {
         let response = send(self.request(Method::GET, path)).await?;
+        if response.status() == StatusCode::FORBIDDEN {
+            let failure = response.json::<Failure>().await
+                .map_err(|_| broken("Discord lookup authority could not be verified"))?;
+            if matches!(failure.code, Some(50001 | 50013)) {
+                return Ok(None);
+            }
+            return Err(broken("Discord lookup authority could not be verified"));
+        }
+        match Self::lookup_response(response).await? {
+            Lookup::Found(value) => Ok(Some(value)),
+            Lookup::Missing => Ok(None),
+        }
+    }
+
+    async fn lookup_response<T: DeserializeOwned>(response: reqwest::Response) -> Effect<Lookup<T>> {
         if response.status() == StatusCode::NOT_FOUND {
             let failure = response
                 .json::<Failure>()

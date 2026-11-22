@@ -279,7 +279,7 @@ class MessengerTransport implements Messenger {
   readonly activities: Array<{ message: MessageReference; activity: MessageActivity }> = [];
   activityFailure = false;
   private readonly activityWaiters: Array<{ count: number; resolve(): void }> = [];
-  readonly backlog = new Map<string, Inbound[] | null>();
+  readonly backlog = new Map<string, Inbound[] | Error | null>();
   readonly threads: Route[] = [];
   readonly threadSources: Array<string | undefined> = [];
   readonly threadTags: Array<readonly string[] | undefined> = [];
@@ -335,7 +335,9 @@ class MessengerTransport implements Messenger {
   }
   async fetchAfter(route: Route, cursor: string): Promise<Inbound[] | null> {
     this.fetched.push({ route, cursor });
-    return this.backlog.has(routeKey(route)) ? this.backlog.get(routeKey(route))! : [];
+    const history = this.backlog.get(routeKey(route));
+    if (history instanceof Error) throw history;
+    return history === undefined ? [] : history;
   }
   async stop(): Promise<void> { this.handlers = undefined; }
   whenSent(count: number): Promise<void> {
@@ -7437,6 +7439,7 @@ describe("real Store runtime coordination", () => {
     host.state.goal = { enabled: true, mode: "active", goal: { status: "active" } };
     await runtime.pause(lane.id);
     const source: Inbound = { ...message("resume-correction-source", lane.route, "Resume, but apply this exact correction."),
+      discordOriginalText: "<@2> Resume, but apply this exact correction.",
       attachments: [{ id: "correction", name: "correction.txt", url: "adapter-file:correction", size: 16 }] };
     store.receive(source, "main");
     store.settle(source.id, "done");
@@ -7453,7 +7456,11 @@ describe("real Store runtime coordination", () => {
     await runtime.messageLane(lane.id, source.text, source.id);
     expect(host.prompts).toHaveLength(2);
     expect(host.prompts[1]?.command.message).toContain(source.text);
-    expect(store.input(`handoff:${source.id}:${lane.id}`)?.attachments).toEqual(source.attachments);
+    expect(store.input(source.id)?.discordOriginalText).toBe(source.discordOriginalText);
+    expect(store.input(`resume:${source.id}:${lane.id}`)?.discordOriginalText).toBeUndefined();
+    const handoff = store.input(`handoff:${source.id}:${lane.id}`);
+    expect(handoff?.attachments).toEqual(source.attachments);
+    expect(handoff?.discordOriginalText).toBeUndefined();
     expect(downloads).toEqual([source.route]);
     expect(host.commands.filter(command => command.type === "goal" && command.op === "resume")).toHaveLength(1);
     host.complete("Correction applied");
@@ -8358,6 +8365,158 @@ describe("real Store runtime coordination", () => {
     expect(store.getMeta(`cursor:${routeKey(destination)}`)).toBe("161");
   });
 
+  test.each(["fetch failure", "admission conflict"] as const)(
+    "Discord catchup survives %s, newer live intake and head restart without replaying effects",
+    async failure => {
+      const { runtime, config, directory, messenger, errors } = fixture();
+      const parent = route(null);
+      const thread = route();
+      const previous = message("180", parent, "/status");
+      const partial = message("181", parent, "/status");
+      const missed = message("182", parent, "/status");
+      const newer = message("183", parent, "/status");
+      const failureMessage = failure === "fetch failure" ? "Discord reply lookup unavailable" : `Inbound identity conflict: ${previous.id}`;
+      messenger.backlog.set(routeKey(parent), failure === "fetch failure"
+        ? new DeliveryError(failureMessage) : [partial, { ...missed, id: previous.id }]);
+      await runtime.start();
+      expect(messenger.fetched).toEqual([]);
+      await messenger.handlers!.message(previous);
+      await messenger.handlers!.message(message("190", thread, "/status"));
+      await messenger.handlers!.reconnect!();
+      expect(messenger.fetched).toEqual([{ route: parent, cursor: "180" }, { route: thread, cursor: "190" }]);
+      expect(errors).toEqual([expect.objectContaining({ message: failureMessage })]);
+      await messenger.handlers!.message(newer);
+      await messenger.handlers!.message(message("191", thread, "/status"));
+      await messenger.whenSent(failure === "fetch failure" ? 4 : 5);
+      await runtime.stop();
+
+      const reopened = new Store(join(directory, "coordination.sqlite"));
+      const transport = new MessengerTransport();
+      const head = new HostTransport(hostPaths(config, "main").sessionFile, "session-main");
+      const restarted = new Superagent(config, reopened, transport, join(directory, "extension.ts"),
+        error => errors.push(error), { connect: async () => head });
+      fixtures.find(entry => entry.runtime === runtime)!.runtime = restarted;
+      transport.backlog.set(routeKey(parent), failure === "fetch failure" ? [newer, missed] : [newer, missed, partial]);
+      await restarted.start();
+      expect(transport.fetched).toEqual([{ route: parent, cursor: "180" }, { route: thread, cursor: "191" }]);
+      await transport.handlers!.reconnect!();
+      expect(transport.fetched.slice(2)).toEqual([{ route: parent, cursor: "183" }, { route: thread, cursor: "191" }]);
+      expect(transport.attempted.map(output => output.sourceId)).toEqual([missed.id]);
+      expect(reopened.output(`${missed.id}:head-control`)).toMatchObject({ state: "sent", sourceId: missed.id, route: parent });
+      expect(errors).toEqual([expect.objectContaining({ message: failureMessage })]);
+    },
+  );
+
+  test("Discord startup keeps the original cursor if live intake outruns an in-flight history scan", async () => {
+    const { runtime, store, messenger } = fixture();
+    const destination = route();
+    store.setMeta("messenger:routes", JSON.stringify([destination]));
+    store.setMeta(`cursor:${physicalRouteKey(destination)}`, "160");
+    const fetching = Promise.withResolvers<void>();
+    const snapshot = Promise.withResolvers<Inbound[]>();
+    const fetchAfter = messenger.fetchAfter.bind(messenger);
+    messenger.fetchAfter = (route, cursor) => {
+      const history = fetchAfter(route, cursor);
+      if (messenger.fetched.length !== 1) return history;
+      fetching.resolve();
+      return snapshot.promise;
+    };
+    const starting = runtime.start();
+    try {
+      await Promise.race([fetching.promise, starting]);
+      await messenger.handlers!.message(headMessage("162", destination));
+    } finally {
+      snapshot.resolve([]);
+      await starting;
+    }
+
+    const missed = headMessage("161", destination);
+    messenger.backlog.set(routeKey(destination), [missed]);
+    await messenger.handlers!.reconnect!();
+    expect(messenger.fetched).toEqual([{ route: destination, cursor: "160" }, { route: destination, cursor: "160" }]);
+    expect(store.input(missed.id)?.text).toBe(missed.text);
+  });
+
+  test("a live Discord connection recovers pinned history without another reconnect", async () => {
+    const { runtime, store, messenger, errors } = fixture();
+    const parent = route(null);
+    const thread = route();
+    const missed = message("181", parent, "/status");
+    const newer = message("182", parent, "/status");
+    const unavailable = new DeliveryError("Discord reply lookup unavailable");
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await runtime.start();
+      await messenger.handlers!.message(message("180", parent, "/status"));
+      await messenger.handlers!.message(message("190", thread, "/status"));
+      messenger.backlog.set(routeKey(parent), unavailable);
+      await messenger.handlers!.reconnect!();
+      await messenger.handlers!.message(newer);
+      await runtime.kick();
+      expect(errors).toEqual([unavailable]);
+      expect(store.input(missed.id)).toBeNull();
+      expect(messenger.fetched).toEqual([{ route: parent, cursor: "180" }, { route: thread, cursor: "190" }]);
+
+      messenger.backlog.set(routeKey(parent), [newer, missed]);
+      clock.mockReturnValue(now + 60_000);
+      await messenger.whenSent(4);
+      await runtime.kick();
+
+      expect(messenger.fetched.slice(2)).toEqual([{ route: parent, cursor: "180" }]);
+      expect(messenger.attempted.filter(output => output.sourceId === newer.id)).toHaveLength(1);
+      expect(store.output(`${missed.id}:head-control`)).toMatchObject({ state: "sent", route: parent });
+    } finally {
+      clock.mockRestore();
+    }
+  }, 10_000);
+
+  test("shutdown does not wait for or admit a late response from a scheduled Discord history retry", async () => {
+    const { runtime, directory, messenger, errors } = fixture();
+    const destination = route();
+    const prior = message("180", destination, "/status");
+    const missed = message("181", destination, "/status");
+    const unavailable = new DeliveryError("Discord reply lookup unavailable");
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    const fetching = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Inbound[]>();
+    try {
+      await runtime.start();
+      await admit(runtime, prior);
+      messenger.backlog.set(routeKey(destination), unavailable);
+      await messenger.handlers!.reconnect!();
+      messenger.backlog.delete(routeKey(destination));
+      const fetchAfter = messenger.fetchAfter.bind(messenger);
+      messenger.fetchAfter = async (route, cursor) => {
+        await fetchAfter(route, cursor);
+        fetching.resolve();
+        return response.promise;
+      };
+      clock.mockReturnValue(now + 60_000);
+      await fetching.promise;
+      const stopping = runtime.stop();
+      try {
+        const deadline = new Promise<never>((_, reject) => AbortSignal.timeout(3000).addEventListener("abort",
+          () => reject(new Error("Head shutdown waited for the pending history response"))));
+        await Promise.race([stopping, deadline]);
+      } finally {
+        response.resolve([missed]);
+        await stopping;
+      }
+
+      const reopened = new Store(join(directory, "coordination.sqlite"));
+      try { expect(reopened.input(missed.id)).toBeNull(); }
+      finally { reopened.close(); }
+      expect(messenger.fetched).toEqual([{ route: destination, cursor: "180" }, { route: destination, cursor: "180" }]);
+      expect(messenger.attempted.map(output => output.sourceId)).toEqual([prior.id]);
+      expect(errors).toEqual([unavailable]);
+    } finally {
+      response.resolve([]);
+      clock.mockRestore();
+    }
+  }, 10_000);
+
   test("migrated route metadata never resurrects obsolete legacy destinations", async () => {
     const { runtime, store, messenger } = fixture();
     const legacy = route(null, { guildId: null });
@@ -8468,6 +8627,31 @@ describe("real Store runtime coordination", () => {
     expect(worker.prompts).toHaveLength(2);
     expect(main.prompts).toHaveLength(2);
     expect(messenger.threadSources).toEqual([original.messageId]);
+  });
+
+  test("HEAD delegates an addressed Discord parent request to an authorized Slack thread", async () => {
+    const { runtime, config, store, directory, messenger, hosts } = fixture();
+    config.slack = { botTokenEnv: "TEST_SLACK_BOT_TOKEN", appTokenEnv: "TEST_SLACK_APP_TOKEN", ownerId: "UOWNER",
+      teamId: "TTEAM", allowedChannelIds: ["CWORK"] };
+    const destination = route("1750000000.000030", { platform: "slack", accountId: "TTEAM:UBOT",
+      authorityId: "UOWNER", guildId: "TTEAM", channelId: "CWORK" });
+    const original = { ...message("170", route(null), "Inspect release validation."),
+      discordOriginalText: "<@2> Inspect release validation." };
+    await runtime.start();
+    await admit(runtime, original);
+
+    const lane = await runtime.startLane({ ...selection, sourceId: original.id, destination, title: "Release validation",
+      cwd: directory, kickoff: "I will verify the release in this thread." });
+    await runtime.kick();
+
+    const handoffId = `handoff:${original.id}:lane`;
+    expect(store.ownerSource(handoffId)).toMatchObject({ id: original.id, route: original.route,
+      discordOriginalText: original.discordOriginalText });
+    expect(store.input(handoffId)).toMatchObject({ route: destination, target: lane.id, state: "submitted", text: original.text });
+    expect(store.input(handoffId)?.discordOriginalText).toBeUndefined();
+    expect(messenger.threads).toEqual([]);
+    expect(messenger.sent).toMatchObject([{ id: `${original.id}:kickoff`, route: destination, sourceId: handoffId }]);
+    expect(hosts.get(lane.socketPath)?.prompts[0]?.command.message).toContain(original.text);
   });
 
   test("HEAD lookup and pinned context verify the original bot of a receipt-bound manager journal opening", async () => {
