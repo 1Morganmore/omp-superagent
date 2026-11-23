@@ -1638,6 +1638,127 @@ describe("same-HEAD evidence recovery", () => {
     instance.main.emit({ type: "session_settled" });
   }
 
+  const quotaError = { provider: "openai-codex", model: "gpt-6.2-astra", retryable: false,
+    message: "Codex error event: The usage limit has been reached (code=usage_limit_reached)" };
+  const quotaRun = { hostPid: process.pid, runOrdinal: 1, instanceKey: "fixture-quota-instance" };
+
+  test.each([
+    quotaError.message,
+    "Codex response failed: The usage limit has been reached (code=usage_limit_reached, status=failed)",
+  ])("a settled native quota refusal automatically releases later HEAD work after recovery (%s)", async errorMessage => {
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    const checked = Promise.withResolvers<void>();
+    let recovered = false;
+    const { runtime, main, store, messenger } = fixture(3, undefined, {
+      readHeadQuota: async () => { checked.resolve(); return recovered; },
+    });
+    main.state.model = { provider: quotaError.provider, id: quotaError.model };
+    main.journalLeaf = true;
+    try {
+      await runtime.start();
+      await admit(runtime, headMessage("quota-refusal", route("failed-route")));
+      const original = main.prompts[0];
+      if (!original) throw new Error("Original HEAD request was not admitted");
+      const error = { ...quotaError, message: errorMessage };
+      const frame = { type: "prompt_result", id: original.id, status: "error", agentInvoked: true, sessionSettled: true, error };
+      main.entries[0] = nativeEntry(main, "quota-start", "rpc_agent_start", quotaRun);
+      main.entries.push(
+        { id: "quota-error", type: "message", message: { role: "assistant", provider: error.provider,
+          model: error.model, stopReason: "error", content: [] } },
+        { ...nativeEntry(main, "quota-receipt", "rpc_prompt_result", { ...quotaRun, frame }), timestamp: new Date(now - 1).toISOString() },
+      );
+      main.state.isStreaming = false;
+      main.state.isSettled = true;
+      main.emit(frame);
+      await messenger.whenSent(1);
+      await admit(runtime, headMessage("after-quota", route("later-route")));
+      await checked.promise;
+      expect(store.input("quota-refusal")?.state).toBe("uncertain");
+      expect(store.input("after-quota")?.state).toBe("pending");
+      expect(main.prompts.map(prompt => prompt.id)).toEqual([original.id]);
+
+      recovered = true;
+      clock.mockReturnValue(now + 10 * 60_000);
+      await runtime.kick();
+      await main.whenPrompts(2);
+      expect(store.input("quota-refusal")?.state).toBe("cancelled");
+      const later = store.input("after-quota");
+      expect(main.prompts.map(prompt => prompt.id)).toEqual([original.id, later?.requestId ?? "missing"]);
+      expect(later?.state).toBe("submitted");
+      main.complete("Later work answered");
+      await messenger.whenSent(3);
+      await runtime.kick();
+      expect(store.input("after-quota")?.state).toBe("done");
+      expect(messenger.sent.at(-1)).toMatchObject({ sourceId: "after-quota", route: route("later-route"), text: "Later work answered" });
+    } finally { clock.mockRestore(); }
+  });
+
+  test.each(["prior tool execution", "foreign native PID", "foreign native instance", "different native run"] as const)(
+    "%s keeps a later Codex quota failure on manual hold", async scenario => {
+    const now = Date.now();
+    const instance = fixture(3, undefined, { readHeadQuota: async () => true });
+    const { runtime, main, store } = instance;
+    const error = quotaError;
+    main.state.model = { provider: error.provider, id: error.model };
+    const id = saved(instance, "quota-after-tool");
+    const receiptRun = scenario === "foreign native PID" ? { ...quotaRun, hostPid: quotaRun.hostPid + 1 }
+      : scenario === "foreign native instance" ? { ...quotaRun, instanceKey: "other-instance" }
+        : scenario === "different native run" ? { ...quotaRun, runOrdinal: quotaRun.runOrdinal + 1 } : quotaRun;
+    main.entries[0] = nativeEntry(main, "quota-start", "rpc_agent_start", quotaRun);
+    main.entries.splice(2, 2,
+      ...(scenario === "prior tool execution" ? [{ id: "tool-attempt", type: "message", message: { role: "assistant", stopReason: "toolUse",
+        content: [{ type: "toolCall", id: "previous-tool", name: "write", arguments: {} }] } },
+      { id: "tool-result", type: "message", message: { role: "toolResult", toolCallId: "previous-tool" } }] : []),
+      { id: "quota-error", type: "message", message: { role: "assistant", provider: error.provider,
+        model: error.model, stopReason: "error", content: [] } },
+      { ...nativeEntry(main, "quota-receipt", "rpc_prompt_result", {
+        ...receiptRun,
+        frame: { id: `native-${id}`, status: "error", agentInvoked: true, sessionSettled: true, error },
+      }), timestamp: new Date(now - 1).toISOString() },
+    );
+    await runtime.start();
+    await admit(runtime, headMessage("after-unsafe-quota"));
+    expect(store.input(id)?.state).toBe("uncertain");
+    expect(store.input("after-unsafe-quota")?.state).toBe("pending");
+    expect(main.prompts).toEqual([]);
+  });
+
+  test("an unbroadcast native receipt during quota lookup invalidates auto-release", async () => {
+    const readStarted = Promise.withResolvers<void>();
+    const quotaReply = Promise.withResolvers<boolean>();
+    const journalRead = Promise.withResolvers<void>();
+    const instance = fixture(3, undefined, { readHeadQuota: () => { readStarted.resolve(); return quotaReply.promise; } });
+    const { runtime, main, store } = instance;
+    main.state.model = { provider: quotaError.provider, id: quotaError.model };
+    const id = saved(instance, "quota-before-foreign-receipt");
+    main.entries[0] = nativeEntry(main, "quota-start", "rpc_agent_start", quotaRun);
+    main.entries.splice(2, 2,
+      { id: "quota-error", type: "message", message: { role: "assistant", provider: quotaError.provider,
+        model: quotaError.model, stopReason: "error", content: [] } },
+      { ...nativeEntry(main, "quota-receipt", "rpc_prompt_result", { ...quotaRun,
+        frame: { id: `native-${id}`, status: "error", agentInvoked: true, sessionSettled: true, error: quotaError },
+      }), timestamp: new Date(Date.now() - 1).toISOString() },
+    );
+    try {
+      await runtime.start();
+      await admit(runtime, headMessage("after-foreign-receipt"));
+      await readStarted.promise;
+      main.entries.push(nativeEntry(main, "unbroadcast-receipt", "rpc_prompt_result", {
+        ...quotaRun, frame: { id: "unrelated-no-agent", status: "completed", agentInvoked: false, sessionSettled: true },
+      }));
+      main.afterEntries = async () => { journalRead.resolve(); };
+      quotaReply.resolve(true);
+      await journalRead.promise;
+      const status = applicationCommand("1550450500000000001");
+      await admit(runtime, status);
+      expect(store.input(status.id)?.state).toBe("done");
+      expect(store.input(id)?.state).toBe("uncertain");
+      expect(store.input("after-foreign-receipt")?.state).toBe("pending");
+      expect(main.prompts).toEqual([]);
+    } finally { quotaReply.resolve(false); }
+  });
+
   test("actual prompt acknowledgement loss uses durable receipts once, fences queued work, and notifies only the original route", async () => {
     const instance = fixture();
     const { runtime, main, store, messenger } = instance;

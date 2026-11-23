@@ -160,6 +160,21 @@ remain held. Recovery cannot dispatch, answer approvals, run tools outside its
 gate or repeat the original request. A later stop or manual resolution invalidates
 older recovery work.
 
+An exact, settled HEAD `openai-codex` quota refusal with no tool calls or
+partial answer can also close as cancelled without a recovery model turn.
+Only that hold arms a usage check on the existing controller wake, at most once
+per OMP usage-cache interval. The current session and same model must have a
+permitted, healthy credential in native OMP model health and a matching usage
+report with measured headroom above its effective reserve after the failure.
+The credential must also appear in any discovered account roster for the model.
+Credit-funded overage, a reset timestamp, a stale report, missing account
+attribution, or an uncertain effect is not proof. The controller rechecks the
+exact native run journal, stop boundary and current request ownership before
+closing the hold. This does
+not spend a saved reset or retry the original input; later inputs keep their
+durable order. The quota and credential contracts were checked against the
+[pinned OMP 19.0.0 SDK](../../DESIGN.md#stock-omp-and-verification-scope).
+
 `/resolve [input-id]` (`!resolve` in Slack) manually closes an uncertain head
 input as cancelled. A stalled lane exposes its exact input ID and queue blocker
 through `/status` or `lane_inspect`. Only the operator in the bound topic can use
