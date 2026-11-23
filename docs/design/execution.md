@@ -225,7 +225,9 @@ entries still under management; do not switch existing sessions. Preset role
 synchronization watches the configured native preset/role files, parent
 directories (so replaced directories with new inodes rebind cleanly), and
 every symlink hop (`fs.watch`, debounced), watches surviving ancestors for
-uncreated directories, and reconciles once after installing watchers. Errors
+uncreated directories, and reconciles once after installing watchers. On macOS
+the maintenance tick also checks file metadata to recover changes missed during
+FSEvents registration. Unchanged files do not trigger a preset reload. Errors
 and explicit `"deferred"` outcomes get bounded backoff retries. Deferred work
 continues at a slow interval after those retries so late model availability
 can apply without another config edit. Slow periodic polling also stays

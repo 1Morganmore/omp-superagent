@@ -406,12 +406,12 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## OMP: installed runtime and published SDK
 
-- SDK/API baseline: [can1357/oh-my-pi v19.0.0](https://github.com/can1357/oh-my-pi/tree/57771ae562b9345e0579bceb2d68d585e3e6927e).
+- SDK/API baseline: [can1357/oh-my-pi v19.1.1](https://github.com/can1357/oh-my-pi/tree/31ffee513f27a01bba7d4dfbe12bae239cdc646a).
 - The operator installs OMP separately. This repository does not patch, build,
   or redistribute an OMP executable. Local native tests discover that installed
   runtime by default. CI verifies OMP release binaries against their checksum
-  manifests; PR and release runs cover OMP 18.22.2 and the SDK-matched release,
-  and also check OMP 18.20.3 on Ubuntu.
+  manifests. PR and release runs use the SDK-matched CLI on Linux and macOS;
+  OMP 18 checks are manual.
 - `src/host-broker-services.ts` implements a read-only subset of the
   [stock OMP 18.22.2 launch broker protocol](https://github.com/can1357/oh-my-pi/tree/e1ae2cc998efd1ca151b46ebefc0e0dab6c23c63/packages/coding-agent/src/launch).
   It uses the published native IPC and lock primitives without copying the broker

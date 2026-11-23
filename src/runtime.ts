@@ -442,6 +442,7 @@ export class Superagent {
   private presetWatchPaths: readonly string[] = [];
   private presetWatchSnapshot = "";
   private readonly presetWatchers: FSWatcher[] = [];
+  private presetWatchFingerprint?: string;
   private readonly remoteReconnect = new Map<string, RemoteRetry>();
   private readonly remoteAttaching = new Map<string, Promise<Live>>();
   private readonly routingDrains = new Map<string, Promise<void>>();
@@ -626,6 +627,8 @@ export class Superagent {
         this.resumeRouting();
         void this.kick().catch(this.report);
         this.observePrs();
+        if (this.presetWatchFingerprint !== undefined && !this.presetWatchDebounce
+          && this.readPresetWatchFingerprint() !== this.presetWatchFingerprint) this.queuePresetWatchSync();
         this.observePresetRoles();
         if (this.groups && !this.stopped && !this.restartFence() && !this.headRotationHeld()) {
           this.groups.tick(!this.headStopping && this.residentHosts().size < this.config.maxHosts, this.report);
@@ -3792,6 +3795,41 @@ export class Superagent {
     return { direct, ancestors, uncovered, snapshot: entries.join("\n") };
   }
 
+  private readPresetWatchFingerprint(): string {
+    // Bun registers Darwin FSEvents streams asynchronously without replay. Stat
+    // the configured files (following links), not every directory in the watch tree.
+    return this.presetWatchPaths.map(path => {
+      try {
+        const info = statSync(path, { bigint: true, throwIfNoEntry: false });
+        return info ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` : "missing";
+      } catch (error) {
+        if (error instanceof Error && "code" in error) return "unavailable";
+        throw error;
+      }
+    }).join("\n");
+  }
+
+  private queuePresetWatchSync(): void {
+    if (this.presetWatchDebounce) clearTimeout(this.presetWatchDebounce);
+    this.presetWatchDebounce = setTimeout(() => {
+      this.presetWatchDebounce = undefined;
+      void (async () => {
+        if (this.stopped) return;
+        if (this.presetWatchFingerprint !== undefined) this.presetWatchFingerprint = this.readPresetWatchFingerprint();
+        if (this.presetWatchPaths.length
+          && this.presetWatchState(this.presetWatchPaths).snapshot !== this.presetWatchSnapshot) {
+          await this.startPresetWatcher();
+        }
+        if (this.stopped) return;
+        this.presetSyncRetryCount = 0;
+        this.clearPresetSyncRetry();
+        this.presetSyncDirty = true;
+        this.observePresetRoles();
+      })().catch(this.report);
+    }, presetSyncDebounceMs);
+    this.presetWatchDebounce.unref?.();
+  }
+
   private async startPresetWatcher(): Promise<void> {
     this.stopPresetWatcher(false);
     this.presetWatchFallback = false;
@@ -3812,6 +3850,7 @@ export class Superagent {
       return;
     }
     this.presetWatchPaths = paths;
+    if (process.platform === "darwin") this.presetWatchFingerprint = this.readPresetWatchFingerprint();
     const state = this.presetWatchState(paths);
     this.presetWatchSnapshot = state.snapshot;
     let uncovered = state.uncovered;
@@ -3830,23 +3869,7 @@ export class Superagent {
               || this.presetWatchState(this.presetWatchPaths).snapshot === this.presetWatchSnapshot)) {
             return;
           }
-          if (this.presetWatchDebounce) clearTimeout(this.presetWatchDebounce);
-          this.presetWatchDebounce = setTimeout(() => {
-            this.presetWatchDebounce = undefined;
-            void (async () => {
-              if (this.stopped) return;
-              if (this.presetWatchPaths.length
-                && this.presetWatchState(this.presetWatchPaths).snapshot !== this.presetWatchSnapshot) {
-                await this.startPresetWatcher();
-              }
-              if (this.stopped) return;
-              this.presetSyncRetryCount = 0;
-              this.clearPresetSyncRetry();
-              this.presetSyncDirty = true;
-              this.observePresetRoles();
-            })().catch(this.report);
-          }, presetSyncDebounceMs);
-          this.presetWatchDebounce.unref?.();
+          this.queuePresetWatchSync();
         });
         watcher.unref?.();
         watcher.on("error", error => {
@@ -3867,6 +3890,7 @@ export class Superagent {
 
   private stopPresetWatcher(clearRetry = true): void {
     if (clearRetry) this.clearPresetSyncRetry();
+    this.presetWatchFingerprint = undefined;
     if (this.presetWatchDebounce) {
       clearTimeout(this.presetWatchDebounce);
       this.presetWatchDebounce = undefined;

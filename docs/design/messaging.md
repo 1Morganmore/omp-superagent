@@ -194,7 +194,7 @@ exact native run journal, stop boundary and current request ownership before
 closing the hold. This does
 not spend a saved reset or retry the original input; later inputs keep their
 durable order. The quota and credential contracts were checked against the
-[pinned OMP 19.0.0 SDK](../../DESIGN.md#stock-omp-and-verification-scope).
+[pinned OMP SDK](../../DESIGN.md#stock-omp-and-verification-scope).
 
 `/resolve [input-id]` (`!resolve` in Slack) manually closes an uncertain head
 input as cancelled. A stalled lane exposes its exact input ID and queue blocker

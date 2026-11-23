@@ -111,14 +111,13 @@ Host를 실행하려면 별도로 설치한 OMP가 필요하며, 이 프로젝�
 
 현재 소스는 Git, **Bun >= 1.4.4**, 로컬 Unix socket을 사용합니다. 패키지 설치에는 OMP가
 필요 없습니다. Host를 실행할 때는 별도로 설치한 OMP의 기능을 검사하며, 버전 범위로 제한하지
-않습니다. CI 기준판은 **OMP 19.0.0**이며, **18.20.3과 18.22.2**는 이전 릴리스에서 검증했습니다.
+않습니다. CI 기준판은 **OMP 19.1.1**이며, **18.20.3과 18.22.2**는 이전 릴리스에서 검증했습니다.
 Windows는 지원하지 않습니다.
 
 <details>
 <summary><strong>SDK 고정 버전과 CI 재현</strong></summary>
 
-SDK는 **19.0.0**으로 유지하며 upstream 커밋은
-[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)입니다.
+SDK는 [upstream `v19.1.1` 커밋](https://github.com/can1357/oh-my-pi/commit/31ffee513f27a01bba7d4dfbe12bae239cdc646a)에 맞춰 고정합니다.
 `bun run test:ci`는 현재 설치된 OMP를 검사합니다. CI 기준판을 재현하려면 `bun run test:baseline`을
 사용하세요. OMP 18은 수동 검사만 제공합니다. `bash scripts/test-omp.sh v18.22.2` 또는 `v18.20.3`을
 지정하면 해당 공식 바이너리를 검증한 뒤 같은 회귀를 로컬에서 실행합니다.
@@ -388,7 +387,7 @@ bun run test:ci
 오프라인 native/PTY 범위·필요 도구·로컬 패키징과 게시 경계는
 [개발자 검증·소스 릴리즈 절차](docs/OPERATIONS.md#6-개발자-검증)를 참고하세요.
 [현재 CI](https://github.com/dbc-hbin/omp-superagent/blob/main/.github/workflows/ci.yml)는
-순정 OMP 19.0.0을 검사 대상에 포함합니다.
+고정된 SDK와 같은 버전의 순정 CLI를 검사합니다.
 [과거 실행 기록](docs/releases/0.1.0.md#verification-records)은 기록된 버전과 시나리오에만 적용됩니다.
 오프라인 CI는 실계정 접속이나 운영 준비 완료를 보증하지 않습니다.
 

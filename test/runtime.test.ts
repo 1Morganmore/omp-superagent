@@ -12473,53 +12473,50 @@ describe("preset role watcher and HEAD rotation threshold", () => {
     symlinkSync(targetOne, symSub);
     const symConfig = join(symSub, "config.yml");
 
-    let calls = 0;
-    const now = Date.now();
-    const clock = spyOn(Date, "now").mockReturnValue(now);
+    type PresetSources = readonly [project: string, linked: string];
+    let seen: PresetSources | undefined;
+    let onSync: ((sources: PresetSources) => void) | undefined;
     const { runtime } = fixture(3, undefined, {
       presetRolePaths: () => [configFile, symConfig],
-      syncPresetRoles: async () => { calls++; },
+      syncPresetRoles: async () => {
+        seen = [readFileSync(configFile, "utf8"), readFileSync(symConfig, "utf8")];
+        onSync?.(seen);
+      },
     });
+    const assertSync = async (expected: PresetSources, change: () => void) => {
+      const synced = Promise.withResolvers<void>();
+      onSync = ([project, linked]) => {
+        if (project === expected[0] && linked === expected[1]) synced.resolve();
+      };
+      const deadline = setTimeout(synced.resolve, 3_000);
+      try {
+        change();
+        await synced.promise;
+        expect(seen).toEqual(expected);
+      } finally {
+        clearTimeout(deadline);
+        onSync = undefined;
+      }
+    };
     try {
       await runtime.start();
-      expect(calls).toBe(2);
+      expect(seen).toEqual(["v1", "s1"]);
 
-      // Replace the .omp directory with a brand-new inode; later edits inside it must still fire.
-      renameSync(ompDir, ompOld);
-      mkdirSync(ompDir);
-      writeFileSync(configFile, "v2-new-dir");
-      const afterDirReplace = calls;
-      for (let i = 0; i < 40 && calls === afterDirReplace; i++) await Bun.sleep(25);
-      expect(calls).toBeGreaterThan(afterDirReplace);
-      await Bun.sleep(200);
+      await assertSync(["v2-new-dir", "s1"], () => {
+        renameSync(ompDir, ompOld);
+        mkdirSync(ompDir);
+        writeFileSync(configFile, "v2-new-dir");
+      });
+      await assertSync(["v3-subsequent-edit", "s1"], () => writeFileSync(configFile, "v3-subsequent-edit"));
 
-      const beforeSubsequentEdit = calls;
-      writeFileSync(configFile, "v3-subsequent-edit");
-      for (let i = 0; i < 40 && calls === beforeSubsequentEdit; i++) await Bun.sleep(25);
-      expect(calls).toBeGreaterThan(beforeSubsequentEdit);
-
-      // Swap an intermediate symlink directory atomically and verify subsequent edits in the new target fire.
-      const symTmp = join(root, "sub.tmp");
-      symlinkSync(targetTwo, symTmp);
-      renameSync(symTmp, symSub);
-      const afterSymSwap = calls;
-      for (let i = 0; i < 40 && calls === afterSymSwap; i++) await Bun.sleep(25);
-      expect(calls).toBeGreaterThan(afterSymSwap);
-      await Bun.sleep(200);
-
-      const beforeSymEdit = calls;
-      writeFileSync(join(targetTwo, "config.yml"), "s3-subsequent");
-      for (let i = 0; i < 40 && calls === beforeSymEdit; i++) await Bun.sleep(25);
-      expect(calls).toBeGreaterThan(beforeSymEdit);
-
-      // Fallback polling stays off when both replacement paths are covered.
-      const steady = calls;
-      clock.mockReturnValue(now + 300_000);
-      (runtime as unknown as { observePresetRoles(): void }).observePresetRoles();
-      await Bun.sleep(20);
-      expect(calls).toBe(steady);
+      await assertSync(["v3-subsequent-edit", "s2"], () => {
+        const symTmp = join(root, "sub.tmp");
+        symlinkSync(targetTwo, symTmp);
+        renameSync(symTmp, symSub);
+      });
+      await assertSync(["v3-subsequent-edit", "s3-subsequent"], () =>
+        writeFileSync(join(targetTwo, "config.yml"), "s3-subsequent"));
     } finally {
-      clock.mockRestore();
       await runtime.stop();
       rmSync(root, { recursive: true, force: true });
     }

@@ -191,8 +191,7 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 사용한다. OMP 없이 패키지를 설치할 수 있다. Host 실행에는 별도로 설치한 stock OMP가
 필요하며, 버전 번호로 차단하지 않고 `rpc-ui`, 세션 재개, 확장, 모델 선택과 프로세스 관측
 인터페이스를 확인한다. OMP 18은 수동 호환성 검사 대상이며 자동 CI의 SDK 기준선은
-OMP 19.0.0이며 upstream `v19.0.0` 커밋은
-[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e)이다.
+[OMP 19.1.1](https://github.com/can1357/oh-my-pi/commit/31ffee513f27a01bba7d4dfbe12bae239cdc646a)이다.
 `doctor`는 `command`가 고른 실행 파일 경로, 버전, 서비스 백엔드를 보여주며 로그인이나
 런타임 호환성을 보증하지 않는다. Host는 실제 RPC 초기화와 소유권 검사를 거친다.
 18에서 19로 올리기 전에 기존 Host가 맡은 백그라운드 서비스를 확인한다. OMP 19의 사용자별
@@ -223,7 +222,7 @@ bun install --frozen-lockfile
 
 설치 단계에서는 OMP를 실행하지 않는다. `setup`·`doctor`와 실제 Host 시작에서 선택된 CLI를 확인한다.
 루트 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-ai`,
-`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils` 19.0.0이다. 설치는 봇을 시작하지 않으며
+`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils`이며 모두 같은 기준판으로 고정한다. 설치는 봇을 시작하지 않으며
 기존 OMP 실행 파일·전역 설정을 교체하지 않는다.
 
 시스템 Bun을 바꾸지 않으려면 선택적으로 격리된 로컬 도구를 사용한다.
@@ -1526,7 +1525,7 @@ OMP_SUPERAGENT_WORKER_SSH_TEST=1 bun test test/native-worker-ssh.test.ts
 빌드한 뒤 격리된 워커 두 개로 테스트 파일을 실행한다. 순서 의존성을 확인할 때는 같은 범위를 `bun test test`로 직렬 실행할 수 있다.
 기본 테스트는 opt-in native/PTY 시나리오를 제외한다. `.upstream`까지 탐색하는 인수 없는
 `bun test`로 대체하지 않는다. OMP와 관리형 omp-superkit이 준비된 checkout의 `bun run test:ci`는
-타입 검사와 모든 로컬 project/native/PTY·omp-superkit 통합 회귀를 실행한다. `scripts/ci.ts`는 활성
+타입 검사, Rust Host owner·Gateway 테스트, 로컬 project/native/PTY·omp-superkit 통합 회귀를 실행한다. `scripts/ci.ts`는 활성
 패키지의 entrypoint를 사용한다. CI와 대상별 native/PTY 실행은 공통 선택기로 PATH의 현재 설치
 standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
 선택한 OMP 버전·실행 경로를 출력하고 공개 RPC·프로세스 관측 기능을 메타데이터로 확인한다.
@@ -1539,8 +1538,8 @@ PR, `main`, 수동 실행과 `v*` 릴리즈 태그의 GitHub Actions는 Ubuntu 2
 릴리즈 게시는 양쪽의 테스트와 macOS Intel을 포함한 네 플랫폼의 패키지 설치 검증이 모두 통과해야 진행된다.
 각 러너는 `bun run test:baseline`으로 SDK와 같은 공식 CLI를 임시 디렉터리에 받아
 SHA-256과 `omp --version`을 확인한다.
-`bun install --frozen-lockfile`로 패키지를 먼저 설치한 뒤 `bun run test:ci`에만 그 CLI를
-`PATH` 앞에 넣는다. 같은 명령을 로컬에서
+`bun install --frozen-lockfile`이 준비한 네이티브 실행 파일을 재사용하며, 공통 테스트 러너를 실행할 때만
+그 CLI를 `PATH` 앞에 넣는다. 같은 명령을 로컬에서
 실행해도 PATH의 기존 OMP를 교체하지 않는다. 다운로드에는 인터넷·curl·shasum이 필요하다.
 OMP 18은 CI에서 실행하지 않는다. 필요할 때만 `bash scripts/test-omp.sh v18.22.2` 또는 이전
 비동기 작업 API를 쓰는 `v18.20.3`을 지정해 같은 검사를 수동으로 실행한다.

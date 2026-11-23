@@ -123,7 +123,7 @@ requires a separately installed OMP; this project neither patches nor builds it.
 
 This checkout requires Git, **Bun >= 1.4.4**, and local Unix sockets. Installing the
 package does not require OMP. To run a Host, install stock OMP separately; the
-CLI checks capabilities, not a version range. CI tests **OMP 19.0.0**;
+CLI checks capabilities, not a version range. CI tests **OMP 19.1.1**;
 **18.20.3 and 18.22.2** were tested in earlier releases.
 Windows is unsupported.
 Configure `command` with the installed OMP executable followed by native CLI flags;
@@ -132,8 +132,7 @@ runtime/script wrappers are unsupported.
 <details>
 <summary><strong>SDK pin and CI reproduction</strong></summary>
 
-The SDK stays pinned to **19.0.0**, from upstream `v19.0.0` commit
-[`57771ae562b9345e0579bceb2d68d585e3e6927e`](https://github.com/can1357/oh-my-pi/commit/57771ae562b9345e0579bceb2d68d585e3e6927e).
+The SDK is pinned to the [upstream `v19.1.1` commit](https://github.com/can1357/oh-my-pi/commit/31ffee513f27a01bba7d4dfbe12bae239cdc646a).
 `bun run test:ci` tests the installed OMP. Use `bun run test:baseline` to reproduce
 the SDK-matched CI check. OMP 18 is manual only: `bash scripts/test-omp.sh v18.22.2`
 (or `v18.20.3`) verifies the release binary and runs the same suite locally.
@@ -429,7 +428,7 @@ bun run test:ci
 See [developer verification and source release steps](docs/OPERATIONS.md#6-개발자-검증)
 for offline native/PTY coverage, prerequisites, and local packaging/publication boundaries.
 The [current CI matrix](https://github.com/dbc-hbin/omp-superagent/blob/main/.github/workflows/ci.yml)
-includes stock OMP 19.0.0.
+uses the stock CLI matching the pinned SDK.
 [Historical results](docs/releases/0.1.0.md#verification-records) apply only to the
 recorded versions and scenarios. Offline CI does not verify live accounts or production readiness.
 
