@@ -91,7 +91,7 @@
 </picture>
 
 The **Gateway** owns messenger connections and the head's lifecycle. The **head** owns
-lane control, approvals and delivery. A topic's **lane** handles its own follow-ups;
+lane control, approvals and delivery. A bound topic's **lane** handles its ordinary follow-ups;
 the controller returns its replies without a global model turn.
 
 [Mermaid source](assets/architecture.mmd)
@@ -114,7 +114,7 @@ service or an OS sandbox; see [Design](DESIGN.md).
 
 Install from [npm](https://www.npmjs.com/package/omp-superagent) or use the source
 and npm tarballs from the
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.7).
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.8).
 Install with Bun or npm below. Bun is still required at runtime; this is not a
 standalone binary. Installation prepares the managed dependencies. Running a Host
 requires a separately installed OMP; this project neither patches nor builds it.
@@ -156,7 +156,7 @@ To install OMP separately, see the
 [upstream instructions](https://github.com/can1357/oh-my-pi#install).
 
 ```sh
-bun add --global --trust omp-superagent@0.1.7
+bun add --global --trust omp-superagent@0.1.8
 omp-sa --help
 ```
 
@@ -169,7 +169,7 @@ Ensure `bun pm bin --global` is on `PATH`.
 Alternatively, with Bun on `PATH`:
 
 ```sh
-npm install --global omp-superagent@0.1.7
+npm install --global omp-superagent@0.1.8
 ```
 
 Keep lifecycle scripts enabled for the managed omp-superkit integration.
@@ -346,10 +346,15 @@ worker. That is not a stop command for an already running lane.
 
 ## Working from chat
 
-- Ask “keep the Discord bot online”, “watch `owner/repo#35` and tell me when CI passes”, or “let me know when this lane stalls or finishes”. Ask for status or stop the watch in the same conversation. A watch does not authorize a merge or stop the work. Discord presence controls only the bot's indicator, not its ability to receive messages.
-- Send follow-ups in the existing work thread or topic to continue its task. No repository
-  name or command is needed.
-- Elsewhere, send the request itself, even if it names a repository. HEAD answers questions
+- With `discord.requireAddressing` enabled (off by default), ordinary owner messages in
+  allowed server parent channels and threads this bot did not create must mention this
+  bot or reply to one of its messages in the same conversation. Threads this bot created
+  do not require a mention or reply; owner DMs and app commands are unaffected.
+- Send ordinary follow-ups in the same conversation. They go to the bound lane in a work
+  thread and to HEAD in a head conversation or with `/head <request>`. No `/steer` is
+  needed: eligible follow-ups steer an active run at an OMP steering boundary, or start
+  a new turn if idle. Pause, approval, and uncertain-effect holds still apply.
+- For a new request, send the request itself, even if it names a repository. HEAD answers questions
   that need no workspace directly. For “check login in client-ui,” it uses your request and
   its conversation context to find and verify the workspace before assigning work. It asks a
   focused question only if a material ambiguity remains; it does not use a default repository
@@ -372,11 +377,27 @@ worker. That is not a stop command for an already running lane.
   with `/head` to switch its own model after that turn. Global preset changes
   require explicit `--global`. Slack's message commands use `!`.
 - `/usage` shows masked account names, quotas, and reset times for built-in and extension-provided usage sources reported by stock OMP, without a model turn.
-- `/usage reset` shows available saved reset tickets by account. Pick an account and Confirm to spend one; requires stock OMP with account-targeted usage reset support.
+- `/usage reset` shows saved reset tickets by account. Select an account and choose **Confirm**
+  to spend one available ticket; this requires stock OMP with account-targeted reset support.
+  Separately, after a proven Codex quota rejection with no tool calls or partial answer,
+  HEAD releases later queued requests when fresh usage evidence confirms recovery. It does
+  not spend a ticket, mark the failed request complete, or replay it.
 - To receive a generated file, start an owner request with `attach: path/to/result.pdf` (relative to the work directory).
 - For a shared server or room, [configure restricted group access](docs/OPERATIONS.md#단체방서버-권한-분리) for request intake, tool-free chat or scoped worktree edits. These rooms cannot operate the owner session.
 - Ask `/head` to summarize CI every two hours, or use `/cron add "every 2h" Summarize CI`, and
   manage it from the same chat with [`/cron`](docs/OPERATIONS.md#예약-작업-cron).
+  Scheduled prompts use HEAD's normal approval rules; direct shell schedules
+  (`/cron add shell`) are disabled.
+- Ask “keep the Discord bot online”, “watch `owner/repo#35` and tell me when CI passes”,
+  or “let me know when this lane stalls or finishes”. Ask for status or stop the watch
+  in the same conversation. Watches only notify; they do not act on PRs or stop work.
+  Discord presence changes the bot's indicator, not message intake.
+- [External PR automation](docs/OPERATIONS.md#새-외부-pr-검토-cron-pr-add) is separate:
+  explicitly enroll a repository owned by your authenticated `gh` account with
+  `/cron pr-add` from an allowed Discord server parent channel. New enrollments default to
+  unattended review and a GitHub comment only. For automatic fix commits or merges, choose
+  a higher mode with `/cron pr-mode`; merges still require independent approval, required
+  CI, and branch protection checks.
 - `/stop` pauses the bound lane; `/resume` authorizes continuation. Approvals,
   cancellations, tool exclusions, and uncertain-effect holds remain binding.
   Neither progress reports nor recovery prove task completion or undo external effects.
@@ -441,7 +462,7 @@ recorded versions and scenarios. Offline CI does not verify live accounts or pro
 | [Execution and coordination](docs/design/execution.md) | lanes, native Host lifecycle, models, workflows, managed integration, monitoring, and the board. |
 | [Operations guide](docs/OPERATIONS.md) | platform setup, commands, and recovery. |
 | [Voice configuration guide](docs/discord-voice.md) | Codex subscription voice or the separately billed API. |
-| Releases | [Release notes](docs/releases/0.1.7.md) and [historical verification records](docs/releases/0.1.0.md#verification-records). |
+| Releases | [Release notes](docs/releases/0.1.8.md) and [historical verification records](docs/releases/0.1.0.md#verification-records). |
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.

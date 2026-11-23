@@ -4,9 +4,10 @@ Superagent connects one OMP head to Discord, Telegram, and Slack. The head can
 work directly or delegate to independent native OMP sessions called **lanes**.
 The Gateway keeps the messenger connection and durable intake alive without
 running a model. All configured messenger owners are the **same trusted operator**.
-Ordinary owner work stays in the native session bound to its topic. Otherwise,
-HEAD takes ordinary requests to answer directly or verify a workspace and assign
-work. Explicit placement and historical lookup remain controller paths.
+Ordinary owner work stays in the native session bound to its topic. Unbound
+ordinary requests go to the shared HEAD model to answer directly or verify a
+workspace and assign work. Explicit placement, historical lookup and
+code-handled controls do not require a shared-model turn to route.
 In a [bound Discord work thread](docs/design/messaging.md#topic-routing-and-controls),
 historical continuation and its replies stay there unless the operator explicitly
 asks to split. Separately,
@@ -19,7 +20,7 @@ or lanes. This is not a multitenant service or an OS sandbox.
 - [Execution and coordination](docs/design/execution.md): lanes, native Host lifecycle,
   models, workflows, managed integration, monitoring, and the board.
 - [Setup and operations](docs/OPERATIONS.md): configuration, commands, and recovery procedures.
-- [Release records](docs/releases/0.1.0.md#verification-records): dated evidence and its limits.
+- [Versioned release records](docs/releases/): dated evidence and its limits.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
@@ -36,7 +37,7 @@ or lanes. This is not a multitenant service or an OS sandbox.
 | CLI and setup | Configuration, credentials, doctor, start/status/stop and one-shot macOS registration. | [CLI](src/cli.ts), [config](src/config.ts), [setup](src/setup.ts), [credentials](src/credentials.ts), [autostart](src/autostart.ts) |
 | Gateway | One Rust process authenticates the configured adapters, admits intake durably, proxies scoped messenger effects and supervises exactly one head. It never connects to lane RPC or decides work. | [Gateway](gateway/src/main.rs), [server](gateway/src/server.rs), [ingress ledger](gateway/src/store.rs), [client](src/gateway-client.ts), [adapter hub](gateway/src/adapter.rs) |
 | Head | Its controller owns intake, placement, approvals and delivery. The shared model handles ordinary unbound requests, explicit `/head` work and manager coordination, not ordinary bound-topic prompts or their answers. | [Head extension](src/extension.ts), [runtime](src/runtime.ts), [coordination store](src/store.ts) |
-| Lane | Runs its assigned work in its own native session with its own cwd, model and context; reports to the head, not directly to a messenger. | [Lane extension](src/lane-extension.ts), [lane reporting](src/lane-report.ts), [role instructions](skills/lane/SKILL.md) |
+| Lane | Runs work in its own native session with its own cwd, model and context. Topic answers go through the controller outbox without a shared-model synthesis turn; manager handoffs report to the head. Neither sends directly to a messenger. | [Lane extension](src/lane-extension.ts), [lane reporting](src/lane-report.ts), [role instructions](skills/lane/SKILL.md) |
 | Host | One installed OMP process owns each managed root session. A detached Rust process owns its stdin/stdout and private reconnectable socket; it does not run inference, tools, or supervision policy. | [Host client](src/host.ts), [stdio owner](host-owner/src/main.rs), [SDK helper](src/host-sdk-helper.ts), [native lifecycle extension](src/host-extension.ts) |
 | Board | An informational log in `coordination.sqlite` shared by registered head/lane sessions in the same instance. Not a command, approval, or delivery bus. | [Board](src/board.ts), [board extension](src/board-extension.ts) |
 
@@ -177,17 +178,20 @@ surface. Do not patch or build OMP, use the in-tree SDK as the CLI, or use a
 runtime wrapper in place of the native CLI.
 
 [CI](https://github.com/dbc-hbin/omp-superagent/actions/workflows/ci.yml)
-runs the SDK-matched official CLI on Linux and macOS. OMP 18 can still be tested
-locally with `bash scripts/test-omp.sh <release-tag>`. `bun run test:ci` uses the installed
+uses the SDK-matched official CLI for the baseline tests on Linux x64 and macOS
+ARM64. Separate jobs build and verify installation of the npm payload on Linux
+and macOS on both architectures; see the [packaging procedure](docs/OPERATIONS.md#소스npm-릴리즈).
+OMP 18 can still be tested locally with `bash scripts/test-omp.sh <release-tag>`.
+`bun run test:ci` uses the installed
 CLI; `bun run test:baseline` downloads and verifies the SDK-matched official binary.
 The [weekly/manual compatibility workflow](https://github.com/dbc-hbin/omp-superagent/actions/workflows/omp-compatibility.yml)
 checks the latest upstream release without falling back or changing SDK pins.
 These local fixtures cover native RPC/Host, Gateway and setup surfaces; they do not
 prove live messenger accounts, provider requests or costs, or login/reboot behavior.
-Treat CI configuration as a test matrix, not a test result. For example, the
-[v0.1.3 tag run](https://github.com/dbc-hbin/omp-superagent/actions/runs/44695941397)
-passed the configured stock CLI checks for that release. See the [release
-notes](docs/releases/0.1.3.md) and historical records for their respective scopes.
+Treat CI configuration as a test matrix, not a test result. Use the Actions
+run for the exact commit or tag for results. Past evidence, such as the
+[v0.1.3 tag run](https://github.com/dbc-hbin/omp-superagent/actions/runs/44695941397),
+applies only to that release's configured checks, not to the current SDK baseline.
 
 Same-process native TUI/herdr attachment to managed RPC Hosts is **unsupported**.
 Native session discovery and ordinary resume are not attachment or a grant of

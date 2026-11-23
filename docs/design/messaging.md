@@ -24,16 +24,15 @@ topic is a binding key, not a fabricated conversation or thread ID.
 | [Slack](../../gateway/src/slack.rs) | Socket Mode and the Web API, with bot/workspace and active human owner checks and actual channel membership. No group DMs or public HTTP endpoint. Known-route history is limited by cursors, scopes, membership, retention and rate limits. |
 
 Set `discord.requireAddressing` to `true` to filter ordinary owner messages in
-allowed Discord guild parent channels, including message edits and history
-catch-up. The default is `false`. A message must actually mention the
-authenticated bot or be a verified reply in that conversation to a message it
-authored. Typing the bot's name, mentioning a different bot, or copying a bot
-message without actually addressing the bot does not count.
-Authorized threads that this bot created can continue without addressing; a
-thread started by another bot or person needs the same mention or verified
-reply as its parent channel. When enabled,
-verified inline mentions of this bot are removed from ordinary owner input in
-guild parent channels and threads, so a text command still parses as a command.
+allowed Discord guild parent channels and threads not created by this bot,
+including message edits and history catch-up. The default is `false`. A message
+must actually mention the authenticated bot or be a verified reply in that
+conversation to a message it authored. Typing the bot's name, mentioning a
+different bot, or copying a bot message without actually addressing the bot
+does not count. Authorized threads that this bot created can continue without
+addressing. When enabled, verified inline mentions of this bot are removed from
+ordinary owner input in guild parent channels and threads, so a text command
+still parses as a command.
 The owner, guild and parent-channel checks still apply. Owner DMs, Discord
 application commands, approval components and restricted group rooms retain
 their existing policies.
@@ -371,9 +370,11 @@ An admitted reset holds restart handoff until its outcome is durably recorded.
 Account options show the native selector number and, when available, a short
 masked account or organization hint; raw identities never enter the card.
 Capability is checked against the configured binary's `omp usage --help`.
-The [OMP 19.0.0 CLI source](https://github.com/can1357/oh-my-pi/blob/57771ae562b9345e0579bceb2d68d585e3e6927e/packages/coding-agent/src/cli/usage-cli.ts)
-and the installed 19.1.0 CLI expose a read-only `usage reset --json` list
-and a separate `usage reset <provider>/<credential id>` redemption.
+The adapter expects a read-only `usage reset --json` list and a separate
+`usage reset <provider>/<credential id>` redemption. The
+[OMP 19.0.0 CLI source](https://github.com/can1357/oh-my-pi/blob/57771ae562b9345e0579bceb2d68d585e3e6927e/packages/coding-agent/src/cli/usage-cli.ts)
+and previously inspected 19.1.0 CLI are dated references for this command shape,
+not the [current SDK baseline](../../DESIGN.md#stock-omp-and-verification-scope).
 Older executables without the exact-target command show an unsupported state;
 there is no provider fallback or mutation of local quota counters.
 
@@ -561,9 +562,12 @@ approval.
 
 [Discord voice](../../gateway/src/discord_voice.rs) is optional Gateway functionality,
 separate from voice attachments or the head model. A fresh original owner
-`/voice start` in the configured text channel can open one bounded OpenAI Live
-conversation in the configured voice channel. Use channel permissions to
-exclude other participants. Edits, catch-up and restart cannot open or resume it.
+`/voice start` in the configured guild text channel outside a restricted group
+room can open one bounded OpenAI Live conversation in the configured voice
+channel. Use channel permissions to exclude other participants. Live voice
+controls do not require a bot mention when `discord.requireAddressing` is
+enabled; confirmation still requires the exact active draft reply. Edits,
+catch-up and restart cannot open or resume a call.
 
 In subscription mode the [Rust Gateway](../../gateway/src/discord_voice/subscription.rs)
 uses the installed Codex CLI to verify the active subscriber, then sends audio via
@@ -581,8 +585,8 @@ cancels still-queued posts and invalidates unconfirmed drafts without waiting fo
 ordinary intake; requests already transmitted cannot be recalled. Neither start
 command submits or approves work. Only the owner's written
 `/voice confirm` as a reply to the active draft enters normal durable head
-intake; normal approval rules still apply. Head replies stay in normal Discord
-text delivery, with no return path to Live. The Gateway stores no recordings
+intake; normal routing and approval rules still apply. Replies stay in normal
+Discord text delivery, with no return path to Live. The Gateway stores no recordings
 or full voice transcript; drafts are visible in Discord and confirmed tasks and
 replies use existing records.
 See the [voice operations guide](../discord-voice.md) for setup, costs, and limits.

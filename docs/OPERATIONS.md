@@ -6,18 +6,21 @@
 이 문서는 설치·설정·일상 제어와 복구 절차를 다룬다. 파일·코드 경로와 셸 명령은 별도
 설명이 없으면 **저장소 루트 기준**이다. npm 설치에서는 같은 관리 명령을
 `bun --no-env-file src/cli.ts` 대신 `omp-sa`로 실행하며 설정 파일은 사용자 작업 디렉터리에 둔다.
-현재 구조·권한 계약은 [설계](../DESIGN.md),
-실행 날짜·기준선·범위가 있는 검증 결과는 [릴리즈 검증 기록](releases/0.1.0.md#verification-records)을 따른다.
+현재 구조·권한 계약은 [설계](../DESIGN.md)를 따른다. [버전별 릴리즈 기록](releases/)의
+검증 결과는 해당 버전·기준선·실행 범위에만 해당한다.
 
-Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 입력은 하나의 헤드를 거친다.
-헤드는 직접 작업하거나 독립 레인에 명시적으로 인계한다. 설정한 플랫폼은 모두 동시에
-연결되며 각 플랫폼의 소유자는 **같은 신뢰된 운영자**여야 한다. 메인 맥락은 공유하지만
-플랫폼·계정·대화·주제 신원은 분리한다. 멀티테넌트 구성이나 OS 보안 샌드박스가 아니다.
+Gateway가 메신저 연결과 지정 헤드의 수명을 맡는다. 헤드 컨트롤러는 운영자 입력을 접수하고
+라우팅한다. 연결되지 않은 일반 요청은 공유 HEAD 모델이 판단한다. 연결된 작업 주제의 일반
+작업은 해당 레인 세션에서 이어지며, 그 답변도 공유 모델의 추가 턴 없이 전달된다. 제어 명령과
+제한 그룹은 각각 별도 경로를 따른다. 설정한 플랫폼은 동시에 연결되며 각 플랫폼의 소유자는
+**같은 신뢰된 운영자**여야 한다. 메인 맥락은 공유하지만 플랫폼·계정·대화·주제 신원은
+분리한다. 멀티테넌트 구성이나 OS 보안 샌드박스가 아니다.
 관리 RPC Host의 동일 프로세스 native TUI/herdr attach는 지원하지 않는다.
 
 선택 기능인 [Discord 실시간 음성채팅](discord-voice.md)은 일반 대화를 별도 OpenAI Live 세션에서
 처리한다. `/voice start work`로 시작하면 말로 요청한 작업을 지정 텍스트 채널에 초안으로 게시할 수 있다.
-소유자가 해당 초안에 `/voice confirm`으로 답장해야 HEAD에 접수되며, 결과는 Discord 텍스트로만 받는다.
+소유자가 해당 초안에 `/voice confirm`으로 답장해야 일반 텍스트 작업으로 접수되며, 결과는
+Discord 텍스트로만 받는다.
 
 ### 레인 관리 도구와 운영 스킬
 
@@ -169,8 +172,9 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 성능·가격 등급이 아니며 모델 정책은 이 JSON 설정에 별도 작성하지 않는다.
 
 관리 프리셋은 영속 OMP 역할 `slow → high`, `default → middle`, `smol → low`를
-따른다. 시작할 때와 실행 중 약 30초마다 역할을 확인하며, 변경된 역할들이 가용하면 모델
-호출 없이 현재 역할·기본 effort를 다시 저장한다. 기존 프리셋은 역할 스냅샷과 모델이
+따른다. 시작 시 역할을 확인하고 실행 중에는 native 설정 파일과 관련 경로의 변경을 감시한다.
+감시할 수 없는 경로나 보류된 갱신은 느린 주기로 다시 확인한다. 변경된 역할의 모델이
+가용하면 모델 호출 없이 현재 역할·기본 effort를 다시 저장한다. 기존 프리셋은 역할 스냅샷과 모델이
 현재 설정에 일치할 때만 관리 대상으로 인수한다. 수동으로 수정·삭제한 관리 항목과
 다른 프리셋, 상위 설정이 가린 항목은 덮어쓰지 않는다. 이미 실행 중인 헤드와 기존
 레인이 보유한 모델·프리셋 스냅샷은 바뀌지 않는다.
@@ -202,13 +206,13 @@ board_subscribe({channels: ["general", "repo:/absolute/repository"]})
 사용한다. 이 저장소는 OMP를 다운로드하거나 소스에서 빌드하지 않는다.
 
 ```sh
-bun add --global --trust omp-superagent@0.1.7
+bun add --global --trust omp-superagent@0.1.8
 omp-sa --help
 ```
 
 `--trust`는 관리형 omp-superkit 준비 등 패키지 설치 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
-`npm install --global omp-superagent@0.1.7`도 사용할 수 있다.
+`npm install --global omp-superagent@0.1.8`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
 `omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
 
@@ -303,7 +307,8 @@ Git 추적 파일에 쓰지 않는다. 아래 셋업은 별도 소유자 전용 
    비공개 스레드 등은 봇이 실제로 접근할 수 있어야 한다. 관리자 권한은 요구하지 않는다.
 3. Discord 개발자 모드로 소유자 **사용자 ID**, 서버 ID, 허용할 **부모 채널 ID**를 복사한다.
    이름·멘션 문자열이 아니라 숫자로 된 ID 문자열을 설정한다.
-4. `ownerId` 한 명만 입력·승인 권한을 가진다. 다른 사용자, 봇, webhook 입력은 받지 않는다.
+4. 일반 운영자 라우트의 입력·승인 권한은 `ownerId` 한 명에게만 있다. 봇과 webhook 입력은
+   받지 않는다. 다른 사람에게 제한된 기능만 열려면 별도의 [`groupRooms` 규칙](#단체방서버-권한-분리)을 사용한다.
    서버 입력은 `allowedGuildIds`와 `allowedChannelIds`를 **모두** 통과해야 한다.
    스레드는 부모 채널 allowlist를 따른다. 빈 배열은 모든 서버 허용이 아니라 서버 입력 차단이다.
    소유자의 1:1 DM은 서버 allowlist와 별개이며 그룹 DM은 대상이 아니다.
@@ -317,6 +322,7 @@ Git 추적 파일에 쓰지 않는다. 아래 셋업은 별도 소유자 전용 
    답장 없이 계속 대화할 수 있다. 다른 봇이나 사람이 만든 스레드는 부모 채널과 같이 멘션이나
    이 봇 메시지에 대한 답장이 필요하다.
    소유자 1:1 DM, Discord 앱 명령, 승인 버튼, 제한된 `groupRooms`의 규칙은 그대로다.
+   지정 텍스트 채널에서의 실시간 `/voice` 제어는 [음성채팅 규칙](discord-voice.md#사용)을 따른다.
 
 ```sh
 read -r -s DISCORD_BOT_TOKEN
@@ -335,8 +341,8 @@ bun --no-env-file src/cli.ts discord-commands --config config.local.json --apply
 ```
 
 첫 명령은 읽기 전용 변경 확인이다. `--apply`는 **이 봇의 전역 명령 목록 전체를 교체**하므로
-전용 Superagent 앱에서만 사용한다. Hermes 전용 명령은 제거하고 지원되는
-`help/status/restart/context/usage/cron/model/effort/compact/stop/resolve/resume/new/main`만 등록한다.
+전용 Superagent 앱에서만 사용한다. Hermes 전용 명령은 제거하고 `/head`를 포함한
+[공통 명령 목록](../src/messenger-command-catalog.json)만 등록한다.
 별도 guild 명령이 전역 명령을 가리는 경우 몰래 삭제하지 않고 충돌을 알린다.
 등록은 모델·메신저 연결을 시작하지 않으며 setup·doctor·start의 부수 효과로 실행되지 않는다.
 인수가 있는 명령은 선택적인 `text` 필드를 사용한다. 예를 들어 `/model`의 `text`에
@@ -358,8 +364,9 @@ interaction token은 저장하거나 헤드에 넘기지 않는다. Discord는 �
 2. `ownerId`에는 **양수 숫자 사용자 ID 문자열**, `allowedChatIds`에는 허용 그룹/supergroup의
    **음수 chat ID 문자열**(예: 실제 `-100…` ID)을 넣는다. 이름·전화번호·username은 ID가 아니다.
    소유자의 private chat은 별도로 허용되며 빈 배열은 그룹 입력 차단이다.
-   허용된 그룹에서도 설정 소유자의 직접 메시지만 받으며 익명 관리자 `sender_chat`, 봇,
-   전달 메시지, via-bot·business 입력을 운영자 권한으로 인정하지 않는다.
+   일반 운영자 라우트에서는 허용된 그룹에서도 설정 소유자의 직접 메시지만 받는다.
+   익명 관리자 `sender_chat`, 봇, 전달 메시지, via-bot·business 입력을 운영자 권한으로 인정하지 않는다.
+   등록된 제한 그룹은 별도의 `groupRooms` 규칙을 따른다.
 3. 그룹의 일반 메시지까지 처리하려면 봇이 그 내용을 볼 수 있어야 한다.
    [Privacy Mode](https://core.telegram.org/bots/features#privacy-mode)를 BotFather에서 조정하거나
    봇의 관리자 가시성을 명시적으로 구성한다. Privacy Mode가 켜져 있으면 일반 메시지 전체가
@@ -430,8 +437,9 @@ bun --no-env-file src/cli.ts telegram-commands --config config.local.json --appl
 4. `teamId`는 `T…` workspace ID, `ownerId`는 그 workspace의 활성 인간 사용자 `U…`/`W…` ID,
    `allowedChannelIds`는 `C…`/`G…` 채널 ID 문자열이다. 앱을 허용 채널에 초대한다.
    시작 시 `auth.test`의 bot/workspace와 `users.info`의 소유자를 확인한다.
-   다른 workspace·사용자·봇·앱 입력은 받지 않고, 소유자의 1:1 DM만 채널 allowlist와 별도로
-   허용한다. 그룹 DM은 지원하지 않는다. 빈 배열은 workspace 채널 입력 차단이다.
+   일반 운영자 라우트에서는 다른 workspace·사용자·봇·앱 입력을 받지 않고, 소유자의 1:1 DM만
+   채널 allowlist와 별도로 허용한다. 등록된 제한 그룹은 별도의 `groupRooms` 규칙을 따른다.
+   그룹 DM은 지원하지 않는다. 빈 배열은 workspace 채널 입력 차단이다.
 5. Slack 일반 메시지에서는 **`!new [요청]`, `!main`, `!stop`, `!resume`**을 사용한다.
    어댑터가 공통 runtime 제어로 정규화한다. Slack composer가 `/new` 등을 가로챌 수 있으므로
    Discord·Telegram의 `/` 표기를 Slack 명령으로 안내하지 않는다.
@@ -448,7 +456,7 @@ bun --no-env-file src/cli.ts slack-commands --config config.local.json --manifes
 ```
 
 현재 bot·workspace·app 신원과 manifest를 조회해 같은 앱에만 적용하며 다른 설정은 보존한다.
-실행 시에는 `bots.info`의 app ID와 공식 Socket Mode SDK가 받은 `hello.connection_info.app_id`를
+실행 시에는 Rust Gateway가 `bots.info`의 app ID와 Socket Mode의 `hello.connection_info.app_id`를
 대조한다. 재연결의 app 신원이 아직 확인되지 않았거나 다르면 명령을 접수하지 않는다.
 `commandsGrant`·`requiresReinstall`·`permissionsUpdated`를 확인한다. manifest 저장만으로
 현재 설치의 OAuth grant가 바뀌었다고 가정하지 않으며, 필요한 재설치/승인은 별도로 완료한다.
@@ -467,8 +475,8 @@ read -r -s SLACK_APP_TOKEN
 export SLACK_BOT_TOKEN SLACK_APP_TOKEN
 ```
 
-공식 [Socket Mode SDK](https://docs.slack.dev/tools/node-slack-sdk/socket-mode/)와
-[Web API SDK](https://docs.slack.dev/tools/node-slack-sdk/web-api/)를 사용한다.
+Rust Gateway가 [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)와
+[Web API](https://docs.slack.dev/apis/web-api/)를 사용한다. 명령 등록 CLI는 Slack Web API SDK를 사용한다.
 스레드 조회는 현재 공식 [conversations.replies](https://docs.slack.dev/reference/methods/conversations.replies/)
 문서의 bot history scopes를 따른다. bot token이면 채널 스레드를 무조건 조회할 수 없다는
 과거 제한을 전제로 하지 않는다. 실제 접근 권한·workspace 보존 정책·API rate limit은 여전히 적용된다.
@@ -501,11 +509,11 @@ Discord 작업 스레드에 실행·대기 중인 요청, 미결 승인, 또는 
 봇에 **Manage Threads** 권한이 없거나 제목 변경이 실패해도 작업과 보고는 계속된다.
 
 오래 걸리는 작업에는 착수 뒤에도 같은 작업 스레드로 간결한 **중간 진척 보고**를 보낸다.
-레인이 실제로 확인한 결과·현재/다음 단계·막힘을 중간 assistant 문장으로 보고하면 헤드가
-검토해 사용자 언어로 전달한다. 레인 실행은 보고 때문에 멈추거나 헤드 답변을 기다리지 않는다.
-직접 헤드 작업도 같은 방식으로 중간 문장을 기존 발송 경로에 보낸다. 의미 있는 실행
-경계에서 발생하는 보고이지 고정 간격 heartbeat는 아니다. 모델이나 장시간 도구가 새
-진척을 내지 못하는 동안에는 새 보고가 없을 수 있고, 바쁜 헤드의 전달은 대기할 수 있다.
+해당 레인이 사용자 언어로 답하는 직접 주제 작업과 직접 HEAD 작업의 중간 문장은 컨트롤러가
+기존 발송 경로로 전달한다. 검토형 인계의 내부 레인 보고는 HEAD가 검토하여 전달한다.
+레인 실행은 보고 때문에 멈추거나 헤드 답변을 기다리지 않는다. 의미 있는 실행 경계에서
+발생하는 보고이지 고정 간격 heartbeat는 아니다. 모델이나 장시간 도구가 새 진척을 내지
+못하거나 HEAD 검토가 아직 끝나지 않았으면 새 보고가 없을 수 있다.
 별도 감시 모델·주기적 깨우기·로그 전체 전송은 추가하지 않는다.
 기존 Host에 역할 지침을 적용하려면 별도로 허가된 재시작이 필요하다. 소스 수정만으로
 운영 서비스가 갱신되었다고 간주하지 않는다.
@@ -717,8 +725,8 @@ high/middle/low는 명시적 `start`의 전용 초기 설정 턴에서 기존 �
 | `slack` | 선택 블록. 존재하면 `botTokenEnv`, `appTokenEnv`, `ownerId`, `teamId`, `allowedChannelIds` 모두 필수. |
 | `groupRooms` | 선택 목록. 등록한 방과 사용자에게만 아래 그룹 모드를 열며, 해당 방에서는 운영자도 일반 그룹 권한만 갖는다. 기본값은 빈 목록이다. |
 
-상태·cwd 상대 경로는 설정 파일 기준이지만 `command` 인수의 상대 경로는 그렇게 변환되지 않는다.
-실행 cwd가 달라도 동작하도록 command에는 절대 경로를 권장한다.
+상태·cwd의 상대 경로와 `command[0]`의 슬래시가 들어간 상대 실행 경로는 설정 파일 기준이다.
+그 뒤의 `command` 인수는 그렇게 변환되지 않는다. 실행 경로는 절대 경로를 권장한다.
 OMP 소스 CLI나 프로젝트 패치 바이너리를 지정하지 않는다. 지원 범위의 별도 설치 stock CLI를 사용한다.
 
 예제의 `maxHosts: 4`, `maxSubagents: 8`, `idleMs: 300000`은 운영자가 조정하는 예시이며
@@ -881,6 +889,8 @@ launch 직후 소유권 기록 전 crash 등은 수동 조정까지 보류할 �
 이 인스턴스에서 접근이 허용된 원본 작업 세션과 대조한다. 조회에는 성공했지만 기억이 비어 있으면
 원본에서 찾을 수 있다. 다른 백엔드를 쓰거나 조회가 실패하면 이 방식으로 임의 배정하지 않는다.
 후보가 여럿이면 질문에 번호로 답한다.
+과거 검색이 필요한 입력은 헤드가 먼저 영속 접수한 뒤 별도로 검색한다. 검색을 기다리는 동안
+같은 물리 채널·DM의 뒤따르는 일반 입력은 순서를 유지하지만 다른 대화는 차단하지 않는다.
 `recall`은 헤드에 설정된 메모리 뱅크 범위를 그대로 사용하며, 다른 프로젝트의 비공개 뱅크를 열지 않는다.
 메모리 원문은 채팅이나 새 세션에 전달하지 않는다. 다른 채널에서 이어갈 때는 이전 저장소와 해당 작업의
 근거만 현재 대화의 독립 세션에 전달한다. 이미 연결된 Discord 작업 스레드에서는 새 세션을
@@ -1381,7 +1391,8 @@ Telegram은 인증한 승인 카드의 account·실제 chat/thread·메시지 ID
 Discord의 일반 출력은 원래 사용자 메시지와 같은 물리 대화일 때 그 메시지에 답장한다.
 새 스레드로 보낸 결과나 실제 메시지가 없는 slash interaction에는 reply reference를 넣지 않는다.
 삭제된 원문은 Discord의 단일 전송 요청에서 허용하며 실패 뒤 중복 전송하지 않는다.
-작성자 mention은 끄고 긴 출력은 기존처럼 단일 텍스트 첨부로 보낸다.
+작성자 mention은 끈다. 긴 출력은 [아래 발송 한도](#5-운영-범위와-복구-제약)에 따라 먼저 분할하고,
+한도를 넘으면 텍스트 첨부를 사용한다. 제자리 수정용 상태 메시지는 분할하지 않는다.
 
 ```sh
 bun --no-env-file src/cli.ts stop LANE_ID --config config.local.json
@@ -1443,7 +1454,7 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
   crash prompt replay·unloaded 실행·작업 완료를 보장하지 않는다.
 - launch 설정과 역할 파일 수정은 새 Host 기동/허가된 재시작 뒤 적용된다. 설치·소스 편집은
   운영 반영의 증거가 아니다. paused goal도 enabled이면 종료 guard에 따라 Host·슬롯을 유지할 수 있다.
-- 세션별 Bun owner는 native OMP stdio와 재연결 socket만 유지한다. 세션 파일·lease·연결·실행·
+- 세션별 Rust Host owner는 native OMP stdio와 재연결 socket을 유지한다. 세션 파일·lease·연결·실행·
   실제 종료는 별개다. native UI·비동기 실행·goal·소유 서비스·저장 완료가 확인되지 않으면
   안전한 유휴로 추측하거나 강제 회수하지 않는다. shutdown ACK만으로 예산·소유권을 해제하지 않는다.
   상세 구현은 [실행 자원과 Host 수명](design/execution.md#execution-budget-and-host-lifecycle)을 따른다.
@@ -1481,13 +1492,14 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
   Discord·Telegram·Slack의 원래 작업 대화에만 발송되며, 작업 스레드가 없는 경우 원래 요청 대화가
   대상이다. 수정 메시지·앱 슬래시 상호작용·모델 답변으로는 첨부를 허가할 수 없다.
   제한 그룹에서도 사용할 수 없다.
-- 긴 출력은 아래 단일 텍스트 첨부로 보낸다. 입력 한도와 다르다. Discord만 예외로, 2,000 UTF-16 단위를
-  넘는 답변을 문단·줄·공백 경계에서 최대 5개 메시지로 나눠 순서대로 보낸다. 코드 블록이 경계에
+- 긴 출력의 한도는 입력 첨부 한도와 다르다. Discord 일반 답변은 2,000 UTF-16 단위를
+  넘으면 문단·줄·공백 경계에서 최대 5개 메시지로 나눠 순서대로 보낸다. 코드 블록이 경계에
   걸리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다. 원래 메시지에 대한 답장 표시는 첫
   메시지에만 붙고, 전송 영수증도 첫 메시지 ID를 쓴다. 모두 전송된 경우 이후 조각의 ID도 기록해
   어느 조각에 답장해도 원래 작업을 찾을 수 있다. 일부만 보낸 뒤 실패하면 다시 보내지 않고
-  불확실(uncertain)로 남긴다. Telegram·Slack 변경·발송 API의 SDK 자동 재시도는 끈다. 읽기/poll 재연결과 불확실한 외부
-  효과를 재실행하는 것은 다르다.
+  불확실(uncertain)로 남긴다. 다른 물리 대화는 병렬로 발송할 수 있지만 같은 물리 대화 안의
+  장부 순서는 유지한다. Telegram·Slack의 변경·발송 API는 자동 재시도하지 않는다.
+  읽기/poll 재연결과 불확실한 외부 효과를 재실행하는 것은 다르다.
 
   | 플랫폼 | 일반 텍스트 | 긴 출력 |
   | --- | --- | --- |
@@ -1550,8 +1562,9 @@ upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macO
 있으면 이 워크플로는 실패하고 PR·릴리스의 기준판 검사는 영향을 받지 않는다. 호환성 확인만으로
 제품의 지원 범위나 SDK lockfile이 바뀌지는 않는다. 이 검사는 실제 계정·유료
 제공자·herdr·실제 로그인/재부팅을 검증하지 않으며 과거의 동일 프로세스 TUI attach 지원도
-뜻하지 않는다. 실행 결과는 [릴리즈 검증 기록](releases/0.1.0.md#verification-records)에 모은다.
-이전 stock 18.20.2와 패치된 18.20.0의 결과는 현재 기준 버전의 검증과 구분하며 이후 변경의 증거로 재사용하지 않는다.
+뜻하지 않는다. 최신 upstream 검사의 실제 결과는 해당 Actions 실행에서 확인한다.
+[이전 릴리즈의 stock 18.20.2와 패치된 18.20.0 검증 기록](releases/0.1.0.md#verification-records)은
+현재 SDK 기준판이나 이후 변경의 증거로 재사용하지 않는다.
 
 ### 대상별 native·omp-superkit 회귀
 
@@ -1587,21 +1600,29 @@ OMP_TEST_ULW_EXTENSION=/absolute/path/to/omp-superkit/index.ts bun test test/ski
 
 ### 소스·npm 릴리즈
 
-0.1.1부터 GitHub 소스 아카이브와 npm 패키지를 함께 배포한다. 실행에는 Bun이 필요하다.
-OMP·omp-superkit·node_modules·native addon·사용자 설정·세션은 아카이브에 포함하지 않는다.
-`package.json`의 버전과 `docs/releases/<version>.md`를 준비하고 의도한 변경을 커밋한 뒤:
+GitHub 소스 아카이브는 커밋된 소스만 담으며 설치할 때 현재 플랫폼용 Rust Gateway와 Host
+owner를 빌드한다. npm `.tgz`는 네 플랫폼용 실행 파일과 라이선스 고지를 함께 담아 설치
+머신에서 Rust 빌드를 요구하지 않는다. 실제 실행에는 두 배포 모두 Bun과 별도 설치한 OMP가
+필요하다. 관리형 omp-superkit은 설치 단계에서 준비하며 아카이브에 내장하지 않는다.
 
-```sh
-bun run release
-```
+`package.json`의 버전과 `docs/releases/<version>.md`를 준비하고 의도한 변경을 커밋한다.
+[CI의 네이티브 빌드 매트릭스](../.github/workflows/ci.yml)는 각 대상(`darwin-arm64`, `darwin-x64`,
+`linux-arm64`, `linux-x64`)에서 `bun run build:native --package`로 두 실행 파일과 고지를
+생성한다. 일반 소스 빌드 도구 외에도 Rust `rust-docs`가 필요하며, Linux의 정적 릴리즈
+바이너리에는 해당 아키텍처의 musl Rust target과 `musl-gcc`가 필요하다.
+패키징 job이 그 출력을 `gateway/bin/`과 `host-owner/bin/`에 모은 뒤
+`bun run release`를 실행한다. 로컬에서 같은 명령으로 패키징하려면 깨끗한 Git checkout과
+동일 커밋에서 빌드한 네 대상의 실행 가능한 바이너리·고지가 모두 필요하다. 소스 checkout에
+`bun install --frozen-lockfile`만 한 상태는 현재 플랫폼만 준비하므로 이 요건을 충족하지 않는다.
 
-`scripts/release.ts`는 깨끗한 Git checkout의 HEAD를 `git archive`로 내보내고
-`bun pm pack --ignore-scripts`로 `package.json`의 files 목록에 한정한 npm 패키지를 만든다.
-`dist/omp-superagent-<version>.tar.gz`, `.tgz`와 각각의 `.sha256`이 생성된다.
-이 명령 자체는 게시하지 않는다.
-승인받은 버전 태그를 원격에 푸시하면 `.github/workflows/ci.yml`이 Linux/macOS 검증 후
-`bun run release --publish`로 GitHub Release를 게시한다. 이어 별도 npm job이 그 릴리즈의
-동일한 `.tgz`를 내려받아 SHA-256을 확인하고 GitHub Actions OIDC로 npm에 게시한다.
+[`scripts/release.ts`](../scripts/release.ts)는 HEAD를 `git archive`로 내보내고
+`bun pm pack --ignore-scripts`로 준비된 npm 패키지를 만든다. 네이티브 파일·고지와 실행
+권한을 확인하며 `dist/omp-superagent-<version>.tar.gz`, `.tgz`와 각각의 `.sha256`을
+만든다. 인자 없는 명령은 게시하지 않는다.
+승인받은 새 버전 태그를 원격에 푸시하면 CI가 Linux/macOS 기준판 테스트와 네 플랫폼의
+npm 패키지 설치 검증을 모두 통과한 뒤 `bun run release --publish`로 **검증한 배포 파일을
+다시 빌드하지 않고** GitHub Release에 게시한다. 이어 별도 npm job이 그 릴리즈의 동일한
+`.tgz`를 내려받아 SHA-256을 확인하고 GitHub Actions OIDC로 npm에 게시한다.
 버전과 태그·commit이 일치해야 하며 일반 태그 푸시는 기존 릴리즈를 덮어쓰지 않는다.
 기존 릴리즈의 교체를 명시적으로 승인받은 경우에만, 이미 검증하고 병합한 커밋으로
 해당 태그를 옮긴 뒤 그 태그에서 `ci.yml`을 `replace_release=true`로 수동 실행한다.
