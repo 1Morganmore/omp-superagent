@@ -1588,6 +1588,122 @@ test("cron controls scope job management to the original thread and send one HEA
   expect(errors).toEqual([]);
 });
 
+test("direct shell cron registration fails without queuing a model turn", async () => {
+  const { runtime, main, store, errors } = fixture();
+  const origin = route("11");
+  await runtime.start();
+
+  await admit(runtime, message("301", origin, '/cron add shell "every 2h" printf benign'));
+  expect(store.input("301")?.state).toBe("cancelled");
+  expect(store.output("301:head-control")?.text).toContain("Direct shell cron jobs are disabled");
+  await admit(runtime, message("302", origin, '/cron create shell "every 2h" printf benign'));
+  expect(store.input("302")?.state).toBe("cancelled");
+  expect(store.output("302:head-control")?.text).toContain("Direct shell cron jobs are disabled");
+  await admit(runtime, message("303", origin, "/cron list"));
+  expect(store.output("303:head-control")?.text).toBe("No cron jobs in this conversation.");
+  expect(main.prompts).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("legacy shell cron jobs cannot run, become model prompts, or send queued shell output", async () => {
+  const { runtime, messenger, main, store, errors } = fixture();
+  const origin = route("11");
+  messenger.assertRoute = () => {};
+  const source = message("311", origin, '/cron add shell "every 2h" printf benign');
+  const ordinarySource = message("312", origin, '/cron add "every 2h" Check the fixture');
+  const jobId = "legacy-shell";
+  const ordinaryId = "ordinary-cron";
+  const pending = `cron-run:${jobId}:312`;
+  const completed = `cron-run:${jobId}:313`;
+  const outputId = `${completed}:cron-shell`;
+  const nextAt = Date.now() - 1;
+  const revision = JSON.stringify({ jobId, revision: source.id });
+
+  store.receive(source, "main", { [`user-source:${source.id}`]: "true" });
+  store.settle(source.id, "done");
+  store.receive(ordinarySource, "main", { [`user-source:${ordinarySource.id}`]: "true" });
+  store.settle(ordinarySource.id, "done");
+  store.receive({ ...source, id: pending, text: "printf benign" }, "main", {
+    [`cron-shell:${pending}`]: revision,
+    "cron:jobs": JSON.stringify({ registrations: {}, jobs: [{
+      id: jobId, sourceId: source.id, shell: true, prompt: "printf benign", commandRevision: source.id,
+      schedule: { kind: "interval", milliseconds: 7_200_000 }, nextAt, paused: false, stopBoundary: null, lastRunId: pending,
+    }, {
+      id: ordinaryId, sourceId: ordinarySource.id, prompt: "Check the fixture",
+      schedule: { kind: "interval", milliseconds: 7_200_000 }, nextAt, paused: false, stopBoundary: null, lastRunId: null,
+    }] }),
+  });
+  store.receive({ ...source, id: completed, text: "printf benign" }, "main", { [`cron-shell:${completed}`]: revision });
+  store.settle(completed, "done", { id: outputId, text: "legacy output" });
+
+  await runtime.start();
+  await main.whenPrompts(1);
+  expect(main.prompts[0]?.command.message).toEndWith("\nCheck the fixture\n```");
+  main.complete("Ordinary scheduled result");
+  const jobs = JSON.parse(store.getMeta("cron:jobs")!).jobs;
+  const ordinary = jobs.find((job: { id: string }) => job.id === ordinaryId);
+  const legacy = jobs.find((job: { id: string }) => job.id === jobId);
+  expect(ordinary?.nextAt).toBeGreaterThan(Date.now());
+  expect(legacy?.nextAt).toBe(nextAt);
+  await waitForOutput(messenger, `${ordinary?.lastRunId}:answer`);
+  await admit(runtime, message("314", origin, "/cron list"));
+  await waitForOutput(messenger, "314:head-control");
+  expect(store.input(pending)?.state).toBe("cancelled");
+  expect(store.output(outputId)?.state).toBe("failed");
+  expect(messenger.sent.some(output => output.id === outputId)).toBe(false);
+  expect(store.output("314:head-control")?.text).toContain("shell disabled");
+  expect(store.output("314:head-control")?.text).toContain("next: none");
+
+  await admit(runtime, message("315", origin, `/cron show ${jobId}`));
+  expect(store.output("315:head-control")?.text).toContain("shell disabled");
+  expect(store.output("315:head-control")?.text).not.toContain("printf benign");
+  for (const [id, action] of [["316", `run ${jobId}`], ["317", `resume ${jobId}`], ["318", `edit ${jobId} prompt This must not become a prompt`]] as const) {
+    await admit(runtime, message(id, origin, `/cron ${action}`));
+    expect(store.input(id)?.state).toBe("cancelled");
+    expect(store.output(`${id}:head-control`)?.text).toContain("Direct shell cron jobs are disabled");
+  }
+  await admit(runtime, message("319", origin, `/cron remove ${jobId}`));
+  expect(store.output("319:head-control")?.text).toContain("Removed cron job");
+  expect(main.prompts).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test("HEAD stop does not claim a previously submitted legacy shell run has stopped", async () => {
+  const { runtime, messenger, main, store, errors } = fixture();
+  const origin = route("11");
+  const id = "cron-run:legacy-shell:321";
+  store.receive(message(id, origin, "printf benign"), "main", { [`cron-shell:${id}`]: "legacy-shell" });
+  store.submit(id, "legacy-shell-receipt", 0);
+  store.setMeta("head:stop-boundary", JSON.stringify({ inputId: "legacy-stop", cancelledInputIds: [id] }));
+  await runtime.start();
+  expect(store.input(id)?.state).toBe("uncertain");
+  expect(store.output(`${id}:interrupted`)?.text).toContain("original host");
+  await admit(runtime, message("322", origin, "/stop head"));
+  await waitForOutput(messenger, "322:head-control");
+
+  expect(store.input(id)?.state).toBe("uncertain");
+  expect(store.input("322")?.state).toBe("uncertain");
+  expect(store.output("322:head-control")?.text).toContain("an earlier shell cron process may still be running");
+  expect(main.prompts).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("changing only the schedule preserves literal quotation marks in an ordinary cron prompt", async () => {
+  const { runtime, messenger, main, store } = fixture();
+  const origin = route("11");
+  messenger.assertRoute = () => {};
+  await runtime.start();
+
+  const literal = '"Keep these quotation marks"';
+  await admit(runtime, message("331", origin, `/cron add "every 2h" ${JSON.stringify(literal)}`));
+  const id = store.output("331:head-control")?.text.match(/[0-9a-f-]{36}/)?.[0];
+  if (!id) throw new Error("Cron registration did not return a job ID");
+  await admit(runtime, message("332", origin, `/cron edit ${id} "every 3h"`));
+  await admit(runtime, message("333", origin, `/cron run ${id}`));
+  await main.whenPrompts(1);
+  expect(main.prompts[0]?.command.message).toEndWith("\n" + literal + "\n```");
+});
+
 test("pausing a cron job while HEAD is busy cancels its pending execution without interrupting HEAD", async () => {
   const { runtime, messenger, main, store, errors } = fixture();
   messenger.assertRoute = () => {};

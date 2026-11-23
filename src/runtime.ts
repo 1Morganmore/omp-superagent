@@ -549,7 +549,14 @@ export class Superagent {
       const stopBoundary = this.store.getMeta("head:stop-boundary");
       if (stopBoundary) {
         const boundary = JSON.parse(stopBoundary) as { cancelledInputIds: string[]; deferredStoppedIds?: string[] };
-        for (const id of boundary.cancelledInputIds) this.store.settle(id, "cancelled");
+        for (const id of boundary.cancelledInputIds) {
+          // An older shell stop receipt did not prove that the process exited.
+          if (this.cronJobs.isDisabledShellRun(id)) {
+            const state = this.store.input(id)?.state;
+            if (state === "submitted" || state === "uncertain") continue;
+          }
+          this.store.settle(id, "cancelled");
+        }
         for (const id of boundary.deferredStoppedIds ?? []) {
           const stoppedInput = this.store.input(id);
           if (stoppedInput?.state === "pending" && this.shouldCancelDeferredHead(stoppedInput)) {
@@ -562,6 +569,11 @@ export class Superagent {
       }
       for (const input of this.store.inputs(undefined, "submitted")) {
         if (recovered.has(input.id)) continue;
+        if (this.cronJobs.isDisabledShellRun(input.id)) {
+          this.store.settle(input.id, "uncertain", { id: `${input.id}:interrupted`,
+            text: "An earlier shell cron run was not repeated. Verify its state on the original host before resolving it." });
+          continue;
+        }
         const owner = this.store.getMeta(`steering-owner:${input.id}`);
         this.store.settle(input.id, "uncertain", !owner || owner === input.id ? {
           id: `${input.id}:interrupted`,
@@ -5460,6 +5472,7 @@ export class Superagent {
         if (candidate.id === input.id) break; // Durable ledger order, not timestamps or today's topic.
         const earlierCommand = this.headCommand(candidate);
         if (candidate.state === "uncertain" || this.controls.has(candidate.id) || this.laneResumeOwner(candidate)
+          || candidate.state === "submitted" && this.cronJobs.isDisabledShellRun(candidate.id)
           || earlierCommand && (this.readOnlyHeadCommand(earlierCommand) || earlierCommand.name === "stop" || candidate.state !== "pending")) continue;
         cancelledInputIds.push(candidate.id);
       }
@@ -5555,7 +5568,11 @@ export class Superagent {
         } catch (error) { failures.push(error); }
         const actual = await this.state(live);
         live.busy = !actual.isSettled;
-        if (actual.isStreaming || !actual.isSettled || actual.isCompacting || actual.queuedMessageCount !== 0
+        const legacyShellUnverified = this.store.inputs("main").some(candidate =>
+          (candidate.state === "submitted" || candidate.state === "uncertain") && this.cronJobs.isDisabledShellRun(candidate.id));
+        if (legacyShellUnverified) {
+          this.controlReply(input, "HEAD stop boundary is durable, but an earlier shell cron process may still be running. Verify its state on the original host before resolving the run.", "uncertain");
+        } else if (actual.isStreaming || !actual.isSettled || actual.isCompacting || actual.queuedMessageCount !== 0
           || actual.hasPendingAsyncWork !== false || actual.hasOwnedRunningWork !== false
           || actual.goal?.enabled || actual.pendingUiRequests?.length || failures.length) {
           this.controlReply(input, `HEAD stop boundary is durable, but native cleanup is not fully confirmed. ${this.nativeStatus(actual)}. Services/async work may remain; no task completion or historical-effect rollback is claimed.`, "uncertain");
@@ -6590,6 +6607,10 @@ export class Superagent {
           if (input.target && (input.state === "submitted" || input.state === "uncertain")) heldTargets.add(input.target);
           if (input.target === "main" && input.state !== "pending") earlierMain.add(input.id);
           if (this.stopped || input.state !== "pending") continue;
+          if (this.cronJobs.isDisabledShellRun(input.id)) {
+            this.store.settle(input.id, "cancelled");
+            continue; // Never send a legacy shell command to a model as a fallback.
+          }
           if (input.target === null) {
             const owner = this.store.getMeta(`topic-owner:${input.id}`);
             if (owner && !resumingLanes.has(owner)) {
@@ -7675,6 +7696,10 @@ export class Superagent {
           }
         }
         if (this.stopped || !this.store.claimOutput(output.id, this.config.discord?.editProgressInPlace === true)) continue;
+        if (output.id === `${output.sourceId}:cron-shell` && this.cronJobs.isDisabledShellRun(output.sourceId)) {
+          this.store.finishOutput(output.id, "failed", undefined, "Legacy cron shell output was not sent");
+          continue;
+        }
         const resultInputId = /^(.+):answer(?::done)?$/.exec(output.id)?.[1];
         let remoteId: string;
         try {

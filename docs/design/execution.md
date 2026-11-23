@@ -372,8 +372,12 @@ discarding custom commands or enabling disabled extensions.
   approval authority. An unresolved run is not repeated; a head stop fence
   requires explicit per-job resume. Pause and removal can cancel a queued
   run, not interrupt submitted or uncertain work. Delivery uses the normal
-  head outbox. See the [operator reference](../OPERATIONS.md#예약-작업-cron)
-  for schedule syntax and controls.
+  head outbox. Direct shell schedules are disabled: an authenticated route and
+  scrubbed credentials are not a runtime capability boundary. Legacy shell
+  jobs remain inspectable and removable; pending runs are cancelled rather
+  than forwarded to a model, and queued shell output is not sent. Verify any
+  previously started legacy run on its original host before resolving it.
+  See the [operator reference](../OPERATIONS.md#예약-작업-cron) for syntax and controls.
 - [Repository PR intake](../../src/cron-pr-intake.ts) is a typed cron job, not
   an executable prompt. Only original configured-owner Discord guild parent
   controls enroll a repository. Discovery pins the authenticated GitHub owner
