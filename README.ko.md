@@ -104,7 +104,7 @@ OS 샌드박스가 아닙니다. 자세한 내용은 [설계(영문)](DESIGN.md)
 ## 배포 형태
 
 [npm 패키지](https://www.npmjs.com/package/omp-superagent)를 Bun 또는 npm으로 설치하거나
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.8)의 소스·npm tarball을 받으세요.
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.9)의 소스·npm tarball을 받으세요.
 실행에는 Bun이 필요하며 독립 실행 바이너리는 아닙니다. 설치 시 관리형 의존성을 준비합니다.
 Host를 실행하려면 별도로 설치한 OMP가 필요하며, 이 프로젝트가 패치하거나 빌드하지 않습니다.
 
@@ -140,7 +140,7 @@ OMP 19 데몬은 이전 브로커의 서비스를 인수하지 않습니다.
 OMP 자체를 설치하려면 [공식 설치 안내](https://github.com/can1357/oh-my-pi#install)를 참고하세요.
 
 ```sh
-bun add --global --trust omp-superagent@0.1.8
+bun add --global --trust omp-superagent@0.1.9
 omp-sa --help
 ```
 
@@ -153,7 +153,7 @@ omp-sa --help
 Bun이 `PATH`에 있다면 npm으로도 설치할 수 있습니다.
 
 ```sh
-npm install --global omp-superagent@0.1.8
+npm install --global omp-superagent@0.1.9
 ```
 
 postinstall이 필수 관리형 omp-superkit 통합을 준비하므로 설치 스크립트를 생략하지 마세요.
@@ -333,10 +333,11 @@ SSH가 끊겨도 Host 자체는 종료되지 않습니다. Host가 종료된 뒤
 - 헤드에서 Mnemopi가 활성화되어 검색할 수 있으면 다른 운영자 채널에서도 `지난주 로그인 버그 보던 데서 계속해줘`라고 할 수 있습니다. Mnemopi `recall`로 단서를 찾고, 날짜와 작업 내용을 원래 세션에서 확인합니다. 하나로 좁혀지면 그 저장소에서 이어가고, 여럿이면 번호로 고릅니다. 다른 메모리 백엔드로도 관리형 세션을 실행할 수 있지만 이 과거 작업 검색은 지원하지 않습니다. 제한 그룹방은 검색 대상이 아닙니다.
 - 전역 조정은 `/head 요청`을 사용합니다. 저장소·주제별 레인 맥락은
   독립적입니다. 음성 첨부 메타데이터 보존이 자동 전사를 뜻하지는 않습니다.
-- `/help`와 `/status`로 명령·상태를 확인합니다. `/model`·`/effort`는 유휴 헤드 세션만
-  바꾸며 기존 레인·전역 기본값은 유지합니다. `/head`로 헤드 모델 변경을 요청하면
-  해당 턴이 끝난 뒤 적용합니다. 전역 프리셋 저장은 명시적 `--global`이 필요합니다.
-  Slack 일반 메시지 명령은 `!`를 씁니다.
+- `/help`와 `/status`로 명령·상태를 확인합니다. Discord 작업 스레드에서 `/model`을 열면
+  유휴 HEAD 또는 해당 스레드에 연결된 유휴 레인을 선택할 수 있습니다. 모델 ID를 직접 입력하는
+  `/model <provider/model>`은 `--lane`을 붙이지 않으면 HEAD에 적용됩니다. `/effort`도
+  HEAD에 적용됩니다. `/head`로 HEAD 모델 변경을 요청하면 해당 턴이 끝난 뒤 적용합니다.
+  전역 프리셋 저장은 명시적 `--global`이 필요합니다. Slack 일반 메시지 명령은 `!`를 씁니다.
 - `/usage`는 OMP가 조회한 기본·확장 제공자의 계정별 한도와 리셋 시각을 마스킹된 계정 이름과 함께 보여줍니다. 모델은 호출하지 않습니다.
 - Discord 명령 목록과 채팅에서는 `/usage-reset`으로 계정별 보유 리셋권을 확인합니다.
   Telegram은 `/usage reset`, Slack은 `!usage reset` 또는 `/superagent-usage reset`을 사용합니다.
@@ -420,7 +421,7 @@ bun run test:ci
 | [실행과 조율(영문)](docs/design/execution.md) | 레인·native Host 수명·모델·workflow·관리형 통합·모니터링·게시판. |
 | [운영 가이드](docs/OPERATIONS.md) | 설치·설정·명령·복구 절차. |
 | [Discord 음성채팅](docs/discord-voice.md) | Codex 구독 음성 또는 별도 과금되는 API 음성 선택. |
-| 릴리즈 | [릴리즈 노트](docs/releases/0.1.8.md) 및 [과거 검증 기록](docs/releases/0.1.0.md#verification-records). |
+| 릴리즈 | [릴리즈 노트](docs/releases/0.1.9.md) 및 [과거 검증 기록](docs/releases/0.1.0.md#verification-records). |
 
 [oh-my-pi](https://github.com/can1357/oh-my-pi)를 기반으로 하며, workflow에는 [omp-superkit](https://github.com/dbc-hbin/omp-superkit)을 사용합니다.
 

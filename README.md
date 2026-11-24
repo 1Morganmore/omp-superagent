@@ -114,7 +114,7 @@ service or an OS sandbox; see [Design](DESIGN.md).
 
 Install from [npm](https://www.npmjs.com/package/omp-superagent) or use the source
 and npm tarballs from the
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.8).
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.9).
 Install with Bun or npm below. Bun is still required at runtime; this is not a
 standalone binary. Installation prepares the managed dependencies. Running a Host
 requires a separately installed OMP; this project neither patches nor builds it.
@@ -156,7 +156,7 @@ To install OMP separately, see the
 [upstream instructions](https://github.com/can1357/oh-my-pi#install).
 
 ```sh
-bun add --global --trust omp-superagent@0.1.8
+bun add --global --trust omp-superagent@0.1.9
 omp-sa --help
 ```
 
@@ -169,7 +169,7 @@ Ensure `bun pm bin --global` is on `PATH`.
 Alternatively, with Bun on `PATH`:
 
 ```sh
-npm install --global omp-superagent@0.1.8
+npm install --global omp-superagent@0.1.9
 ```
 
 Keep lifecycle scripts enabled for the managed omp-superkit integration.
@@ -372,10 +372,12 @@ worker. That is not a stop command for an already running lane.
   the original channel binding, transcript or approvals. Choose by number if multiple tasks match.
 - Use `/head <request>` for coordination or direct global work. Repositories and
   topics keep independent lane context; voice metadata does not imply transcription.
-- Use `/help` and `/status` for controls and state. `/model` and `/effort` manage the
-  idle head session, not existing lanes or global defaults. You can also ask the head
-  with `/head` to switch its own model after that turn. Global preset changes
-  require explicit `--global`. Slack's message commands use `!`.
+- Use `/help` and `/status` for controls and state. In a Discord work thread,
+  `/model` lets you choose the idle HEAD or the idle lane bound to that thread.
+  A direct `/model <provider/model>` still targets HEAD unless you add `--lane`.
+  `/effort` targets HEAD. You can also use `/head` to ask HEAD to switch its own
+  model after that turn. Global preset changes require explicit `--global`.
+  Slack's message commands use `!`.
 - `/usage` shows masked account names, quotas, and reset times for built-in and extension-provided usage sources reported by stock OMP, without a model turn.
 - `/usage-reset` shows saved reset tickets by account in Discord's slash picker or chat.
   On Telegram use `/usage reset`; on Slack use `!usage reset` or `/superagent-usage reset`.
@@ -464,7 +466,7 @@ recorded versions and scenarios. Offline CI does not verify live accounts or pro
 | [Execution and coordination](docs/design/execution.md) | lanes, native Host lifecycle, models, workflows, managed integration, monitoring, and the board. |
 | [Operations guide](docs/OPERATIONS.md) | platform setup, commands, and recovery. |
 | [Voice configuration guide](docs/discord-voice.md) | Codex subscription voice or the separately billed API. |
-| Releases | [Release notes](docs/releases/0.1.8.md) and [historical verification records](docs/releases/0.1.0.md#verification-records). |
+| Releases | [Release notes](docs/releases/0.1.9.md) and [historical verification records](docs/releases/0.1.0.md#verification-records). |
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.
