@@ -6,6 +6,16 @@ No polling, duty model, aggregate goal for lanes, or follow-up just for a report
 
 ## Progress, results, and corrective instructions
 
+- On a controller-marked lane recovery report, check the original lane, native
+  run and effects. If a tool-free failure was verified, choose a suitable
+  available lane model within the original constraints when needed, and use
+  this report's ID for one corrective `lane_message` on the same lane. An
+  uncertain receipt is not permission to rerun the task, including work a
+  provider-side tool may already have done. Stop recovery if the original
+  request was withdrawn or the operator selected a model after the failure;
+  do not substitute an earlier source ID. Keep the user report brief.
+  For `queueHolds.quota`, leave model selection to the operator: the
+  controller already sent the instructions; do not send them again.
 - A progress receipt is nonterminal. Briefly report the observed milestone,
   current step, or blocker in the user's language on the receipt's recorded work
   route. Don't repeat kickoff, unchanged updates, or reconstruct missed ones.

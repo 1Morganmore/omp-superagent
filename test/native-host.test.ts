@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { parseSessionEntries, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { startHost, HostConnection, type HostFrame, type HostOptions } from "../src/host";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
-import { indexServiceCompletions } from "../src/host-protocol";
+import { indexServiceCompletions, LANE_MODEL_PROMOTION_RECEIPT } from "../src/host-protocol";
 import { decisionId } from "../src/decisions";
 import { assertResidentFixtureOwner, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { nativeTestCommand } from "./fixtures/native-command";
@@ -203,6 +203,79 @@ for (const entries of [["primary"], managedEntries] as const) {
       if (await stopHostFixtures(root) !== 1 && succeeded)
         throw new Error(`Expected one rejected native Host registration; retained ${root}`);
       if (succeeded) await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 90_000);
+}
+
+for (const role of ["lane", "head"] as const) {
+  nativeTest(`actual OMP managed exact lane model selection on a ${role} Host`, async () => {
+    const { root, options } = await nativeHostOptions(["primary"]);
+    const provider = "lane-catalog-fixture";
+    const modelId = "org/alternate model";
+    const change = { type: "set_lane_model", provider, modelId };
+    await fs.writeFile(path.join(root, "agent", "models.yml"), JSON.stringify({ providers: {
+      [provider]: { api: "openai-completions", apiKey: "offline-native-fixture", baseUrl: "http://127.0.0.1:1/v1",
+        models: [{ id: modelId, name: modelId, contextWindow: 32768, maxTokens: 4096 }] },
+    } }), { mode: 0o600 });
+    let connection: HostConnection | undefined;
+    let passed = false;
+    try {
+      const child = await startHost({ ...options, env: { ...options.env, OMP_SUPERAGENT_ROLE: role } });
+      const host = await HostConnection.connect(options.socketPath);
+      connection = host;
+      const initial = await host.client.getState();
+      const unchanged = { sessionId: initial.sessionId, sessionFile: options.sessionFile, model: initial.model,
+        settingsScope: "session", modelSettings: initial.modelSettings };
+      if (role === "head") {
+        expect(await host.request(change)).toMatchObject({ success: false });
+        expect(await host.client.getState()).toMatchObject(unchanged);
+      } else {
+        expect(await host.request({ ...change, thinkingLevel: "high" })).toMatchObject({ success: false });
+        expect(await host.request({ ...change, modelId: "alternate model" }))
+          .toMatchObject({ success: false, error: "Native request failed" });
+        const approval = observe(host, frame => frame.type === "extension_ui_request" && frame.method === "confirm"
+          && frame.message === "hold-model-change");
+        const promptId = "pending-model-change-approval";
+        const settled = observe(host, frame => frame.type === "prompt_result" && frame.id === promptId);
+        try {
+          expect(await host.request({ type: "prompt", message: "/fixture-ask hold-model-change" }, promptId))
+            .toMatchObject({ success: true });
+          const dialog = await approval.promise;
+          if (typeof dialog.id !== "string") throw new Error("Native approval has no identity");
+          expect(await host.request(change)).toMatchObject({ success: false, code: "session_busy" });
+          expect(await host.client.getState()).toMatchObject(unchanged);
+          host.uiResponse(dialog.id, { confirmed: false });
+          expect(await settled.promise).toMatchObject({ status: "completed", sessionSettled: true });
+        } finally { approval.cancel(); settled.cancel(); }
+        await host.client.waitForSettled(30_000);
+        const chosen = { provider, id: modelId };
+        expect(await host.request(change, "choose-lane-model")).toEqual({
+          type: "response", command: "set_lane_model", id: "choose-lane-model", success: true, data: chosen,
+        });
+        expect(await host.client.getState()).toMatchObject({ ...unchanged, model: chosen });
+        const journal = parseSessionEntries(await fs.readFile(options.sessionFile, "utf8"));
+        expect(journal[0]).toMatchObject({ type: "session", id: initial.sessionId });
+        expect(journal.findLast(entry => entry.type === "model_change"))
+          .toMatchObject({ type: "model_change", model: `${provider}/${modelId}` });
+        // Making the already-active pair durable must leave exact pair evidence
+        // even when a retry receives no response and reads only the journal.
+        expect(await host.request(change, "persist-active-model")).toMatchObject({ success: true, data: chosen });
+        const persisted = parseSessionEntries(await fs.readFile(options.sessionFile, "utf8"));
+        const selected = persisted.findLast(entry => entry.type === "model_change");
+        if (!selected || selected.type !== "model_change") throw new Error("Missing native default selection");
+        expect(persisted.findLast(entry => entry.type === "custom" && entry.customType === LANE_MODEL_PROMOTION_RECEIPT))
+          .toMatchObject({ data: { entryId: selected.id, selector: selected.model, model: chosen } });
+      }
+      expect(await checkpoint(host, "after-model-selection", "native-model-selection-checkpoint"))
+        .toMatchObject({ sessionId: initial.sessionId, agentStarts: 0, networkAttempts: 0 });
+      expect(await host.request({ type: "shutdown_host" })).toMatchObject({ success: true });
+      await host.exited;
+      await waitForFixtureProcessExit([child.pid, initial.adapterOwnerPid]);
+      passed = true;
+    } finally {
+      await connection?.close();
+      await stopHostFixtures(root);
+      if (passed) await fs.rm(root, { recursive: true, force: true });
     }
   }, 90_000);
 }

@@ -105,6 +105,21 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
             }),
         );
     }
+    if command.name == "set_pr_review_model" && !owner.pr_review_only() {
+        return command.respond(
+            peer,
+            json!({"success": false, "error": "Static PR review Host required"}),
+        );
+    }
+    if !worker
+        && command.name == "set_lane_model"
+        && !worker_rpc::lane_model_selection(&command.frame)
+    {
+        return command.respond(
+            peer,
+            json!({"success": false, "error": "An exact provider and modelId are required"}),
+        );
+    }
     let mut state = owner.state()?;
     match command.name.as_str() {
         "extension_ui_response" => {
@@ -188,7 +203,10 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
             "Host admission generation is unavailable",
         ))?;
     }
-    if matches!(command.name.as_str(), "shutdown_host" | "set_model_preset") {
+    if matches!(
+        command.name.as_str(),
+        "shutdown_host" | "set_model_preset" | "set_pr_review_model" | "set_lane_model"
+    ) {
         if state.maintenance_active || state.active_commands != 0 || !state.requests.is_empty() {
             return command.respond(peer, busy("Host is busy (session_busy)"));
         }
@@ -317,6 +335,14 @@ fn allows_pr_review(command: &Command) -> bool {
         "get_session_stats" => command.frame.as_object().is_some_and(|fields| {
             fields.keys().all(|key| matches!(key.as_str(), "id" | "type"))
         }),
+        // A separate private SDK control validates the native candidate and
+        // the tool-free guard before changing this session. Never forward the
+        // stock set_model command or caller-supplied settings to a review.
+        "set_pr_review_model" => command.frame.as_object().is_some_and(|fields| {
+            let selectors = ["provider", "modelId", "previousProvider", "previousModelId"];
+            fields.keys().all(|key| matches!(key.as_str(), "id" | "type") || selectors.contains(&key.as_str()))
+                && selectors.iter().all(|key| worker_rpc::model_id(&command.frame[*key]))
+        }),
         "negotiate_protocol"
         | "set_host_message_updates"
         | "get_host_admission"
@@ -413,6 +439,9 @@ async fn maintenance(owner: &Owner, command: &mut Command, peer: &Channel) -> Re
         return Ok(());
     }
     let control = owner.control()?;
+    let requested_model = (command.name == "set_lane_model").then(|| {
+        json!({"provider": command.frame["provider"], "id": command.frame["modelId"]})
+    });
     let mut response = control.request(std::mem::take(&mut command.frame)).await?;
     let success = response["success"].as_bool().ok_or(Error::Disconnected)?;
     if !success {
@@ -421,6 +450,20 @@ async fn maintenance(owner: &Owner, command: &mut Command, peer: &Channel) -> Re
             owner.state()?.unresolved_effect = true;
         }
         sanitize_private_error(&mut response);
+    }
+    if let Some(model) = requested_model {
+        response = if success {
+            if response["data"]["provider"] != model["provider"]
+                || response["data"]["id"] != model["id"]
+            {
+                return Err(Error::Disconnected);
+            }
+            json!({"success": true, "data": model})
+        } else if response["error"] == "session_busy" {
+            busy("Host is busy (session_busy)")
+        } else {
+            json!({"success": false, "error": "Native request failed"})
+        };
     }
     if command.respond(peer, response).is_err() {
         peer.close();

@@ -127,6 +127,22 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   pi.on("tool_call", (event, ctx) => {
     if (runtime?.prObservationActive())
       return { block: true, reason: "PR observation turns cannot use tools; summarize the observed evidence only" };
+    if (ctx.agent.kind === "main" && runtime?.laneRecoveryObservationOnly())
+      return { block: true, reason: "No current owner authority for this lane failure; report the observed result only" };
+    if (ctx.agent.kind === "main" && runtime?.laneRecoveryActive() && Object.hasOwn(managerTools, event.toolName)) {
+      switch (event.toolName) {
+        case "lane_models": case "lane_inspect": case "thread_inspect": case "discord_context": case "discord_purpose_list":
+        case "decision_list": case "decision_inspect": case "pr_watch_list":
+        // The runtime validates their exact report source, target and current authority.
+        case "lane_message": case "lane_set_model":
+          break;
+        case "lane_watch": case "messenger_presence":
+          if (event.input.action === "status") break;
+          return { block: true, reason: "Lane recovery cannot authorize this manager mutation" };
+        default:
+          return { block: true, reason: "Lane recovery cannot authorize this manager mutation" };
+      }
+    }
     if (event.toolName === "lane_watch" && ctx.agent.kind !== "main")
       return { block: true, reason: "Lane watches are restricted to the main superagent head" };
     if (event.toolName === "head_recovery" && ctx.agent.kind !== "main")
@@ -268,7 +284,11 @@ export default function superagentExtension(pi: ExtensionAPI): void {
       }))])), { minProperties: 1, additionalProperties: false }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      return result(await (await nativePresets(ctx)).initialize(params.choices, requireRuntime(ctx).store));
+      const controller = requireRuntime(ctx);
+      controller.assertLaneRecoveryMutation();
+      const manager = await nativePresets(ctx);
+      controller.assertLaneRecoveryMutation();
+      return result(await manager.initialize(params.choices, controller.store));
     },
   });
   pi.registerTool({

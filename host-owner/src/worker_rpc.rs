@@ -41,7 +41,7 @@ pub(crate) fn allows(kind: &str, frame: &Value) -> bool {
         }
         "goal" => exact(&["op"]) && matches!(frame["op"].as_str(), Some("pause" | "resume")),
         "cancel_subagent" => exact(&["subagentId"]) && nonempty(&frame["subagentId"]),
-        "set_model" => {
+        "set_model" | "set_lane_model" => {
             exact(&["provider", "modelId"])
                 && model_id(&frame["provider"])
                 && model_id(&frame["modelId"])
@@ -67,6 +67,22 @@ pub(crate) fn allows(kind: &str, frame: &Value) -> bool {
     }
 }
 
+// The local socket accepts literal provider and model IDs supported by stock
+// OMP, including spaces. The worker wire keeps its narrower selector policy.
+pub(crate) fn lane_model_selection(frame: &Value) -> bool {
+    frame.as_object().is_some_and(|fields| {
+        fields
+            .keys()
+            .all(|key| matches!(key.as_str(), "id" | "type" | "provider" | "modelId"))
+            && optional(fields, "id", nonempty)
+            && ["provider", "modelId"].iter().all(|key| {
+                frame[*key]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty() && !text.contains('\0'))
+            })
+    })
+}
+
 fn optional(fields: &Map<String, Value>, key: &str, valid: impl FnOnce(&Value) -> bool) -> bool {
     fields.get(key).is_none_or(valid)
 }
@@ -85,7 +101,7 @@ fn ordinary_prompt(message: &str) -> bool {
         && !words.any(|word| word.starts_with("/skill:"))
 }
 
-fn model_id(value: &Value) -> bool {
+pub(crate) fn model_id(value: &Value) -> bool {
     value.as_str().is_some_and(|text| {
         !text.is_empty() && !text.chars().any(|ch| ch.is_whitespace() || ch.is_control())
     })

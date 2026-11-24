@@ -85,6 +85,38 @@ runtime exposes observation timestamps and `ownerCurrent`, not a guarantee
 that a reported dependency is still live. Native children cannot use the
 manager, report as the lane, or access the board.
 
+### Failed lane requests
+
+Confirmed provider quota exhaustion is an operator decision, not a recovery
+prompt. The controller sends one notice on the authorized reply route and holds
+new prompts on that lane until the operator selects a model in its bound topic
+with `/model --lane <provider/id>` or the current-lane option on Discord's
+`/model` card. If the model-change acknowledgement is lost, selecting the same
+provider and model on a fresh card in the original conversation can reconcile
+the pending change against the original session. A cold lane's subsequent
+native application does not replace the receipt for the operator's original
+choice. This does not change HEAD or replay the failed request. A transient
+HTTP 429 or model-capacity error alone is not evidence of
+exhausted account quota.
+
+Other native execution errors, including in topic-owned work, go to HEAD for
+recovery. Before forwarding a lost-response report, the controller checks the
+original attached session for an exact settled receipt. If HEAD was busy, it
+checks again before forwarding; if a settlement state read fails, the next
+wake retries the read, not the prompt. A verified result supersedes the obsolete
+report, including an informational report from an older session without a
+verified owner. Such a report cannot authorize corrective work. Neither a
+missing ACK nor a detached client authorizes resubmission.
+A failed run proven to have started no local or provider-executed tools can close
+as failed and permit HEAD to select an eligible fallback and send a fresh,
+scoped correction. Recovery authority comes from HEAD's active report, not a
+source ID supplied in a tool call. Cancellation of the original request or a
+newer operator model selection invalidates the report, even if the model was
+changed back. A correction keeps the original approval route. If a dialog is
+first seen after reconnect and cannot be tied to that request, it stays on the
+native Host rather than appearing in the lane thread. Uncertain effects stay
+fenced; the report does not authorize a replay or a move to another lane.
+
 ## Execution budget and Host lifecycle
 
 [`maxHosts`, `maxSubagents`, and `idleMs`](../../src/config.ts) are explicit
@@ -262,8 +294,13 @@ together, prevent the same row from re-authorizing drift after recovery or
 owner replacement. The notice reports which model is selected, not which model
 generated an answer. Frozen preset lanes remain excluded. An authorized
 `lane_set_model` can change one eligible idle lane with durable intent and
-readback. `config.model` is a head launch default, not the lane default or a
-reason to overwrite a saved head's model on restart.
+returns that change's own readback. The managed Host fences ordinary lane
+model switches as maintenance and rechecks native activity before invoking
+the setter; a menu click cannot use an earlier idle observation to switch a
+lane that has since started work. If the selected model is already running as a
+temporary fallback, its presence in `get_state` is not proof that it will be
+restored as the lane's selected model. `config.model` is a head launch default,
+not the lane default or a reason to overwrite a saved head's model on restart.
 Managed Hosts use private settings overlays, with native session-scope
 readback. Legacy lanes without a recorded selection adopt their authoritative
 native model rather than assuming the current head default; only an unstarted
@@ -272,7 +309,9 @@ to recover a recorded session.
 This preserves existing native provider fallback and retry policy; it is not a
 guarantee about every lower-level provider request.
 
-`/model` and `/effort` target the shared head even when issued in a lane topic.
+Direct `/model <provider/id>` and `/effort` target the shared head even in a
+lane topic. Discord's `/model` card and the explicit `/model --lane` command
+can instead target the lane bound to that conversation.
 Read-only queries can run while busy; mutations require native idle and session
 scope, record intent and report the actual applied model/effort. A current
 owner's explicit natural-language request can use `head_set_model` after its

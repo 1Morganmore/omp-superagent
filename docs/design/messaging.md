@@ -379,6 +379,16 @@ is not a native mutation receipt. The head requires the recorded sent receipt
 for the exact card before changing settings. Unselected cards expire after five
 minutes, on Gateway restart, or when a new menu of the same kind replaces them
 on the same route.
+On Discord, the model card shows two selects: the destination (HEAD or the
+lane bound to the opening conversation) and the provider/model browser. With
+both destinations available the operator must pick one; without a bound lane
+only HEAD is offered. Browsing providers or changing the destination is not a
+model change. The card uses the lane's saved model for its checkmark, omitting
+it when uncertain; browsing does not wait for a lane Host. Remote lanes offer
+only identifiers their worker accepts; manual PR review lanes offer only
+static-review-compatible models. Neither restriction filters the HEAD list.
+The final model selection carries the destination with the saved card and
+option indices. A stale lane selection cannot fall back to HEAD.
 The interaction pattern was compared with [Hermes Agent at 242315ce](https://github.com/NousResearch/hermes-agent/blob/242315ce571cde721e717a544cf8ae6c343315cf/gateway/slash_commands_model.py#L516-L567);
 the catalogue and mutation remain native OMP, and no upstream picker code is used.
 
