@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ApplicationCommandOptionType, ApplicationCommandType, ApplicationIntegrationType, InteractionContextType } from "discord.js";
-import { DISCORD_COMMANDS, parseDiscordCommand } from "../src/discord-commands.ts";
+import { DISCORD_COMMANDS } from "./fixtures/discord-commands.ts";
+import { parseDiscordCommand } from "./oracles/bun-gateway/discord-commands.ts";
 
 describe("Discord command catalog", () => {
   test("registers only supported Superagent commands for guild installs and owner bot DMs", () => {

@@ -557,8 +557,10 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     assert_eq!(command["input"]["text"], "/compact details");
     assert!(!command.to_string().contains("offline-interaction"));
 
+    let mut approval_route = route.clone();
+    approval_route["topicId"] = json!(r#"original/"review"\topic"#);
     let approval = json!({"id":"approval","target":"main","generation":1,"requestId":"request",
-        "route":route,"state":"pending","remoteId":null,
+        "route":approval_route,"state":"pending","remoteId":null,
         "request":{"method":"confirm","title":"Check intent","message":"Allow?"}});
     assert_eq!(
         hub.effect("showApproval", &[approval]).await.unwrap(),
@@ -566,6 +568,8 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     );
     let outgoing = received(&mut observed, "/channels/99/messages").await;
     let button = outgoing["components"][0]["components"][0]["custom_id"].clone();
+    // Pre-change SHA-256 of compact JSON with the escaped route key as a string.
+    assert_eq!(button, "omp:1f1fb2aa10c035f88cc45f28:yes");
     let body = json!({"custom_id":button,"component_type":2});
     let mut forged = interaction("503", 3, body.clone());
     let card = last_card.lock().unwrap().clone();
@@ -594,7 +598,7 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     );
     let answer = event(&hub, &store).await;
     assert_eq!(answer["approvalId"], "approval");
-    assert_eq!(answer["route"], route);
+    assert_eq!(answer["route"], approval_route);
     assert_eq!(answer["response"], json!({"confirmed": true}));
     received(&mut observed, "/channels/99/messages/700").await;
 
@@ -886,9 +890,11 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     assert!(upload.contains(&format!("filename=\"{name}\"")));
     assert!(observed.try_recv().is_err());
 
-    let result = json!({"id":"result-file","route":route,"replyTo":reply,"text":"",
-        "resultAttachment":{"name":"result.bin","data":"AEJDCg=="}});
-    assert_eq!(hub.effect("send", &[result.clone()]).await.unwrap(), "700");
+    let result = json!({"id":"result-file","route":route,"replyTo":reply,"text":""});
+    let file = |name: &str| crate::result_attachment::VerifiedResultAttachment {
+        name: name.to_owned(), bytes: b"\0BC\n".to_vec(),
+    };
+    assert_eq!(hub.send_result_attachment(&result, file("result.bin")).await.unwrap(), "700");
     let posted = received(&mut observed, "/channels/99/messages").await;
     let multipart = posted.as_str().expect("Discord native binary multipart");
     let payload: Value = multipart
@@ -898,10 +904,8 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     assert_eq!(payload["attachments"][0]["filename"], "result.bin");
     assert_eq!(payload["message_reference"]["message_id"], "205");
     assert!(multipart.contains("filename=\"result.bin\"\r\n\r\n\0BC\n"));
-    let mut unconfirmed = result;
-    unconfirmed["resultAttachment"]["name"] = json!("unconfirmed.bin");
     assert_eq!(
-        hub.effect("send", &[unconfirmed]).await.unwrap_err().certainty,
+        hub.send_result_attachment(&result, file("unconfirmed.bin")).await.unwrap_err().certainty,
         "uncertain",
         "a message without the requested file is not an attachment receipt"
     );

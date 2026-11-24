@@ -103,7 +103,7 @@ class TopicMessenger implements Messenger {
   async showApproval(_approval: Approval): Promise<string> { return "card"; }
   async dismissApproval(_approval: Approval): Promise<void> {}
   async fetchAfter(): Promise<Inbound[]> { return []; }
-  async openAttachment(): Promise<Response> { throw new Error("No attachment in this case"); }
+  async openAttachment(): Promise<never> { throw new Error("No attachment in this case"); }
   async stop(): Promise<void> {}
 }
 

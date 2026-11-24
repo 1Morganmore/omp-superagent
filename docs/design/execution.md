@@ -121,6 +121,9 @@ queue restoration uses the SDK's reassembled-frame byte limit: this is the value
 [`maxResponseBytes` in OMP 19.0](https://github.com/can1357/oh-my-pi/blob/v19.0.0/packages/coding-agent/src/modes/rpc/rpc-frame.ts#L341-L347)
 and [`maxIntactFrameBytes` in 19.1](https://github.com/can1357/oh-my-pi/blob/v19.1.0/packages/coding-agent/src/modes/rpc/rpc-frame.ts#L341-L347).
 An intact queue must not be reported as truncated. No second Bun runtime stays resident per Host.
+For SSH workers the enrolled forced command hands its stdio to the Rust relay.
+Admission and Host attestation can use a short-lived helper; no Bun process
+stays just to forward bytes. SSH EOF detaches only that connection.
 Gateway supervision reads the exact session, process and socket identity from a fresh handshake
 instead of fetching the same full state again on the new connection.
 

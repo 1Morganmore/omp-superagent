@@ -451,6 +451,17 @@ export interface ThreadUpdate {
   readonly archived?: boolean;
 }
 
+export interface InboundAttachmentBatch {
+  readonly inputId: string;
+  readonly route: Route;
+  readonly attachments: readonly Attachment[];
+}
+
+export interface InboundAttachmentReceipt {
+  readonly receipt: string;
+  readonly files: readonly { readonly path: string; readonly size: number; readonly mimeType: string; readonly sha256: string }[];
+}
+
 export interface Messenger {
   start(handlers: {
     /** Authenticate first; do not consume inbound events until native approvals are reconciled. */
@@ -483,7 +494,7 @@ export interface Messenger {
   messengerPresence?(request: MessengerPresenceRequest): Promise<DiscordPresenceStatus>;
   /** null explicitly means no history API; intake recovery belongs to the adapter. */
   fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null>;
-  /** Validate platform/auth destination before fetching. Never follow redirects with credentials. */
-  openAttachment(route: Route, attachment: Attachment, signal: AbortSignal): Promise<Response>;
+  /** Validate the source before fetching; receipt only a complete, private batch. */
+  openAttachment(batch: InboundAttachmentBatch, signal: AbortSignal): Promise<InboundAttachmentReceipt>;
   stop(): Promise<void>;
 }

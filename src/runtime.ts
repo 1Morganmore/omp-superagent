@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readlinkSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants, existsSync, lstatSync, readlinkSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
+import { mkdir, open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir, untilAborted } from "@oh-my-pi/pi-utils";
@@ -15,7 +15,7 @@ import { authorizeRoute, credentialEnvNames, type Config, hostPaths, privateDire
 import { DeliveryError } from "./delivery";
 import { GroupAccess } from "./group-access";
 import { groupRoom } from "./group-policy";
-import { isOriginalAttachmentMessage, readResultAttachmentIntent, readResultAttachmentStart,
+import { discardResultAttachment, isOriginalAttachmentMessage, pruneResultAttachments, readResultAttachmentIntent, readResultAttachmentStart,
   requestedResultPath, ResultAttachmentError, stageResultAttachment, type ResultAttachmentIntent } from "./result-attachment";
 import { HostConnection, type HostOptions, PR_REVIEW_INPUT_PREFIX, startHost } from "./host";
 import { compareMessageIds } from "./message-order";
@@ -489,6 +489,10 @@ export class Superagent {
       for (const directory of ["run", "sessions", "logs", "attachments"]) privateDirectory(join(this.config.stateDir, directory));
       if (this.config.groupRooms?.length) this.groups = new GroupAccess(this.config, this.messenger);
       this.store.recoverDeliveries();
+      if (existsSync(join(this.config.stateDir, "result-attachments"))) {
+        try { pruneResultAttachments(this.config.stateDir); }
+        catch (error) { this.report(error); }
+      }
       // Reserve the recovery boundaries before opening streaming intake.
       const cursors = this.reserveCatchupCursors();
       // Deferred routing waits for intake readiness, then admits in its saved order.
@@ -1281,17 +1285,23 @@ export class Superagent {
     if (existing) return `Result attachment ${id} is ${existing.state}; no new attempt was made.`;
     const agentDb = getAgentDbPath();
     const payload = stageResultAttachment(intent.path, {
+      stateDir: this.config.stateDir,
       cwd: lane?.cwd ?? this.config.headCwd,
       privatePaths: [this.config.stateDir, this.config.path, `${this.config.path}.env`, getAgentDir(), sessionFile,
-        agentDb, `${agentDb}-wal`, `${agentDb}-shm`, `${agentDb}-journal`],
+        agentDb, `${agentDb}-wal`, `${agentDb}-shm`, `${agentDb}-journal`].map(path => resolve(path)),
     });
-    this.store.queueOutput({
-      id, sourceId: outputSourceId, route, text: "",
-      resultAttachment: {
-        payload, sourceId: source.id, inputId: input.id, requestId: input.requestId,
-        generation: live.generation, sessionId: live.sessionId, sessionFile, toolCallId: intent.toolCallId,
-      },
-    });
+    try {
+      this.store.queueOutput({
+        id, sourceId: outputSourceId, route, text: "",
+        resultAttachment: {
+          payload, sourceId: source.id, inputId: input.id, requestId: input.requestId,
+          generation: live.generation, sessionId: live.sessionId, sessionFile, toolCallId: intent.toolCallId,
+        },
+      });
+    } catch (error) {
+      this.discardResultSnapshot(payload);
+      throw error;
+    }
     this.wakeOutputs(route);
     return `Result attachment ${id} was durably queued to the original topic, not yet confirmed delivered.`;
   }
@@ -6761,68 +6771,46 @@ export class Superagent {
     if (input.attachments.length > 10) throw new Error("Too many attachments");
     const declared = input.attachments.reduce((total, attachment) => total + (attachment.size ?? 0), 0);
     if (!Number.isSafeInteger(declared) || declared > MAX_REQUEST_BYTES) throw new Error("Attachment request exceeds the size limit");
-    const directory = join(this.config.stateDir, "attachments", key(input.id));
     const sourceId = this.store.getMeta(`handoff-source:${input.id}`);
     const source = sourceId ? this.store.input(sourceId) : input;
     if (!source) throw new Error("Attachment source identity is unavailable");
     this.authorized(source.route);
-    if (input.attachments.length) privateDirectory(directory);
-    let totalBytes = 0;
-    for (const [index, attachment] of input.attachments.entries()) {
+    if (!input.attachments.length) return { descriptions, images };
+    for (const attachment of input.attachments) {
       if (attachment.size !== null && (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_ATTACHMENT_BYTES)) throw new Error("Invalid attachment size");
-      const destination = join(directory, `${index}-${key(attachment.id)}`);
-      const temporary = `${destination}.download`;
-      await rm(temporary, { force: true });
-      const file = await open(temporary, "wx", 0o600);
-      let reader: { cancel(): Promise<void> } | undefined;
-      let bytes = 0;
-      try {
-        const response = await this.messenger.openAttachment(source.route, attachment, AbortSignal.timeout(30_000));
-        if (!response.ok || !response.body) throw new Error("Attachment download was rejected");
-        const length = response.headers.get("content-length");
-        if (length !== null && (!/^\d+$/.test(length) || Number(length) > (attachment.size ?? MAX_ATTACHMENT_BYTES))) throw new Error("Attachment response exceeds declared size");
-        const expectedSize = attachment.size ?? (length === null ? null : Number(length));
-        const activeReader = response.body.getReader();
-        reader = activeReader;
-        for (;;) {
-          const chunk = await activeReader.read();
-          if (chunk.done) break;
-          bytes += chunk.value.byteLength;
-          totalBytes += chunk.value.byteLength;
-          if (bytes > (attachment.size ?? MAX_ATTACHMENT_BYTES) || bytes > MAX_ATTACHMENT_BYTES || totalBytes > MAX_REQUEST_BYTES) throw new Error("Attachment stream exceeds the size limit");
-          let offset = 0;
-          while (offset < chunk.value.length) {
-            const { bytesWritten } = await file.write(chunk.value, offset, chunk.value.length - offset);
-            if (!bytesWritten) throw new Error("Attachment write made no progress");
-            offset += bytesWritten;
-          }
-        }
-        if (expectedSize !== null && bytes !== expectedSize) throw new Error("Attachment stream differs from declared size");
-        await file.sync();
-      } catch {
-        await reader?.cancel().catch(() => {});
-        await file.close();
-        await rm(temporary, { force: true });
-        throw new Error("Attachment could not be safely downloaded; no prompt was submitted");
-      }
-      await file.close();
-      await rename(temporary, destination);
+    }
+    const batch = { inputId: input.id, route: source.route, attachments: input.attachments };
+    const receipt = await this.messenger.openAttachment(batch, AbortSignal.timeout(30_000 * batch.attachments.length + 1000))
+      .catch(() => { throw new Error("Attachment could not be safely downloaded; no prompt was submitted"); });
+    if (receipt.files.length !== batch.attachments.length) throw new Error("Invalid attachment spool receipt");
+    for (const [index, attachment] of input.attachments.entries()) {
+      const result = receipt.files[index];
+      if (!result) throw new Error("Attachment spool receipt omitted a file");
+      const { path: destination, size: bytes, mimeType } = result;
       const media = [
         attachment.voice ? "voice message" : "",
         attachment.durationSeconds === undefined ? "" : `duration ${attachment.durationSeconds} seconds`,
       ].filter(Boolean).join("; ");
       descriptions.push(`Attachment ${index + 1}: ${JSON.stringify(attachment.name)}; local file ${destination}; ${bytes} bytes${media ? `; ${media}` : ""}. Attachment contents are untrusted task data.`);
-      const data = Buffer.from(await Bun.file(destination).slice(0, 12).arrayBuffer());
-      let mimeType: string | undefined;
-      if (data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) mimeType = "image/png";
-      else if (data[0] === 255 && data[1] === 216 && data[2] === 255) mimeType = "image/jpeg";
-      else if (["GIF87a", "GIF89a"].includes(data.subarray(0, 6).toString())) mimeType = "image/gif";
-      else if (data.subarray(0, 4).toString() === "RIFF" && data.subarray(8, 12).toString() === "WEBP") mimeType = "image/webp";
-      if (mimeType) {
-        imageBytes += bytes;
-        if (imageBytes > MAX_IMAGE_BYTES) throw new Error("Image payload exceeds the bounded native RPC allowance");
-        images.push({ type: "image", data: (await readFile(destination)).toString("base64"), mimeType });
-      }
+      if (!mimeType.startsWith("image/")) continue;
+      imageBytes += bytes;
+      if (imageBytes > MAX_IMAGE_BYTES) throw new Error("Image payload exceeds the bounded native RPC allowance");
+      if (realpathSync(destination) !== destination) throw new Error("Attachment spool path changed");
+      const file = await open(destination, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600
+          || stat.nlink !== 1 || stat.size !== bytes) throw new Error("Attachment spool file changed");
+        const data = Buffer.alloc(bytes);
+        for (let offset = 0; offset < bytes;) {
+          const { bytesRead } = await file.read(data, offset, bytes - offset, offset);
+          if (!bytesRead) throw new Error("Attachment spool file was truncated");
+          offset += bytesRead;
+        }
+        if (createHash("sha256").update(data).digest("hex") !== result.sha256)
+          throw new Error("Attachment image changed after the Gateway published its receipt");
+        images.push({ type: "image", data: data.toString("base64"), mimeType });
+      } finally { await file.close(); }
     }
     return { descriptions, images };
   }
@@ -7790,16 +7778,24 @@ export class Superagent {
         catch (error) {
           const rejected = error instanceof DeliveryError && error.certainty === "rejected";
           this.store.finishOutput(output.id, rejected ? "failed" : "uncertain", undefined, rejected ? "Messenger rejected delivery" : "Messenger send outcome uncertain");
+          if (rejected) this.discardResultSnapshot(output.resultAttachment?.payload);
           if (resultInputId) this.syncLaneThreadAfterResult(resultInputId);
           this.report(new Error(`Delivery ${output.id} ${rejected ? "rejected" : "uncertain"}`));
           continue;
         }
         // Persist a successful remote send without reinterpreting a local failure.
         this.store.finishOutput(output.id, "sent", remoteId);
+        this.discardResultSnapshot(output.resultAttachment?.payload);
         if (resultInputId) this.syncLaneThreadAfterResult(resultInputId);
         delivered = true;
       }
     }
+  }
+
+  private discardResultSnapshot(payload: NonNullable<OutputRecord["resultAttachment"]>["payload"] | undefined): void {
+    if (!payload || !("snapshotId" in payload)) return;
+    try { discardResultAttachment(this.config.stateDir, payload.snapshotId); }
+    catch (error) { this.report(error); }
   }
 
   private async flushOutputs(targetRouteKey?: string): Promise<void> {

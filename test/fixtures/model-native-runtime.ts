@@ -57,7 +57,7 @@ export class RecordingMessenger implements Messenger {
     return structuredClone(this.thread);
   }
   async fetchAfter(_route: Route, _messageId: string): Promise<Inbound[]> { return []; }
-  async openAttachment(): Promise<Response> { throw new Error("Native fixture has no authorized attachments"); }
+  async openAttachment(): Promise<never> { throw new Error("Native fixture has no authorized attachments"); }
   async stop(): Promise<void> { this.handlers = undefined; }
 }
 

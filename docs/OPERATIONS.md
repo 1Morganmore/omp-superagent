@@ -480,7 +480,8 @@ export SLACK_BOT_TOKEN SLACK_APP_TOKEN
 ```
 
 Rust Gateway가 [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)와
-[Web API](https://docs.slack.dev/apis/web-api/)를 사용한다. 명령 등록 CLI는 Slack Web API SDK를 사용한다.
+[Web API](https://docs.slack.dev/apis/web-api/)를 사용한다. 명령 등록은 같은 배포 파일의 일회성 Rust
+REST 명령을 사용하며 Socket Mode나 Gateway 데몬을 시작하지 않는다.
 스레드 조회는 현재 공식 [conversations.replies](https://docs.slack.dev/reference/methods/conversations.replies/)
 문서의 bot history scopes를 따른다. bot token이면 채널 스레드를 무조건 조회할 수 없다는
 과거 제한을 전제로 하지 않는다. 실제 접근 권한·workspace 보존 정책·API rate limit은 여전히 적용된다.
@@ -1471,10 +1472,13 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
 - 모든 플랫폼의 입력 첨부는 요청당 최대 10개, 개별 20 MiB, 합계 40 MiB다.
   선언 크기·실제 스트림 크기를 대조하며 redirect는 따르지 않는다.
   Telegram에서 `file_size`가 없으면 크기 미상(`null`)으로 저장한다. 알려진 0바이트와 구분하며,
-  미상 크기도 실제 다운로드 바이트의 파일·요청·이미지 한도와 Gateway 완료 프레임을 검사한다.
-  PNG/JPEG/GIF/WebP는 내용 시그니처를 확인해 모델 이미지 입력으로 전달하고,
+  미상 크기도 실제 다운로드 바이트의 파일·요청·이미지 한도를 적용한다. Gateway가 전용 디렉터리에
+  파일을 저장하고 요청 전체가 완료되면 파일별 경로·SHA-256을 반환한다. HEAD는 요청 ID와
+  파일 순서로 영수증을 검증한다. PNG/JPEG/GIF/WebP는 내용 시그니처를 확인하며,
+  모델에 넘길 바이트의 SHA-256이 영수증과 다르면 요청을 취소한다.
   RPC base64 입력의 디코딩 후 이미지 데이터 합계는 별도로 8 MiB로 제한한다.
   그 밖의 파일은 로컬 경로를 제공한다. 임의 URL 다운로드·문서 자동 변환은 제공하지 않는다.
+  Gateway 재시작 시에는 소유권과 형식이 확인된 미완료 다운로드만 정리한다. 완료된 첨부는 남는다.
   자격 증명·서명된 다운로드 URL은 모델 프롬프트에 넣지 않는다.
   안전한 다운로드에 실패하면 그 요청의 모델 실행을 시작하지 않는다.
 - Discord·Telegram 답장의 참조 ID·작성자·본문과 Telegram 선택 인용문을 head와 명시적 레인
@@ -1614,6 +1618,7 @@ GitHub 소스 아카이브는 커밋된 소스만 담으며 설치할 때 현재
 owner를 빌드한다. npm `.tgz`는 네 플랫폼용 실행 파일과 라이선스 고지를 함께 담아 설치
 머신에서 Rust 빌드를 요구하지 않는다. 실제 실행에는 두 배포 모두 Bun과 별도 설치한 OMP가
 필요하다. 관리형 omp-superkit은 설치 단계에서 준비하며 아카이브에 내장하지 않는다.
+CI·기준판 테스트·릴리즈 스크립트는 소스 checkout 전용이며 npm 패키지에는 포함하지 않는다.
 
 `package.json`의 버전과 `docs/releases/<version>.md`를 준비하고 의도한 변경을 커밋한다.
 [CI의 네이티브 빌드 매트릭스](../.github/workflows/ci.yml)는 각 대상(`darwin-arm64`, `darwin-x64`,

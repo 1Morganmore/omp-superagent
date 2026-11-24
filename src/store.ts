@@ -35,6 +35,7 @@ import { laneData, readLaneRows, toLane, type LaneRow } from "./lane-rows";
 import { storedWorkflowName, workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
 import { laneWatchReplySource } from "./lane-watch";
+import { isResultAttachmentSnapshot } from "./result-attachment";
 import { existingWorkspace, TOPIC_CHOICE_WAIT_MS, topicRequest } from "./topic-request";
 import type { CronUpdate } from "./cron-jobs";
 import { unattendedSource, hasIntakeReplyRoute, intakeThreadKey, intakeWorkId } from "./pr-intake-work";
@@ -1160,13 +1161,16 @@ export class Store implements StorePort {
       const original = this.ownerSource(output.sourceId);
       const attachment = output.resultAttachment;
       if (attachment) {
+        if (!isResultAttachmentSnapshot(attachment.payload))
+          throw new Error(`A new result attachment requires a native snapshot receipt: ${output.id}`);
         const native = this.input(attachment.inputId);
         const topic = native && this.topicDelivery(native.id);
         const runId = native && this.getMeta(`steering-owner:${native.id}`);
         const run = runId && this.input(runId);
         const ownership = run && this.getMeta(`${native?.target === "main" ? "head-native-owner" : "lane-observation-owner"}:${run.id}`);
         const owner = ownership && JSON.parse(ownership);
-        if (output.text || output.picker || !original || original.id !== attachment.sourceId || !native || native.state !== "submitted"
+        if (output.id !== `result-attachment:${attachment.sourceId}` || output.text || output.picker
+          || !original || original.id !== attachment.sourceId || !native || native.state !== "submitted"
           || native.requestId !== attachment.requestId || native.generation !== attachment.generation
           || !run || !owner || run.target !== native.target || owner.requestId !== run.requestId
           || owner.generation !== attachment.generation || owner.sessionId !== attachment.sessionId

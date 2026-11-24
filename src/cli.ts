@@ -248,9 +248,8 @@ async function workerCommand(args: string[]): Promise<void> {
         throw new Error("Worker serve requires the enrolled SSH forced command");
       const { readWorkerPolicy } = await import("./worker-enrollment");
       const policy = readWorkerPolicy(homedir(), path);
-      const { serveWorker } = await import("./worker-service");
-      await serveWorker(policy);
-      return;
+      const { execWorkerBridge } = await import("./worker-bridge");
+      return execWorkerBridge(policy, path);
     }
     default:
       throw new Error("Usage: omp-sa worker add|init|list|doctor (see omp-sa worker --help)");

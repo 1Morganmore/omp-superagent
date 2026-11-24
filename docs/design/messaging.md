@@ -494,6 +494,9 @@ approval.
   API routes and metadata. Do not persist or surface credential URLs or
   follow redirects on private file downloads. Enforce byte limits end to end;
   an unknown size is not zero and a known size must match the bytes received.
+  Rust stages the authorized batch under the instance's private attachments
+  directory. The head receives file receipts, not a second copy of every
+  download over the Gateway socket; it still constructs the native image input.
   The adapters preserve audio metadata; they do not transcribe attachments.
 - An owner can authorize one specific result file with a standalone leading
   `attach: workspace/relative-file.ext` line. `result_attach` stages the exact
@@ -505,9 +508,11 @@ approval.
   hard links, dot paths and managed private state are excluded. Delivery uses
   the original authorized topic and stable outbox identity, with no destination
   override and no replay of uncertain sends. Restricted group rooms cannot
-  use this feature. The private controller outbox stores the bounded immutable
-  bytes; the Gateway attempt ledger stores their fingerprint and the receipt,
-  not a second copy of the file.
+  use this feature. New outbox rows refer to a private snapshot made before
+  admission. The Gateway verifies its recorded identity and contents rather
+  than reopening the workspace path. Older queued inline attachments retain
+  their original delivery identity; moving the bytes does not authorize a
+  second upload after an uncertain send.
 - Long outputs use a single bounded text attachment where supported. Discord
   first splits an over-limit reply at paragraph, line, then space boundaries
   into at most five ordered messages of up to 2,000 UTF-16 units, closing and
@@ -569,9 +574,9 @@ approval.
   An Image needs a valid HTTPS URL. A spec that is
   invalid, uses another component, reuses an element or exceeds Discord's embed
   limits stays verbatim as its code block, which is also what Telegram and Slack
-  show. The [Rust renderer](../../gateway/src/discord/embeds.rs) and
-  [`extractDiscordCards`](../../src/discord-markdown.ts) share one
-  [fixture](../../test/fixtures/discord-cards.json).
+  show. The [Rust renderer](../../gateway/src/discord/embeds.rs) and the
+  [test-only Bun renderer](../../test/oracles/bun-gateway/discord-markdown.ts)
+  share one [fixture](../../test/fixtures/discord-cards.json).
 
 ## Discord voice
 
