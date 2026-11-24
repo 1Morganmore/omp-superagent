@@ -8,7 +8,7 @@ import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequ
 import { physicalRoute, physicalRouteKey, routeKey } from "../src/contracts";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { type Config, hostPaths } from "../src/config";
-import { parseDiscordCommand } from "../src/discord-commands";
+import { parseDiscordCommand } from "./oracles/bun-gateway/discord-commands";
 import type { HostOptions } from "../src/host";
 import { DeliveryError } from "../src/delivery";
 import { isResultAttachmentSnapshot, stageResultAttachment } from "../src/result-attachment";
