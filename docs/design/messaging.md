@@ -1,6 +1,6 @@
 # Messaging and authority
 
-[Architecture](../../DESIGN.md) · [Execution and coordination](execution.md) · [Operations](../OPERATIONS.md)
+[Architecture](../../DESIGN.md) · [Execution and coordination](execution.md) · [Operations](../OPERATIONS.en.md)
 
 ## Transport and identity
 
@@ -221,7 +221,7 @@ input as cancelled. A stalled lane exposes its exact input ID and queue blocker
 through `/status` or `lane_inspect`. Only the operator in the bound topic can use
 `/resolve --lane <input-id>` to cancel that uncertain input. This is not a native
 interrupt, replay or implicit resume, and it preserves other fences and pauses.
-See the [operations guide](../OPERATIONS.md#4-명령과-일상-사용) for command usage.
+See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for command usage.
 
 ## Topic routing and controls
 

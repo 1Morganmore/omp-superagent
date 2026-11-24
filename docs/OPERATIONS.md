@@ -1,7 +1,9 @@
 # 운영·설치 가이드
 
-[프로젝트 소개로 돌아가기](../README.md) · [설계](../DESIGN.md) ·
+[프로젝트 소개로 돌아가기](../README.ko.md) · [English](OPERATIONS.en.md) · [설계](../DESIGN.md) ·
 [설정 예제](../config.example.json) · [출처·라이선스 고지](../THIRD_PARTY_NOTICES.md)
+
+[설치](#1-로컬-준비--봇은-시작하지-않음) · [플랫폼별 앱](#2-플랫폼별-앱과-접근-범위) · [설정](#3-설정) · [일상 사용](#4-명령과-일상-사용) · [복구](#5-운영-범위와-복구-제약) · [개발자 검증](#6-개발자-검증)
 
 이 문서는 설치·설정·일상 제어와 복구 절차를 다룬다. 파일·코드 경로와 셸 명령은 별도
 설명이 없으면 **저장소 루트 기준**이다. npm 설치에서는 같은 관리 명령을
@@ -818,7 +820,7 @@ CLI 실행 이름은 `omp-sa`다. 위의 전역 패키지 설치 또는 준비�
 `omp-superagent`로 유지한다. 아래 소스 호출 방식도 같은 CLI이며, 두 방식 모두 `.env`
 자동 로딩을 끈다.
 
-모든 관리 명령에 `--config FILE`이 필요하다. 먼저 봇을 시작하지 않는 진단을 실행한다.
+아래 관리 명령에는 `--config FILE`을 전달한다. 먼저 봇을 시작하지 않는 진단을 실행한다.
 
 ```sh
 bun --no-env-file src/cli.ts doctor --config config.local.json
@@ -1484,6 +1486,65 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
   실패한 시작을 자동 반복하지 않는다. 등록 성공은 모든 crash 복구의 보장이 아니다.
 - Linux/systemd·Windows 서비스 설치와 Gateway crash 자동 재시작은 이 명령의 범위가 아니다.
 
+### 원격 워커 추가
+
+“이 저장소 Linux에서 테스트해”라고 했을 때 다른 머신에 레인을 열 수 있습니다.
+메신저 계정과 봇 토큰은 **헤드에만** 둡니다. 양쪽 모두 `omp-sa worker`가 있는
+빌드를 사용하세요. 아직 배포되지 않은 소스라면 이전 npm 버전 대신 [로컬 준비](#1-로컬-준비--봇은-시작하지-않음)의 소스 설치 방법을 따르세요.
+
+1. **워커에서:** [로컬 준비](#1-로컬-준비--봇은-시작하지-않음)에 따라 Git, Bun, stock OMP, `omp-superagent`를 설치합니다.
+   실행 파일과 `omp-superagent` 설치 경로는 등록할 작업용 checkout 밖에 있어야 하며,
+   다른 사용자가 해당 경로의 파일을 교체할 수 없어야 합니다.
+   작업할 계정에서 OMP 모델 인증과 네이티브 메모리 백엔드를 설정하세요. 워커에서는 셸 명령으로
+   가져오는 API 키와 원격 인증 브로커를 지원하지 않습니다. 메모리 백엔드가 없다면
+   예를 들어 `omp config set memory.backend mnemopi`를 사용할 수 있습니다. 같은 Git 저장소의 전용 clone을
+   **요청할 커밋으로** 맞춥니다. 커밋만 받아 놓고 다른 브랜치에서 작업 중인 상태로는 부족합니다.
+   테일넷 등 사설망을 통해 이 계정의 **OpenSSH 서버**에 접속할 수 있어야 합니다.
+   `authorized_keys`의 지정 명령 제한을 사용하므로 Tailscale SSH 자체의 로그인 정책으로 대체할 수 없습니다.
+   공개 포트, 두 번째 헤드, 워커에서의 `omp-sa setup`이나 `omp-sa start`는 필요 없습니다.
+2. **헤드에서:** 워커 운영자와 SSH 호스트 키 지문을 확인한 뒤 `known_hosts`에 등록합니다.
+   `~/.ssh/config` 별칭 대신 직접 접속할 수 있는 DNS 이름이나 IP를 사용하세요. Tailscale SSH가
+   22번 포트를 사용한다면 사설망에서 별도 포트로 수신하는 OpenSSH를 사용하세요. 해당 키는
+   `known_hosts`의 `[호스트]:포트`에 고정하고, 두 번의 `worker add` 모두 `dev@linux-box:포트`를
+   지정합니다. 기본 SSH 포트를 쓸 때는 다음과 같습니다.
+   ```sh
+   omp-sa worker add dev@linux-box --config ./config.local.json
+   ```
+3. **워커에서 `dev` 계정으로:** 위 명령이 출력한 `worker init` 명령을 실행합니다.
+   생성된 헤드의 **공개키**는 그대로 두고 예시 경로만 실제 저장소로 바꾸세요.
+   ```sh
+   omp-sa worker init --head-key 'ssh-ed25519 …' --repo "$HOME/src/my-app"
+   ```
+   지정된 워커 명령만 호출할 수 있는 전용 키가 `~/.ssh/authorized_keys`에 등록됩니다.
+   헤드의 개인 키·봇 토큰·설정 파일은 복사하지 마세요. 레인의 도구는 워커 OS 계정의
+   권한으로 실행되므로 다른 파일과 격리하려면 전용 계정을 사용하세요.
+4. **다시 헤드에서:** 같은 `worker add` 명령을 실행합니다. 처음 안내가 나왔을 때가
+   아니라 **`verified`가 표시되어야 등록 완료**입니다. 특정 헤드 checkout의 새 레인에
+   이 워커를 우선 사용하려면 `--default --local-repo /헤드의/경로/my-app`을 붙입니다.
+   `--local-repo`를 생략하면 설정의 `headCwd`를 사용합니다. 같은 Git 원격 주소라도
+   다른 checkout에 이 기본 배치 권한이 넘어가지는 않습니다.
+
+등록 목록은 `omp-sa worker list --config ./config.local.json`으로 확인합니다. 목록 조회는
+워커에 접속하지 않습니다. 지금 연결되는지 확인하려면
+`omp-sa worker doctor dev@linux-box --config ./config.local.json`에 등록 때 쓴 주소와
+포트를 그대로 지정하세요. 워커 신원과 빈 슬롯을 확인하며, 기본 워커라면 승인된 헤드
+checkout의 현재 커밋도 대조합니다. 확인이 막히면 종료 코드는 0이 아니며, 레인을 시작하지 않습니다.
+
+이제 채팅에서 원격 실행이나 필요한 OS를 지정하면 됩니다. 저장소는 폴더 이름이 아니라
+Git 원격 주소로 매칭합니다. 커밋하지 않은 변경과 무시된 파일을 동기화하지 않으므로
+깨끗한 커밋을 기준으로 요청하세요. 실행 중인 레인이 해당 checkout을 예약하며
+자동 fetch·브랜치 전환·변경 폐기는 하지 않습니다. 후속 요청은 같은 워커의 같은 세션으로 갑니다.
+SSH가 끊겨도 Host 자체는 종료되지 않습니다. Host가 종료된 뒤 checkout이 달라져 있으면
+재기동은 보류됩니다. 답변과 승인 카드는 원래 대화로 돌아오지만 메신저 첨부파일 전달과
+헤드의 로컬 SQLite 보드 접근은 원격 레인에서 지원하지 않습니다. 헤드의 OMP 실행 명령에
+도구·프로필·승인 등의 추가 플래그가 있으면 이를 빼고 원격 실행하지 않고 요청을 거부합니다.
+워커는 자동 로드 플러그인이 없는 전용 OMP 프로필을 사용하세요. `.omp/`, `.env`, Git 필터 등
+실행 설정이 있는 checkout, linked worktree, 서브모듈은 자동으로 수정하거나 로드하지 않고 거부합니다.
+커스텀 모델 확장이 필요하면 워커 OMP agent 디렉터리의 `worker-extensions.json`(`0600`)에
+등록된 checkout 밖의 신뢰하는 모듈 절대경로를 JSON 배열로 적습니다. 배치된 위치는
+`omp-sa status --config ./config.local.json`에서 확인합니다. 접근을 철회할 때는
+워커에서 **해당 등록 키만** 제거하세요. 키 제거가 이미 실행 중인 레인을 중단하지는 않습니다.
+
 ## 5. 운영 범위와 복구 제약
 
 - 자율 작업은 기존 native task/job·goal·workflow owner를 사용하며 원래 허가 목표·source/route·
@@ -1564,7 +1625,7 @@ bun --no-env-file src/cli.ts uninstall --config config.local.json
 
 ## 6. 개발자 검증
 
-원격 등록·레인 제어는 [워커 추가 절차](../README.ko.md#원격-워커-추가)로 설정한다.
+원격 등록·레인 제어는 [워커 추가 절차](#원격-워커-추가)로 설정한다.
 OpenSSH 클라이언트·서버와 stock OMP가 설치되어 있으면 아래 명령으로 별도 머신 없이
 등록 → 원격 시작 → 연결 해제/재접속 → 후속 메시지와 답변 → 종료를 시험할 수 있다.
 임시 HOME과 전용 키, 루프백 `sshd`, 오프라인 모델을 사용한다. 실제 테일넷 연결이나

@@ -19,7 +19,7 @@ or lanes. This is not a multitenant service or an OS sandbox.
   approvals, recovery, delivery, and Discord voice.
 - [Execution and coordination](docs/design/execution.md): lanes, native Host lifecycle,
   models, workflows, managed integration, monitoring, and the board.
-- [Setup and operations](docs/OPERATIONS.md): configuration, commands, and recovery procedures.
+- Setup and operations ([English](docs/OPERATIONS.en.md) · [한국어](docs/OPERATIONS.md)): configuration, commands, and recovery procedures.
 - [Versioned release records](docs/releases/): dated evidence and its limits.
 
 <picture>
@@ -184,7 +184,7 @@ runtime wrapper in place of the native CLI.
 [CI](https://github.com/dbc-hbin/omp-superagent/actions/workflows/ci.yml)
 uses the SDK-matched official CLI for the baseline tests on Linux x64 and macOS
 ARM64. Separate jobs build and verify installation of the npm payload on Linux
-and macOS on both architectures; see the [packaging procedure](docs/OPERATIONS.md#소스npm-릴리즈).
+and macOS on both architectures; see the [packaging procedure](docs/OPERATIONS.en.md#source-and-npm-releases).
 OMP 18 can still be tested locally with `bash scripts/test-omp.sh <release-tag>`.
 `bun run test:ci` uses the installed
 CLI; `bun run test:baseline` downloads and verifies the SDK-matched official binary.

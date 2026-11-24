@@ -1,6 +1,6 @@
 # Execution and coordination
 
-[Architecture](../../DESIGN.md) · [Messaging and authority](messaging.md) · [Operations](../OPERATIONS.md)
+[Architecture](../../DESIGN.md) · [Messaging and authority](messaging.md) · [Operations](../OPERATIONS.en.md)
 
 ## Lane control
 
@@ -24,7 +24,7 @@ journal. An SSH disconnect is client detach, not cancellation, an exit receipt,
 or authority to reassign work. Open and attachment are separate from sending
 the first input. A pending or ambiguous launch must be reconciled on that
 worker, never retried on another machine. Remote PIDs and session paths are not
-local filesystem or board identities. See [worker enrollment](../../README.md#add-a-remote-worker).
+local filesystem or board identities. See [worker enrollment](../OPERATIONS.en.md#add-a-remote-worker).
 
 When several workers qualify, placement accounts for both reported free slots
 and head assignments waiting to start. Concurrent admissions reserve their
@@ -446,7 +446,7 @@ discarding custom commands or enabling disabled extensions.
   jobs remain inspectable and removable; pending runs are cancelled rather
   than forwarded to a model, and queued shell output is not sent. Verify any
   previously started legacy run on its original host before resolving it.
-  See the [operator reference](../OPERATIONS.md#예약-작업-cron) for syntax and controls.
+  See the [operator reference](../OPERATIONS.en.md#scheduled-jobs-cron) for syntax and controls.
 - [Repository PR intake](../../src/cron-pr-intake.ts) is a typed cron job, not
   an executable prompt. Only original configured-owner Discord guild parent
   controls enroll a repository. Discovery pins the authenticated GitHub owner
@@ -468,7 +468,7 @@ discarding custom commands or enabling disabled extensions.
   effect checks the enrolled repository, original route and policy revision;
   higher stages require an explicit policy or a fresh SHA-bound owner command.
   An uncertain write permits read-only reconciliation, not resubmission. See [operator commands
-  and supported GitHub protections](../OPERATIONS.md#새-외부-pr-검토-cron-pr-add).
+  and supported GitHub protections](../OPERATIONS.en.md#reviewing-new-external-prs-cron-pr-add).
 - [PR watch](../../src/pr-watch.ts) reads only explicitly registered GitHub PRs
   through existing `gh` authentication and GETs. Establish a quiet baseline,
   then record changed observations and their cursor together. Work only while
