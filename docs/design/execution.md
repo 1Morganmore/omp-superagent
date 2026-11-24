@@ -243,9 +243,27 @@ Each lane records a resolved model, selection reason, and the complete native
 role/thinking preset snapshot if a preset was selected. A later preset/global
 change does not change that snapshot. Resume and reconnect check native
 readback; unavailability or drift holds dispatch without silently selecting a
-different model. An authorized `lane_set_model` can change one eligible idle
-lane, with durable intent and readback. `config.model` is a head launch default,
-not the lane default or a reason to overwrite a saved head's model on restart.
+different model. A running lane may accept OMP's selected retry fallback
+without changing its durable configured model. The current model must match
+the newest flagged `model_change` on the active native journal branch, and the
+uninterrupted flagged chain must start at the configured model. The controller
+queries the attached native owner for the leaf and entries, including for
+remote workers; it does not open worker paths. Exact catalog IDs take precedence
+over native selector suffixes. An unflagged ephemeral switch, including context
+promotion, does not authorize another model.
+
+Warm recovery and cold resume may both return the Host to the original model.
+Normal readback recognizes that model directly without relying on a reverse
+journal entry. A newly restored Host must confirm the configured model and
+record its active journal cursor before using retry evidence. Only a flagged
+row after that cursor on the active branch can authorize a fallback, even
+across reconnects. A current owner/generation receipt and a notice, written
+together, prevent the same row from re-authorizing drift after recovery or
+owner replacement. The notice reports which model is selected, not which model
+generated an answer. Frozen preset lanes remain excluded. An authorized
+`lane_set_model` can change one eligible idle lane with durable intent and
+readback. `config.model` is a head launch default, not the lane default or a
+reason to overwrite a saved head's model on restart.
 Managed Hosts use private settings overlays, with native session-scope
 readback. Legacy lanes without a recorded selection adopt their authoritative
 native model rather than assuming the current head default; only an unstarted

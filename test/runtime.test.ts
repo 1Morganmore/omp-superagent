@@ -635,6 +635,28 @@ describe("remote lane ownership", () => {
     };
   }
 
+  test("worker lane fallback evidence comes from its owned native connection, not the controller filesystem", async () => {
+    const f = remoteFixture();
+    await f.runtime.start();
+    const source = headMessage("worker-fallback-evidence", route("30"));
+    await admit(f.runtime, source);
+    const lane = await f.runtime.startLane({ ...selection, sourceId: source.id, title: "Remote work", cwd: f.directory,
+      kickoff: "Check the worker workspace.", placement: { target: "remote" } });
+    await f.runtime.kick();
+    const host = f.workerHost();
+    expect(existsSync(lane.sessionFile)).toBe(false);
+    host.state.model = otherModel;
+    recordedModelChanges(host, [
+      { model: "fixture/capable" },
+      { model: "fixture/efficient", role: "fallback", fallback: true },
+    ]);
+
+    expect(await f.runtime.inspect(lane.id)).toMatchObject({ modelCheck: { expected: executionModel, actual: otherModel, error: null } });
+    expect(f.store.lane(lane.id)?.model).toEqual(executionModel);
+    expect(host.commands.some(command => command.type === "get_entries" && !("sessionFile" in command))).toBe(true);
+    expect(existsSync(lane.sessionFile)).toBe(false);
+  });
+
   test("remote placement cannot drop native tool restrictions from the operator's launch command", async () => {
     const f = remoteFixture();
     f.config.command.push("--no-tools");
@@ -4535,6 +4557,18 @@ function legacyLane(store: Store, config: Config, id: string, destination: Route
   return store.lane(id)!;
 }
 
+/** OMP's public get_entries returns the append log and an authoritative leaf. */
+function recordedModelChanges(host: HostTransport,
+  changes: Array<{ model: string; role?: string; fallback?: boolean; parent?: number }>,
+): void {
+  host.journalLeaf = true;
+  host.entries = changes.map((change, index) => ({
+    type: "model_change", id: `change-${index}`,
+    parentId: (change.parent ?? index - 1) < 0 ? null : `change-${change.parent ?? index - 1}`,
+    model: change.model, role: change.role, resolvedModelIsFallback: change.fallback,
+  }));
+}
+
 function legacyTranscript(lane: Lane, model: LaneModel): void {
   mkdirSync(dirname(lane.sessionFile), { recursive: true });
   writeFileSync(lane.sessionFile, [
@@ -7981,6 +8015,223 @@ describe("authoritative per-lane model selection", () => {
     expect(store.lane(lane.id)).toMatchObject({ generation: 1, ...selection });
     expect(delegated(store, "2140")?.state).toBe("pending");
   });
+
+  test("an attached lane uses its flagged fallback without changing the configured model or claiming it answered", async () => {
+    const { runtime, store, config, hosts, messenger } = fixture();
+    const lane = savedLane(store, config, "restart-fallback", route("27b"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-restart-fallback", otherModel);
+    recordedModelChanges(host, [
+      { model: "fixture/capable" },
+      { model: "fixture/efficient", role: "fallback", fallback: true },
+    ]);
+    hosts.set(lane.socketPath, host);
+    await runtime.start();
+    expect(await runtime.inspect(lane.id)).toMatchObject({ modelCheck: { expected: executionModel, actual: otherModel, error: null } });
+    expect(store.lane(lane.id)).toMatchObject(selection);
+    expect(store.lane(lane.id)?.runtimeState).not.toBe("interrupted");
+    expect(host.prompts).toEqual([]);
+    const notice = messenger.sent.find(output => output.id.startsWith(`model-fallback-selected:${lane.id}:`))!;
+    expect(notice.text).toContain("현재 모델: fixture/efficient");
+    expect(notice.text).not.toContain("생성한");
+    expect(notice.route).toEqual(lane.route);
+  });
+
+  test("an owned cold resume accepts the configured model without a reverse journal entry", async () => {
+    const journal = [
+      { model: "fixture/capable" },
+      { model: "fixture/efficient", role: "fallback", fallback: true },
+    ];
+    const f = fixture(3, undefined, { startHost: async options => {
+      f.launched.push(options);
+      const host = new HostTransport(options.sessionFile, "session-restart-restored", executionModel);
+      recordedModelChanges(host, journal);
+      f.hosts.set(options.socketPath, host);
+      return { pid: process.pid };
+    } });
+    const { runtime, store, config, hosts, messenger } = f;
+    const exitedPid = 2147483647; // A Host that is gone once the fixture confirms shutdown.
+    const lane = savedLane(store, config, "restart-restored", route("27c"), exitedPid);
+    const host = new HostTransport(lane.sessionFile, "session-restart-restored", otherModel);
+    host.state.hostPid = exitedPid;
+    recordedModelChanges(host, journal);
+    hosts.set(lane.socketPath, host);
+    mkdirSync(dirname(lane.sessionFile), { recursive: true });
+    writeFileSync(lane.sessionFile, JSON.stringify({ type: "session", version: 3, id: host.state.sessionId, cwd: lane.cwd }) + "\n");
+
+    await runtime.start();
+    expect(await runtime.inspect(lane.id)).toMatchObject({ modelCheck: { actual: otherModel, error: null } });
+    expect(store.lane(lane.id)?.model).toEqual(executionModel);
+    host.shutdownDisconnect = true;
+    await runtime.closeLane(lane.id, "completed", "The native fixture is settled.");
+    expect(store.lane(lane.id)?.runtimeState).toBe("unloaded");
+    const source = message("resume-retry-default", lane.route);
+    store.receive(source, "main");
+    store.settle(source.id, "done");
+    await runtime.resume(lane.id, source.id);
+    const resumed = hosts.get(lane.socketPath)!;
+    expect(f.launched).toHaveLength(1);
+    expect(f.launched[0]).not.toHaveProperty("model");
+    expect(resumed).not.toBe(host);
+    expect(resumed.entries).toHaveLength(2);
+    expect(resumed.prompts).toEqual([]);
+    expect(store.lane(lane.id)).toMatchObject({ ...selection, generation: 1, workState: "open" });
+
+    // Restored journals retain the last fallback entry. It is already
+    // consumed, so later drift with no new transition cannot reuse it.
+    resumed.state.model = otherModel;
+    await expect(runtime.resume(lane.id)).rejects.toThrow("model drift");
+    expect(store.lane(lane.id)?.model).toEqual(executionModel);
+    expect(messenger.sent.filter(output => output.id.startsWith(`model-fallback-selected:${lane.id}:`))).toHaveLength(1);
+  });
+
+  test("a fresh restore cannot reuse an unobserved old fallback marker on repeated validation", async () => {
+    const f = fixture(3, undefined, { startHost: async options => {
+      f.launched.push(options);
+      const host = new HostTransport(options.sessionFile, "session-unobserved-fallback", otherModel);
+      recordedModelChanges(host, [
+        { model: "fixture/capable" },
+        { model: "fixture/efficient", role: "fallback", fallback: true },
+      ]);
+      f.hosts.set(options.socketPath, host);
+      return { pid: process.pid };
+    } });
+    const { runtime, store, config, messenger } = f;
+    const lane = savedLane(store, config, "unobserved-fallback", route("27f"));
+    store.updateLane(lane.id, lane.generation, { sessionId: "session-unobserved-fallback", workState: "paused" });
+    mkdirSync(dirname(lane.sessionFile), { recursive: true });
+    writeFileSync(lane.sessionFile, JSON.stringify({ type: "session", version: 3, id: "session-unobserved-fallback", cwd: lane.cwd }) + "\n");
+    await runtime.start();
+    const source = message("resume-unobserved-fallback", lane.route);
+    store.receive(source, "main");
+    store.settle(source.id, "done");
+    await expect(runtime.resume(lane.id, source.id)).rejects.toThrow("could not be restored");
+    await expect(runtime.resume(lane.id, source.id)).rejects.toThrow("model drift");
+    expect(f.launched).toHaveLength(1);
+    expect(f.hosts.get(lane.socketPath)?.prompts).toEqual([]);
+    expect(store.lane(lane.id)).toMatchObject({ ...selection, runtimeState: "interrupted" });
+    expect(messenger.sent).toEqual([]);
+  });
+
+  test("cold configured readback allows only a new flagged retry after the restored journal cursor", async () => {
+    const f = fixture(3, undefined, { startHost: async options => {
+      f.launched.push(options);
+      const host = new HostTransport(options.sessionFile, "session-cold-retry-cursor", executionModel);
+      recordedModelChanges(host, [
+        { model: "fixture/capable" },
+        { model: "fixture/efficient", role: "fallback", fallback: true },
+      ]);
+      f.hosts.set(options.socketPath, host);
+      return { pid: process.pid };
+    } });
+    const { runtime, store, config, messenger } = f;
+    const lane = savedLane(store, config, "cold-retry-cursor", route("27g"));
+    store.updateLane(lane.id, lane.generation, { sessionId: "session-cold-retry-cursor", workState: "paused" });
+    mkdirSync(dirname(lane.sessionFile), { recursive: true });
+    writeFileSync(lane.sessionFile, JSON.stringify({ type: "session", version: 3, id: "session-cold-retry-cursor", cwd: lane.cwd }) + "\n");
+    await runtime.start();
+    const source = message("resume-cold-retry-cursor", lane.route);
+    store.receive(source, "main");
+    store.settle(source.id, "done");
+    await runtime.resume(lane.id, source.id);
+    const host = f.hosts.get(lane.socketPath)!;
+    expect(f.launched).toHaveLength(1);
+    expect(await runtime.inspect(lane.id)).toMatchObject({ modelCheck: { actual: executionModel, error: null } });
+
+    // A later mismatch cannot borrow an unobserved retry row at or before the
+    // configured cold readback, even if an ordinary entry advances the leaf.
+    host.state.model = otherModel;
+    await expect(runtime.resume(lane.id)).rejects.toThrow("model drift");
+    host.entries.push({ type: "message", id: "post-restore-message", parentId: "change-1" });
+    await expect(runtime.resume(lane.id)).rejects.toThrow("model drift");
+    expect(messenger.sent).toEqual([]);
+    expect(host.prompts).toEqual([]);
+
+    host.entries.push({ type: "model_change", id: "post-restore-fallback", parentId: "post-restore-message",
+      model: "fixture/efficient", role: "fallback", resolvedModelIsFallback: true });
+    await runtime.resume(lane.id);
+    await delegate(runtime, message("new-cold-retry-cursor", lane.route));
+    await host.whenPrompts(1);
+    expect(store.lane(lane.id)).toMatchObject(selection);
+    await messenger.whenSent(1);
+    expect(messenger.sent.filter(output => output.id.startsWith(`model-fallback-selected:${lane.id}:`))).toHaveLength(1);
+  });
+
+  test("warm cooldown uses the configured model again without trusting an unflagged switch", async () => {
+    const { runtime, store, config, hosts, messenger } = fixture();
+    const lane = savedLane(store, config, "warm-model-restore", route("27d"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-warm-model-restore", otherModel);
+    const journal = [
+      { model: "fixture/capable" },
+      { model: "fixture/efficient", role: "fallback", fallback: true },
+    ];
+    recordedModelChanges(host, journal);
+    hosts.set(lane.socketPath, host);
+    await runtime.start();
+    expect(await runtime.inspect(lane.id)).toMatchObject({ modelCheck: { actual: otherModel, error: null } });
+
+    // Stock cooldown writes an unflagged ephemeral row. The configured model
+    // is normal readback, not a guessed interpretation of that row.
+    host.state.model = executionModel;
+    recordedModelChanges(host, [...journal, { model: "fixture/capable", role: "fallback", fallback: false }]);
+    await runtime.resume(lane.id);
+    expect(await runtime.inspect(lane.id)).toMatchObject({ modelCheck: { actual: executionModel, error: null } });
+    expect(store.lane(lane.id)).toMatchObject(selection);
+    expect(host.prompts).toEqual([]);
+    expect(messenger.sent.filter(output => output.id.startsWith(`model-fallback-selected:${lane.id}:`))).toHaveLength(1);
+
+    // A new, flagged retry after cooldown is distinct evidence and may serve
+    // a later authorized request without changing the configured model.
+    host.state.model = otherModel;
+    recordedModelChanges(host, [...journal, { model: "fixture/capable", role: "fallback", fallback: false },
+      { model: "fixture/efficient", role: "fallback", fallback: true }]);
+    await delegate(runtime, message("new-flagged-fallback-after-cooldown", lane.route));
+    await host.whenPrompts(1);
+    expect(store.lane(lane.id)).toMatchObject(selection);
+    await messenger.whenSent(2);
+    expect(new Set(messenger.sent.filter(output => output.id.startsWith(`model-fallback-selected:${lane.id}:`)).map(output => output.id)).size).toBe(2);
+  });
+
+  test("a model change while reading retry evidence cannot authorize the old readback", async () => {
+    const { runtime, store, config, hosts, messenger } = fixture();
+    const lane = savedLane(store, config, "retry-evidence-race", route("27e"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-retry-evidence-race");
+    hosts.set(lane.socketPath, host);
+    await runtime.start();
+    host.state.model = otherModel;
+    recordedModelChanges(host, [
+      { model: "fixture/capable" },
+      { model: "fixture/efficient", role: "fallback", fallback: true },
+    ]);
+    host.afterEntries = () => {
+      host.afterEntries = undefined;
+      host.state.model = executionModel;
+    };
+    await expect(runtime.resume(lane.id)).rejects.toThrow("model drift");
+    expect(store.lane(lane.id)).toMatchObject(selection);
+    expect(messenger.sent).toEqual([]);
+    expect(host.prompts).toEqual([]);
+  });
+
+  test.each([
+    ["no retry evidence", [{ model: "fixture/capable" }]],
+    ["ordinary model selection", [{ model: "fixture/capable" }, { model: "fixture/efficient" }]],
+    ["unflagged context promotion", [{ model: "fixture/capable" }, { model: "fixture/efficient", role: "fallback", fallback: false }]],
+    ["unrelated native source", [{ model: "fixture/unrelated" }, { model: "fixture/efficient", role: "fallback", fallback: true }]],
+    ["off-branch fallback", [{ model: "fixture/capable" }, { model: "fixture/efficient", role: "fallback", fallback: true },
+      { model: "fixture/capable", parent: 0 }]],
+    ["distinct literal suffix", [{ model: "fixture/capable" }, { model: "fixture/efficient:low", role: "fallback", fallback: true }]],
+  ] as const)("does not reconcile model drift on %s", async (_scenario, entries) => {
+    const { runtime, store, config, hosts, main } = fixture();
+    main.models.push({ provider: "fixture", id: "efficient:low" }, { provider: "fixture", id: "unrelated" });
+    const lane = savedLane(store, config, "drift-held", route("28a"), process.pid);
+    const host = new HostTransport(lane.sessionFile, "session-drift-held", otherModel);
+    recordedModelChanges(host, [...entries]);
+    hosts.set(lane.socketPath, host);
+    await runtime.start();
+    await expect(runtime.resume(lane.id)).rejects.toThrow("model drift");
+    expect(store.lane(lane.id)).toMatchObject({ model: executionModel, runtimeState: "interrupted" });
+    expect(host.prompts).toEqual([]);
+  });
 });
 
 describe("frozen native preset lane choices", () => {
@@ -8112,7 +8363,11 @@ describe("frozen native preset lane choices", () => {
     expect(launched).toHaveLength(1);
     expect(launched[0]).not.toHaveProperty("model");
     const host = hosts.get(lane.socketPath)!;
-    expect(host.commands.map(command => command.type)).toEqual(["set_model", "get_journal_cursor", "prompt"]);
+    // The restored model is read back with a journal boundary before the
+    // independent prompt admission cursor is acquired. No other mutation runs.
+    expect(host.commands.map(command => command.type)).toEqual([
+      "set_model", "get_journal_cursor", "get_entries", "get_journal_cursor", "prompt",
+    ]);
     expect(host.state.model).toEqual(otherModel);
     expect(store.getMeta(`lane-model:${lane.id}:apply`)).toBe("");
     expect(host.prompts).toHaveLength(1);
