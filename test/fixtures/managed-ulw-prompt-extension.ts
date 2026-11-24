@@ -61,7 +61,9 @@ export default function compatiblePromptFixture(pi: ExtensionAPI): void {
     const [command, id] = selected;
     const target = canonicalLayout && defect !== "legacy-pointer" ? command : id;
     const path = fileURLToPath(new URL(`./skills/${target}/SKILL.md`, import.meta.url));
+    const invocationName = defect === "wrong-pointer-command" ? "super" : command;
+    const reference = defect === "joined-pointer-command" ? `super${path}${command.slice("super".length)}` : `Read \`${path}\` for ${invocationName}.`;
     return { systemPrompt: blocks, message: { customType: "omo-ultrawork:directive", display: false,
-      content: `<omp-${id}-pointer>Read \`${path}\` for ${command}.</omp-${id}-pointer>` } };
+      content: `<omp-${id}-pointer>${reference}</omp-${id}-pointer>` } };
   });
 }

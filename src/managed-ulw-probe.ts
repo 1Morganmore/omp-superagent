@@ -127,10 +127,13 @@ try {
       if (selected) {
         const [command, legacyId] = selected;
         const skill = canonicalLayout ? command : legacyId;
+        const path = skillPath(skill);
         const content = pointers[0]?.content;
+        // In the canonical layout the path already contains the command name.
+        // Check the invocation separately without prescribing pointer formatting.
         assert(typeof content === "string" && content.startsWith(`<omp-${legacyId}-pointer>`) && content.endsWith(`</omp-${legacyId}-pointer>`)
-          && content.includes(command) && content.includes(skillPath(skill)),
-          `SUPER command /${command} must point to its installed ${skill} skill`);
+          && content.includes(path) && content.split(path).some(part => part.includes(command)),
+          `SUPER directive must name /${command} and point to its installed ${skill} skill`);
       }
       return blocks;
     };

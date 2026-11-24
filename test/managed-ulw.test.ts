@@ -479,7 +479,9 @@ for (const [defect, rejection] of [
   ["quoted-workflow", "Ordinary or quoted text must not activate SUPER policy"],
   ["plain-pointer", "Only an explicitly selected specialized SUPER invocation may add a workflow directive"],
   ["renamed-skill", "Native Superkit skill discovery must retain skill://ulw-execute and its installed path"],
-  ["legacy-pointer", "SUPER command /super-graph must point to its installed super-graph skill"],
+  ["legacy-pointer", "SUPER directive must name /super-graph and point to its installed super-graph skill"],
+  ["wrong-pointer-command", "SUPER directive must name /super-graph and point to its installed super-graph skill"],
+  ["joined-pointer-command", "SUPER directive must name /super-graph and point to its installed mass-ulw skill"],
   ["hidden-canonical-skill", "Native Superkit skill discovery must retain skill://super-run and its installed path"],
   ["escaped-canonical-skill", "Managed ULW resource symlink leaves its package"],
 ] as const) {
@@ -490,7 +492,8 @@ for (const [defect, rejection] of [
     const pointer = await readFile(join(f.managed, "active.json"), "utf8");
     const installed = await readFile(join(active, "index.ts"), "utf8");
     await writeFile(join(f.remote, "index.ts"), await promptExtension("incompatible", defect));
-    if (defect === "legacy-pointer" || defect === "hidden-canonical-skill" || defect === "escaped-canonical-skill") {
+    if (defect === "legacy-pointer" || defect === "wrong-pointer-command" ||
+        defect === "hidden-canonical-skill" || defect === "escaped-canonical-skill") {
       await moveWorkflowSkills(f.remote);
     }
     if (defect === "renamed-skill" || defect === "hidden-canonical-skill") {
