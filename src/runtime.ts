@@ -5629,8 +5629,7 @@ export class Superagent {
       ...(input.pickerSelection ? { picker: true } : {}) };
   }
 
-  private restartFence(): HeadRestart | null {
-    const value = this.store.getMeta("head:restart-fence");
+  private restartFence(value = this.store.getMeta("head:restart-fence")): HeadRestart | null {
     if (!value) return null;
     const restart = JSON.parse(value) as HeadRestart;
     if (!restart.inputId || !restart.requestId || !restart.ackOutputId || !Number.isSafeInteger(restart.ownerPid)
@@ -5668,14 +5667,18 @@ export class Superagent {
     if (this.restartFence()) throw new Error("Gateway AND HEAD restart is held or pending; lane and native mutations are fenced");
   }
 
-  private restartResult(restart: HeadRestart, text: string, uncertain = false): void {
+  private restartOutput(restart: HeadRestart, text: string, uncertain = false) {
     const input = this.store.input(restart.inputId);
     if (!input || this.headCommand(input)?.name !== "restart" || this.store.getMeta(`user-source:${input.id}`) !== "true") {
       throw new Error("Restart result has no original authorized owner input");
     }
-    const id = `${input.id}:restart-${uncertain ? "uncertain" : "result"}`;
+    return { id: `${input.id}:restart-${uncertain ? "uncertain" : "result"}`, sourceId: input.id, route: input.route, text };
+  }
+
+  private restartResult(restart: HeadRestart, text: string, uncertain = false): void {
+    const output = this.restartOutput(restart, text, uncertain);
     // The first durable result owns this ID, even after reconnect/startup replay.
-    if (!this.store.output(id)) this.store.queueOutput({ id, sourceId: input.id, route: input.route, text });
+    if (!this.store.output(output.id)) this.store.queueOutput(output);
   }
 
   private refuseRestart(restart: HeadRestart, text: string): void {
@@ -5697,13 +5700,16 @@ export class Superagent {
     if (this.store.getMeta(`head:restart:${input.id}`)) return false;
     const prior = this.restartFence();
     const live = this.live.get("main");
-    // Only a *new* owner command can supersede a completed checkpoint whose
-    // final idle readback was negative. Never repeat an ambiguous handoff.
-    const blockedCheckpoint = prior?.state === "checkpoint-blocked" && !this.restartActive
+    // Only a *new* owner command can supersede a restart that stopped before
+    // handoff: a checkpoint whose final idle readback was negative, or one that
+    // failed before any Gateway receipt. Never repeat an ambiguous handoff.
+    const supersedable = (prior?.state === "checkpoint-blocked" && !!prior.checkpoint
+      || prior?.state === "failed") && !this.restartActive
       && prior.ownerPid === process.pid && prior.sessionId === live?.sessionId
       && prior.stopBoundary === this.store.getMeta("gateway:operator-stop")
-      && !this.store.getMeta(`gateway:restart:${prior.requestId}`) ? prior.checkpoint : undefined;
-    if (command.argument || !this.adapters.requestRestart || prior && !blockedCheckpoint) {
+      && !this.store.getMeta(`gateway:restart:${prior.requestId}`);
+    const blockedCheckpoint = supersedable ? prior?.checkpoint : undefined;
+    if (command.argument || !this.adapters.requestRestart || prior && !supersedable) {
       this.controlReply(input, `Gateway AND HEAD restart refused. ${command.argument ? "Use /restart with no arguments."
         : !this.adapters.requestRestart ? "The managed Gateway restart transport is unavailable." : "An earlier restart is still held; inspect its original checkpoint/lifecycle receipt."} No process was stopped.`, "cancelled");
       return false;
@@ -5923,10 +5929,18 @@ export class Superagent {
           }
         }
       } else {
-        if (this.restartFence()?.requestId !== restart.requestId) return;
-        this.saveRestart({ ...restart, state: "failed" });
-        this.restartResult(restart, "Restart checkpoint could not be confirmed. Inspect the original HEAD ownership, native work and cancelled approval receipts. Intake remains durable and held; no shutdown or prompt replay was attempted.");
-        this.report(error);
+        // checkpointRestart may have saved the original admission and goal
+        // before throwing. Its rejected promise never updates local restart.
+        const fence = this.store.getMeta("head:restart-fence");
+        if (!fence) return;
+        const current = this.restartFence(fence);
+        if (current?.requestId !== restart.requestId || current.inputId !== restart.inputId
+          || current.ownerPid !== restart.ownerPid || current.sessionId !== restart.sessionId
+          || current.sessionFile !== restart.sessionFile
+          || !["checking", "acknowledging", "checkpoint-blocked"].includes(current.state)) return;
+        const output = this.restartOutput(current, "Restart checkpoint could not be confirmed. Inspect the original HEAD ownership, native work and cancelled approval receipts. Intake remains durable and held; no shutdown or prompt replay was attempted. Send a new /restart to retry the checkpoint.");
+        if (this.store.recordRestartCheckpointFailure(fence, current.stopBoundary ?? null,
+          JSON.stringify({ ...current, state: "failed" }), output)) this.report(error);
       }
     } finally {
       if (this.restartActive === input.id) this.restartActive = undefined;

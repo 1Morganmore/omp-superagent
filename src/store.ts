@@ -1599,6 +1599,20 @@ export class Store implements StorePort {
     }).immediate();
   }
 
+  recordRestartCheckpointFailure(expectedFence: string, stopBoundary: string | null, failedFence: string,
+    output: Pick<OutputRecord, "id" | "sourceId" | "route" | "text">): boolean {
+    return this.db.transaction(() => {
+      // The Rust Gateway writes the stop boundary through its own connection.
+      // Do not reserve the only result ID if that operator stop already won.
+      if (this.getMeta("head:restart-fence") !== expectedFence
+        || this.getMeta("gateway:operator-stop") !== stopBoundary) return false;
+      this.setMeta(`head:restart:${output.sourceId}`, failedFence);
+      this.setMeta("head:restart-fence", failedFence);
+      if (!this.output(output.id)) this.queueOutput(output);
+      return true;
+    }).immediate();
+  }
+
   recordHeadHoldNotice(blockerId: string, output: Omit<OutputRecord, "state" | "remoteId" | "error" | "editOf">): boolean {
     return this.db.transaction(() => {
       const marker = `head:hold-notice:${blockerId}`;

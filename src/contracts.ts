@@ -449,6 +449,8 @@ export interface StorePort {
   prepareHeadRecovery(attempt: HeadRecoveryAttempt): boolean;
   commitHeadRecovery(expected: HeadRecoveryAttempt, decided: HeadRecoveryAttempt): boolean;
   queueOutput(output: Omit<OutputRecord, "state" | "remoteId" | "error" | "editOf">): boolean;
+  recordRestartCheckpointFailure(expectedFence: string, stopBoundary: string | null, failedFence: string,
+    output: Pick<OutputRecord, "id" | "sourceId" | "route" | "text">): boolean;
   recordHeadHoldNotice(blockerId: string, output: Omit<OutputRecord, "state" | "remoteId" | "error" | "editOf">): boolean;
   output(id: string): OutputRecord | null;
   outputs(physicalRoute?: string): OutputRecord[];

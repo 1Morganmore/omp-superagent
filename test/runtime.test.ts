@@ -6795,7 +6795,7 @@ describe("controlled Gateway AND HEAD restart", () => {
     }
   });
 
-  test("only a fresh owner restart can take over a checkpoint blocked before handoff", async () => {
+  test.each(["saved", "missing"] as const)("only a fresh owner restart can take over a checkpoint blocked before handoff (%s)", async snapshot => {
     const { runtime, main, store, requests } = restartFixture();
     await runtime.start();
     main.state.hasOwnedRunningWork = true;
@@ -6803,16 +6803,123 @@ describe("controlled Gateway AND HEAD restart", () => {
     await admit(runtime, original);
     const first = JSON.parse(store.getMeta("head:restart-fence")!);
     expect(first.state).toBe("checkpoint-blocked");
+    if (snapshot === "missing") {
+      delete first.checkpoint;
+      store.setMeta(`head:restart:${original.id}`, JSON.stringify(first));
+      store.setMeta("head:restart-fence", JSON.stringify(first));
+    }
     main.state.hasOwnedRunningWork = false;
     await admit(runtime, original);
     expect(requests).toHaveLength(0);
     const next = message("restart-after-job-drained", route("other-owner-room"), "/restart");
     await admit(runtime, next);
+    if (snapshot === "missing") {
+      expect(requests).toHaveLength(0);
+      expect(store.input(next.id)?.state).toBe("cancelled");
+      expect(JSON.parse(store.getMeta("head:restart-fence")!)).toEqual(first);
+      return;
+    }
     expect(requests).toHaveLength(1);
     expect(requests[0]?.inputId).toBe(next.id);
     expect(requests[0]?.requestId).not.toBe(first.requestId);
     expect(store.output(`${next.id}:restart-ack`)).toMatchObject({ state: "sent", route: next.route });
     expect(JSON.parse(store.getMeta("head:restart-fence")!)).toMatchObject({ state: "accepted", checkpoint: first.checkpoint });
+  });
+
+  test("a fresh owner restart can retry a checkpoint that failed before handoff", async () => {
+    const { runtime, main, store, requests } = restartFixture();
+    await runtime.start();
+    const ownerPid = main.state.hostPid;
+    main.state.hostPid = 2_000_000_003;
+    const original = message("restart-checkpoint-failed", route(), "/restart");
+    await admit(runtime, original);
+    const first = JSON.parse(store.getMeta("head:restart-fence")!);
+    expect(first.state).toBe("failed");
+    main.state.hostPid = ownerPid;
+    await admit(runtime, original);
+    expect(requests).toHaveLength(0);
+    const next = message("restart-after-checkpoint-failure", route(), "/restart");
+    await admit(runtime, next);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.inputId).toBe(next.id);
+    expect(requests[0]?.requestId).not.toBe(first.requestId);
+    expect(JSON.parse(store.getMeta("head:restart-fence")!).state).toBe("accepted");
+    expect(main.commands.some(command => command.type === "shutdown_host")).toBe(false);
+  });
+
+  test("a retried restart keeps the checkpoint saved before a later checkpoint failure", async () => {
+    const { runtime, main, store, requests } = restartFixture();
+    await runtime.start();
+    main.state.goal = { enabled: true, mode: "active", goal: { id: "original-head-goal", status: "active" } };
+    main.state.isStreaming = true;
+    main.abortFails = true;
+    const original = message("restart-abort-failed", route(), "/restart");
+    await admit(runtime, original);
+    const first = JSON.parse(store.getMeta("head:restart-fence")!);
+    expect(first.state).toBe("failed");
+    expect(first.checkpoint).toMatchObject({ goalActive: true, goalId: "original-head-goal" });
+    main.abortFails = false;
+    const next = message("restart-after-abort-failure", route(), "/restart");
+    await admit(runtime, next);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.inputId).toBe(next.id);
+    expect(JSON.parse(store.getMeta("head:restart-fence")!)).toMatchObject({ state: "accepted", checkpoint: { goalActive: true, goalId: "original-head-goal" } });
+  });
+
+  test.each(["fresh retry", "operator stop"] as const)("a late HEAD checkpoint read failure preserves the durable snapshot for %s", async outcome => {
+    const { runtime, main, store, requests } = restartFixture();
+    main.journalLeaf = true;
+    await runtime.start();
+    const work = headMessage("restart-late-failure-work", route("original-work-room"));
+    await admit(runtime, work);
+    const nativeId = main.prompts[0]!.id;
+    const goal = { id: "restart-late-failure-goal", status: "active" as const };
+    main.state.goal = { enabled: true, mode: "active", goal };
+    main.emit({ type: "goal_updated", state: main.state.goal });
+
+    // The final read occurs after the checkpoint is durable, the goal is
+    // paused, and the original admission has been cleared from live HEAD.
+    let checkpoint: unknown;
+    main.beforeState = () => {
+      if (store.input(work.id)?.state !== "uncertain") return;
+      main.beforeState = undefined;
+      checkpoint = JSON.parse(store.getMeta("head:restart-fence")!).checkpoint;
+      if (outcome === "operator stop") store.setMeta("gateway:operator-stop", "newer-stop-during-final-read");
+      throw new Error("Isolated checkpoint final read failure");
+    };
+    const original = message("restart-late-failure", route(), "/restart");
+    await admit(runtime, original);
+    expect(main.state.goal?.goal).toMatchObject({ id: goal.id, status: "paused" });
+    expect(checkpoint).toMatchObject({ goalActive: true, goalId: goal.id, goalSourceId: work.id,
+      residents: [expect.objectContaining({ id: "main", inputId: work.id, requestIds: [nativeId], entryId: `user-${nativeId}` })] });
+    const saved = JSON.parse(store.getMeta(`head:restart:${original.id}`)!);
+    expect(saved.checkpoint).toEqual(checkpoint);
+    if (outcome === "operator stop") {
+      expect(saved.state).toBe("refused");
+      expect(store.getMeta("head:restart-fence")).toBe("");
+      expect(store.output(`${original.id}:restart-result`)).toMatchObject({
+        state: "sent", sourceId: original.id, route: original.route, text: expect.stringContaining("Explicit operator stop superseded"),
+      });
+      expect(requests).toEqual([]);
+      return;
+    }
+    const failed = JSON.parse(store.getMeta("head:restart-fence")!);
+    expect(failed.state).toBe("failed");
+    expect(failed).toEqual(saved);
+    await admit(runtime, original);
+    expect(requests).toEqual([]);
+
+    const next = message("restart-after-late-failure", route("other-owner-room"), "/restart");
+    await admit(runtime, next);
+    expect(requests).toEqual([{ requestId: expect.any(String), inputId: next.id, ackOutputId: `${next.id}:restart-ack` }]);
+    expect(requests[0]?.requestId).not.toBe(failed.requestId);
+    const accepted = JSON.parse(store.getMeta("head:restart-fence")!);
+    expect(accepted.state).toBe("accepted");
+    expect(accepted.checkpoint).toEqual(checkpoint);
+    expect(store.input(work.id)).toMatchObject({ state: "uncertain", requestId: nativeId });
+    expect(main.prompts.map(prompt => prompt.id)).toEqual([nativeId]);
+    expect(main.abortCount).toBe(1);
+    expect(main.commands.some(command => command.type === "shutdown_host")).toBe(false);
   });
 
   test.each(["pending", "submitted", "uncertain"] as const)("durable %s work in either HEAD or a lane survives restart admission without replay", async state => {
