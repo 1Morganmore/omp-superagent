@@ -461,6 +461,7 @@ export interface StorePort {
   updateLane(id: string, generation: number, patch: Partial<Pick<Lane,
     "workState" | "runtimeState" | "sessionId" | "pid" | "lastActivityAt" | "result"
   >>): boolean;
+  retireLocalLaneHost(expected: Pick<Lane, "id" | "generation" | "pid" | "sessionId" | "socketPath">): boolean;
   nextGeneration(id: string, pickerRestoreSourceId?: string): Lane;
   adoptLaneModel(id: string, generation: number, model: LaneModel, reason: string): boolean;
   changeLaneModel(id: string, generation: number, expected: LaneModel | null, model: LaneModel, reason: string,

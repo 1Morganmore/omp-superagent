@@ -1779,6 +1779,18 @@ export class Store implements StorePort {
     }).immediate();
   }
 
+  retireLocalLaneHost(expected: Pick<Lane, "id" | "generation" | "pid" | "sessionId" | "socketPath">): boolean {
+    return this.db.transaction(() => {
+      const lane = this.lane(expected.id);
+      if (!lane || lane.remote || expected.pid === null || lane.generation !== expected.generation
+        || lane.pid !== expected.pid || lane.sessionId !== expected.sessionId || lane.socketPath !== expected.socketPath) return false;
+      lane.pid = null;
+      if (lane.runtimeState !== "unloaded") lane.runtimeState = "interrupted";
+      return this.db.query("UPDATE lanes SET data = ? WHERE id = ? AND generation = ?")
+        .run(laneData(lane), lane.id, lane.generation).changes === 1;
+    }).immediate();
+  }
+
   private sentLaneModelPicker(source: InputRecord) {
     const selection = source.pickerSelection;
     if (source.route.platform !== "discord" || selection?.target !== "lane" || selection.confirmed !== undefined

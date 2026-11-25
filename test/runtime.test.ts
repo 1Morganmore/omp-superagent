@@ -2493,6 +2493,41 @@ describe("source-bound Discord topic management", () => {
     expect(messenger.threads).toEqual([]);
   });
 
+  test("an interrupted lane whose recorded Host exited does not hold a host slot", async () => {
+    const { runtime, store, config, launched, errors } = fixture(2);
+    const exited = Bun.spawn([process.execPath, "--version"], { stdout: "ignore" });
+    await exited.exited;
+    const stale = savedLane(store, config, "stale-owner", route("125"), exited.pid);
+    const unresolved = message("1750000000000000454", stale.route);
+    const pending = message("1750000000000000455", stale.route);
+    store.receive(unresolved, stale.id);
+    store.submit(unresolved.id, "prior-run", stale.generation);
+    store.settle(unresolved.id, "uncertain");
+    store.receive(pending, stale.id);
+    store.putApproval({ id: "prior-approval", target: stale.id, generation: stale.generation, requestId: "prior-ui", route: stale.route,
+      request: { method: "confirm" }, state: "pending", remoteId: "prior-card" });
+    store.updateLane(stale.id, stale.generation, { workState: "paused", runtimeState: "interrupted" });
+    await runtime.start();
+
+    // Once the verified exit is recorded, a subsequent occupant of the old
+    // PID cannot re-reserve the slot or change the old lane's work holds.
+    const kill = process.kill.bind(process);
+    const probe = spyOn(process, "kill").mockImplementation((pid, signal) => pid === exited.pid && signal === 0 || kill(pid, signal));
+    try {
+      const lane = savedLane(store, config, "queued-work", route("126"));
+      store.receive(message("1750000000000000453", lane.route), lane.id);
+      await runtime.kick();
+      expect(launched.map(options => options.socketPath)).toEqual([lane.socketPath]);
+    } finally { probe.mockRestore(); }
+
+    expect(store.lane(stale.id)).toMatchObject({ generation: stale.generation, sessionId: stale.sessionId,
+      workState: "paused", runtimeState: "interrupted", pid: null });
+    expect(store.input(unresolved.id)?.state).toBe("uncertain");
+    expect(store.input(pending.id)?.state).toBe("pending");
+    expect(store.approval("prior-approval")).toMatchObject({ state: "pending", remoteId: "prior-card" });
+    expect(errors).toEqual([]);
+  });
+
   test("a queued parent follow-up keeps its report in the existing thread after controller restart", async () => {
     const { runtime, store, config, main, directory, launched, errors } = fixture(1);
     const lane = savedLane(store, config, "queued-reopen", route("124"));
@@ -6539,6 +6574,14 @@ function savedLane(store: Store, config: Config, id: string, destination: Route,
   return lane;
 }
 
+function markMockHostEndpoint(host: HostTransport, path: string): void {
+  // The fake connect adapter supplies the transport; its endpoint is observable
+  // to residency checks only until the mock Host disconnects at shutdown.
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "");
+  void host.exited.then(() => rmSync(path, { force: true }));
+}
+
 function legacyLane(store: Store, config: Config, id: string, destination: Route, pid: number | null = null): Lane {
   const { model: _model, modelReason: _reason, modelPreset: _preset, modelPresetSnapshot: _snapshot, ...old } = savedLane(store, config, id, destination, pid);
   const db = new Database(join(config.stateDir, "coordination.sqlite"));
@@ -9614,6 +9657,7 @@ describe("explicit lane-local model changes", () => {
         { model: "fixture/efficient", role: "fallback", fallback: origin === "verified fallback" }]);
       legacyTranscript(lane, executionModel);
       hosts.set(lane.socketPath, host);
+      markMockHostEndpoint(host, lane.socketPath);
       const quotaKey = `lane-quota-hold:${lane.id}`;
       store.setMeta(quotaKey, "held-native-work");
       await runtime.start();
@@ -10818,6 +10862,7 @@ describe("authoritative per-lane model selection", () => {
     host.state.hostPid = exitedPid;
     recordedModelChanges(host, journal);
     hosts.set(lane.socketPath, host);
+    markMockHostEndpoint(host, lane.socketPath);
     mkdirSync(dirname(lane.sessionFile), { recursive: true });
     writeFileSync(lane.sessionFile, JSON.stringify({ type: "session", version: 3, id: host.state.sessionId, cwd: lane.cwd }) + "\n");
 

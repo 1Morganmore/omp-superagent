@@ -1916,7 +1916,7 @@ export class Superagent {
       const inspection = await this.inspectRemote(lane);
       if (inspection.probe.socket) live = await this.attachLane(lane, inspection);
       else if (!this.recordRemoteExit(lane, inspection.probe)) throw new Error(`Lane ${id} remote ownership is unresolved`);
-    } else if (!live && !lane.remote && (existsSync(lane.socketPath) || lane.pid !== null && this.pidAlive(lane.pid))) {
+    } else if (!live && !lane.remote && this.mayOwnHost(lane)) {
       live = await this.attachLane(lane);
     }
     const current = this.requireLane(id);
@@ -2256,9 +2256,20 @@ export class Superagent {
   }
 
   private mayOwnHost(lane: Lane): boolean {
-    return lane.pid !== null || (lane.remote
-      ? lane.generation > 0 && lane.runtimeState !== "unloaded"
-      : existsSync(lane.socketPath));
+    if (lane.remote) return lane.pid !== null || lane.generation > 0 && lane.runtimeState !== "unloaded";
+    return this.live.has(lane.id) || this.connecting.has(lane.id) || !this.recordLocalExit(lane);
+  }
+
+  private recordLocalExit(lane: Lane): boolean {
+    if (lane.pid !== null && this.pidAlive(lane.pid) || this.localSocketMayExist(lane.socketPath)) return false;
+    // Forget the verified dead owner before releasing its budget slot. Otherwise
+    // reuse of its numeric PID by an unrelated process can claim the slot again.
+    return lane.pid === null || this.store.retireLocalLaneHost(lane);
+  }
+
+  private localSocketMayExist(path: string): boolean {
+    try { lstatSync(path); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
   }
 
   private async inspectRemote(lane: Lane, reconcileOpen = false): Promise<RemoteInspection> {
@@ -5142,8 +5153,11 @@ export class Superagent {
       let live = this.live.get(id);
       let remoteTranscript = false;
       let remoteOwnerAbsent = false;
-      if (this.blocked.has(id) && this.residentHosts().size > this.config.maxHosts)
-        throw new Error("Existing native ownership exceeds the host budget; reconcile it before resuming");
+      if (this.blocked.has(id)) {
+        if (this.residentHosts().size > this.config.maxHosts)
+          throw new Error("Existing native ownership exceeds the host budget; reconcile it before resuming");
+        lane = this.requireLane(id); // Capacity reconciliation may have retired the recorded local PID.
+      }
       if (!live && lane.remote && (this.mayOwnHost(lane) || this.remoteOpenPending(lane)
         || this.blocked.has(id) || source && lane.sessionId !== null)) {
         if (this.connecting.has(id) && lane.runtimeState === "starting")
@@ -5269,7 +5283,7 @@ export class Superagent {
       }
       if (outcome === "cancelled") await this.stopPausedLane(id);
       if (!lane.remote || !live) live = this.live.get(id);
-      if (!live && !lane.remote && this.mayOwnHost(lane))
+      if (!live && !lane.remote && this.mayOwnHost(this.requireLane(id)))
         throw new Error("Cannot close a lane whose native ownership/state is unresolved");
       if (live && (!(await this.state(live)).isSettled || live.input)) throw new Error("Lane still owns unresolved native work");
       this.assertRestartOpen();
@@ -5386,7 +5400,8 @@ export class Superagent {
     const existing = this.live.get(lane.id);
     if (existing) return existing.releasing || this.remoteShutdownPending(lane) ? null : existing;
     if ((this.blocked.has(lane.id) && !modelReadback && authorizedResume === undefined) || this.connecting.has(lane.id)) return null;
-    if (!this.residentHosts().has(lane.id) && this.residentHosts().size + Number(this.groups?.running ?? false) >= this.config.maxHosts) {
+    const resident = this.residentHosts();
+    if (!resident.has(lane.id) && resident.size + Number(this.groups?.running ?? false) >= this.config.maxHosts) {
       const candidates = [...this.live.values()].filter(host => host.id !== "main" && !host.input && !host.busy)
         .sort((left, right) => left.lastActivity - right.lastActivity);
       let released = false;
@@ -5394,6 +5409,9 @@ export class Superagent {
       if (!released) return null;
       if (this.residentHosts().size + Number(this.groups?.running ?? false) >= this.config.maxHosts) return null;
     }
+    const checked = this.requireLane(lane.id);
+    if (checked.generation !== lane.generation || this.live.has(lane.id) || this.connecting.has(lane.id)) return null;
+    lane = checked; // Capacity reconciliation may have retired the recorded local PID.
     this.connecting.add(lane.id);
     const restoringResumed = (workState: Lane["workState"]) => (workState === "paused" || workState === "completed")
       && authorizedResume !== undefined && (this.pauseRevisions.get(lane.id) ?? 0) === authorizedResume;
@@ -5402,7 +5420,7 @@ export class Superagent {
       if (!explicitRetry) this.assertPassiveModelReconciliation(lane.id, this.modelIntent(lane.id));
       if (lane.remote) this.requireRemoteCommandPolicy();
       const remote = lane.remote ? await this.inspectRemote(lane) : undefined;
-      if (remote ? remote.probe.socket : existsSync(lane.socketPath)) {
+      if (remote ? remote.probe.socket : this.localSocketMayExist(lane.socketPath)) {
         preflight = false;
         if (this.remoteShutdownPending(lane)) return null;
         scopedReadback?.assertSelected(this.requireLane(lane.id));
@@ -5415,7 +5433,7 @@ export class Superagent {
         if (!modelReadback) await this.checkLaneModel(live);
         return live;
       }
-      if (remote ? !this.recordRemoteExit(lane, remote.probe) : lane.pid !== null && this.pidAlive(lane.pid))
+      if (remote ? !this.recordRemoteExit(lane, remote.probe) : !this.recordLocalExit(lane))
         throw new Error(`Lane ${lane.id} process is alive or ownership/transcript is unknown; refusing duplicate launch`);
       if (this.remoteOpenPending(lane) && authorizedResume === undefined) return null;
       if (remote && !await this.adapters.workerPlacementReady(remote.registration, workerRef(lane)))
@@ -5552,7 +5570,7 @@ export class Superagent {
           const { probe } = await this.inspectRemote(lane);
           if (!this.current(live) || !this.recordRemoteExit(lane, probe)) return false;
         } catch (error) { this.report(error); return false; }
-      } else if (this.pidAlive(lane.pid) || existsSync(lane.socketPath)) return false;
+      } else if (this.pidAlive(lane.pid) || this.localSocketMayExist(lane.socketPath)) return false;
       this.live.delete(live.id);
       live.unsubscribe();
       await live.connection.close();
