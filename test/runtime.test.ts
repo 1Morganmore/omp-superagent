@@ -7052,11 +7052,19 @@ describe("controlled Gateway AND HEAD restart", () => {
     expect(store.input("later-direct")?.state).toBe("pending");
   });
 
-  test.each(["rejected", "uncertain"] as const)("%s ACK delivery never hands off or retries the original restart", async certainty => {
-    const { runtime, store, messenger, requests } = restartFixture();
+  test.each([
+    ["discord", "rejected"], ["discord", "uncertain"], ["kakao", "uncertain"],
+  ] as const)("%s %s ACK delivery never hands off or retries the original restart", async (platform, certainty) => {
+    const { runtime, config, store, messenger, requests } = restartFixture();
+    const kakao = { bridgeUrl: "http://127.0.0.1:8080", tokenEnv: "TEST_KAKAO",
+      botUserId: "900", ownerId: "42", chatId: "777" };
+    if (platform === "kakao") config.kakao = kakao;
+    const destination = platform === "kakao" ? route(null, {
+      platform, accountId: kakao.botUserId, authorityId: kakao.ownerId, guildId: null, channelId: kakao.chatId,
+    }) : route();
     messenger.sendError = new DeliveryError("secret transport response", certainty);
     await runtime.start();
-    const original = message(`restart-ack-${certainty}`, route(), "/restart");
+    const original = message(`restart-ack-${certainty}`, destination, "/restart");
     await admit(runtime, original);
     expect(store.output(`${original.id}:restart-ack`)?.state).toBe(certainty === "rejected" ? "failed" : "uncertain");
     messenger.sendError = undefined;
