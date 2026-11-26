@@ -114,7 +114,7 @@ class HostTransport implements RuntimeHost {
   state: RuntimeState;
 
   constructor(sessionFile: string, sessionId: string, model: LaneModel | null = executionModel) {
-    this.state = { sessionFile, sessionId, journalCursorVersion: 1, model, thinkingLevel: "high", isCompacting: false, queuedMessageCount: 0, settingsScope: "session",
+    this.state = { sessionFile, sessionId, instanceKey: crypto.randomUUID(), journalCursorVersion: 1, model, thinkingLevel: "high", isCompacting: false, queuedMessageCount: 0, settingsScope: "session",
       modelSettings: { modelRoles: { default: "fixture/capable", smol: "fixture/efficient" }, defaultThinkingLevel: Effort.High },
       contextUsage: { tokens: 321, contextWindow: 200_000, percent: 0.1605 },
       hostPid: process.pid, isSettled: true, isStreaming: false, hasPendingAsyncWork: false, hasOwnedRunningWork: false, pendingUiRequests: [], goal: null };
@@ -12437,6 +12437,90 @@ describe("real Store runtime coordination", () => {
     await runtime.kick();
     expect(sent()).toEqual(delivered);
     expect(messenger.attempted).toHaveLength(3);
+  });
+
+  test.each(["reconnect mid-turn", "journaled while detached", "foreign PID", "foreign instance", "restart ACK rejected"] as const)
+  ("HEAD background job keeps its source across %s without replay", async scenario => {
+    const { runtime, main, hosts, config, store, messenger, requests, launched } = restartFixture();
+    const original = headMessage("job-owner", route("51"));
+    const jobId = "bg_1";
+    const receipt = { role: "custom", customType: "async-result", content: "Only this job's result", details: { jobs: [{ jobId }] } };
+    const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Reply in this live turn" }] };
+    main.journalLeaf = true;
+    // An older, identically named job before this release's checkpoint is not evidence.
+    main.entries.push({ type: "custom_message", id: "old-job", ...receipt, content: "Not this job" });
+    await runtime.start();
+    await admit(runtime, original);
+    const [prompt] = main.prompts;
+    main.emit({ type: "message_end", message: { role: "user", content: prompt!.command.message } });
+    main.emit({ type: "message_end", message: { role: "toolResult", toolName: "bash", toolCallId: "launch",
+      details: { async: { state: "running", jobId, type: "bash" } } } });
+    Object.assign(main.state, { isSettled: false, isStreaming: false, hasOwnedRunningWork: true, hasPendingAsyncWork: true,
+      headJobs: { running: [jobId], awaitingOnly: true } });
+    main.emit({ type: "agent_end", isTerminal: false, yielded: true, awaitingAsyncWork: true, messages: [final] });
+    main.emit({ type: "prompt_result", id: prompt!.id, status: "completed", agentInvoked: true, sessionSettled: false });
+    await runtime.kick();
+    expect(store.input(original.id)?.state).toBe("done");
+    expect(messenger.sent.map(output => output.id)).toEqual([`${original.id}:answer`]);
+    const settle = (host: HostTransport) => Object.assign(host.state, { isSettled: true, isStreaming: false,
+      hasOwnedRunningWork: false, hasPendingAsyncWork: false, headJobs: { running: [], awaitingOnly: false } });
+    const emitReceipt = (host: HostTransport) => {
+      host.emit({ type: "message_end", message: receipt });
+      host.emit({ type: "agent_end", isTerminal: true, messages: [receipt, final] });
+      settle(host);
+      host.emit({ type: "session_settled" });
+    };
+    const results = (outputs: OutputRecord[]) => outputs.filter(output => output.id.startsWith(`${original.id}:job-result:`));
+    if (scenario === "restart ACK rejected") {
+      const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      const restart = message("job-restart", route("other"), "/restart");
+      messenger.beforeSend = async output => {
+        if (output.id !== `${restart.id}:restart-ack`) return;
+        started.resolve();
+        await release.promise;
+        throw new DeliveryError("Definitive rejection", "rejected");
+      };
+      await runtime.receive(restart);
+      await started.promise;
+      main.emit({ type: "agent_start" });
+      emitReceipt(main);
+      expect(results(store.outputs())).toMatchObject([{ sourceId: original.id, route: original.route, state: "pending" }]);
+      expect(results(messenger.attempted)).toEqual([]);
+      release.resolve();
+      // No other native wake is needed after the refusal releases the fence.
+      while (!results(messenger.sent).length) await messenger.whenSent(messenger.sent.length + 1);
+      expect(requests).toEqual([]);
+      expect(store.getMeta("head:restart-fence")).toBe("");
+      emitReceipt(main);
+      await runtime.kick();
+      expect(results(messenger.attempted)).toMatchObject([{ sourceId: original.id, route: original.route, text: "Reply in this live turn" }]);
+    } else {
+      const replacement = new HostTransport(main.state.sessionFile!, main.state.sessionId);
+      replacement.state = { ...structuredClone(main.state), isStreaming: true };
+      if (scenario === "foreign PID") replacement.state.hostPid = process.pid + 1;
+      if (scenario === "foreign instance") Object.assign(replacement.state, { instanceKey: "another-sdk-instance" });
+      replacement.entries = structuredClone(main.entries);
+      if (scenario === "journaled while detached") {
+        replacement.entries.push({ type: "custom_message", id: "detached-job", ...receipt });
+        settle(replacement);
+      }
+      const reattached = Promise.withResolvers<void>();
+      let reads = 0;
+      replacement.beforeState = async () => { if (++reads === 2) reattached.resolve(); };
+      hosts.set(hostPaths(config, "main").socketPath, replacement);
+      await main.close();
+      await reattached.promise;
+      if (scenario === "journaled while detached") await messenger.whenSent(2);
+      // No agent_start after mid-turn reconnect. A duplicate live receipt after
+      // journal recovery must likewise produce no second messenger attempt.
+      emitReceipt(replacement);
+      await runtime.kick();
+      expect(replacement.prompts).toHaveLength(0);
+      expect(results(messenger.attempted)).toMatchObject(scenario.startsWith("foreign") ? []
+        : [{ sourceId: original.id, route: original.route, text: receipt.content }]);
+    }
+    expect(main.prompts).toHaveLength(1);
+    expect(launched).toEqual([]);
   });
 
   test.each(["replacement", "error", "aborted"] as const)("terminal-only HEAD continuation applies %s text without replaying an earlier run", async scenario => {

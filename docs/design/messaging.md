@@ -186,6 +186,12 @@ enter using fresh state and journal evidence. The native session remains
 busy for restart, reaping, recovery, and model maintenance; the jobs keep
 running.
 
+Before release the controller persists the verified job-to-input binding and native
+journal cursor for this exact HEAD generation, session, PID and SDK instance.
+Reattachment recovers missed native job receipts after that cursor without replaying
+a prompt or sending an unverified assistant reply. A restart fence delays messenger
+delivery, not the durable recording of a completion.
+
 Structured completion IDs link a later job turn to its originating request
 and route. A standalone reply for one proven origin uses the durable outbox
 for that origin. If a completion is folded into another conversation's

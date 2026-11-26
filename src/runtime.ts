@@ -209,6 +209,7 @@ export interface RuntimeState {
   modelSettings?: LanePresetSnapshot;
   mutationHeld?: boolean;
   hostPid?: number;
+  readonly instanceKey?: string;
   isSettled: boolean;
   isStreaming: boolean;
   hasPendingAsyncWork?: boolean;
@@ -286,7 +287,8 @@ interface Live {
   finishing?: Promise<void>;
   finishAgain?: boolean;
   settlementReadPending?: boolean;
-  headJobOwners?: Map<string, InputRecord>;
+  headJobBindingKey?: string;
+  headJobOwners?: Map<string, { input: InputRecord; cursor: string | null }>;
   headJobStarts?: Set<string>;
   headJobYield?: { answer: string | null };
   headJobLoop?: boolean;
@@ -807,7 +809,7 @@ export class Superagent {
       await this.reconcileRestart();
       await this.flushOutputs();
       await this.reconcileHeadRecovery();
-      for (const live of this.live.values()) if (live.input) await this.finish(live);
+      for (const live of this.live.values()) if (live.input || !live.busy && live.headJobOwners?.size) await this.finish(live);
       this.timer = setInterval(() => {
         this.reconnectRemoteLane();
         this.retryDiscordCatchup();
@@ -2381,7 +2383,7 @@ export class Superagent {
         || frame.type === "extension_ui_request" && frame.method === "cancel";
       // Approval presentation/lifecycle must stay live while a journal read is
       // pending. Only observation mutations wait for chronological replay.
-      if (!live || !observing && observation) buffered.push(frame);
+      if (!live || !observing && (observation || id === "main")) buffered.push(frame);
       else this.observe(live, frame);
     });
     try {
@@ -2399,6 +2401,21 @@ export class Superagent {
         admitted: new Map(), running: false, preparing: 0, unsubscribe,
         goalId: state.goal?.goal?.id,
       };
+      if (id === "main" && Number.isSafeInteger(state.hostPid) && state.hostPid! > 0
+        && typeof state.instanceKey === "string" && state.instanceKey) {
+        // A resumed journal or a recycled PID is not the same execution. Native
+        // job IDs are meaningful only inside the verified SDK instance.
+        live.headJobBindingKey = `head:jobs:${key(JSON.stringify([generation, state.sessionId, state.sessionFile, state.hostPid, state.instanceKey]))}`;
+        const saved = this.store.getMeta(live.headJobBindingKey);
+        if (saved) {
+          live.headJobOwners = new Map();
+          for (const [job, sourceId, cursor] of JSON.parse(saved) as [string, string, string | null][]) {
+            const input = this.store.input(sourceId);
+            if (input?.target === "main" && input.state === "done" && input.generation === generation
+              && this.store.getMeta(`user-source:${sourceId}`) === "true") live.headJobOwners.set(job, { input, cursor });
+          }
+        }
+      }
       const residentCheckpoint = this.restartFence()?.checkpoint?.residents ?? this.rotatedResidents();
       const recovery = id === "main" ? undefined : residentCheckpoint?.find(saved =>
         saved.id === id && saved.generation === generation && saved.sessionId === state.sessionId && saved.pid === state.hostPid);
@@ -2456,9 +2473,15 @@ export class Superagent {
           }
         } finally { live.preparing--; }
       }
+      if (live.headJobOwners?.size) {
+        live.preparing++;
+        try { await this.recoverHeadJobs(live); }
+        finally { live.preparing--; }
+        if (state.headJobs?.awaitingOnly && live.headJobOwners.size) live.headJobYield = { answer: null };
+      }
       observing = true;
       for (const frame of buffered) this.observe(live, frame);
-      if (recovery) this.background(this.finish(live));
+      if (recovery || live.headJobOwners?.size && state.isSettled) this.background(this.finish(live));
       const attached = live;
       void connection.exited.then(() => this.disconnected(attached), () => this.disconnected(attached));
       return live;
@@ -5666,7 +5689,10 @@ export class Superagent {
       || hold && this.store.getMeta("gateway:operator-stop") !== (restart.stopBoundary ?? null)) return;
     this.store.setMeta(`head:restart:${restart.inputId}`, JSON.stringify(restart));
     this.store.setMeta("head:restart-fence", hold ? JSON.stringify(restart) : "");
-    if (!hold && this.ready && !this.stopped) this.resumeRouting();
+    if (!hold && this.ready && !this.stopped) {
+      this.resumeRouting();
+      this.wakeOutputs();
+    }
     if (!hold) this.observePresetRoles();
   }
 
@@ -8543,7 +8569,10 @@ export class Superagent {
   }
 
   private observeHeadJobMessage(live: Live, message: Record<string, unknown>): void {
-    if (!live.headJobLoop) return;
+    // A reconnect can join the native loop after its agent_start. Only an
+    // exact, previously bound completion is actionable without that boundary.
+    if (!live.headJobLoop && !(message.role === "custom" && message.customType === "async-result"
+      && live.headJobOwners?.size)) return;
     const input = live.input;
     if (message.role === "user" && !message.synthetic && input) {
       const first = Array.isArray(message.content) ? record(message.content[0]).text : message.content;
@@ -8561,9 +8590,20 @@ export class Superagent {
         (live.headJobStarts ??= new Set()).add(job.jobId);
     }
     if (message.role !== "custom" || message.customType !== "async-result" || !live.headJobOwners?.size) return;
-    const jobs = record(message.details).jobs;
-    if (!Array.isArray(jobs) || !jobs.length) return;
+    const items = this.headJobResults(message);
+    if (!items.size) return;
     const batch = live.headJobBatch ??= new Map();
+    for (const [id, text] of items) batch.set(id, text);
+    if (input && [...batch.keys()].some(id => {
+      const owner = live.headJobOwners?.get(id)?.input;
+      return owner ? routeKey(owner.route) !== routeKey(input.route) : !live.headJobStarts?.has(id);
+    })) live.headJobMixed = true;
+  }
+
+  private headJobResults(message: Record<string, unknown>): Map<string, string> {
+    const batch = new Map<string, string>();
+    const jobs = record(message.details).jobs;
+    if (!Array.isArray(jobs) || !jobs.length) return batch;
     const content = typeof message.content === "string" ? message.content
       : Array.isArray(message.content) ? message.content.filter(part => record(part).type === "text")
         .map(part => String(record(part).text ?? "")).join("") : "";
@@ -8573,20 +8613,43 @@ export class Superagent {
       batch.set(jobId, jobs.length === 1 && content.trim() ? content
         : `백그라운드 작업 ${jobId}: ${typeof status === "string" ? status : "결과 도착"}`);
     }
-    if (input && [...batch.keys()].some(id => {
-      const owner = live.headJobOwners?.get(id);
-      return owner ? routeKey(owner.route) !== routeKey(input.route) : !live.headJobStarts?.has(id);
-    })) live.headJobMixed = true;
+    return batch;
+  }
+
+  private async recoverHeadJobs(live: Live): Promise<void> {
+    if (!live.headJobOwners?.size) return;
+    // The cursor was captured *after* these launches, in this exact SDK
+    // instance. Earlier journal entries (including reused names) have no authority.
+    for (const cursor of new Set([...live.headJobOwners.values()].map(owner => owner.cursor))) {
+      let entries: unknown;
+      try { entries = await this.readLaneObservationEntries(live, cursor, "recover HEAD job results"); }
+      catch (error) {
+        // Compaction may remove a cursor. Never substitute the whole transcript.
+        if (!(error instanceof UnknownObservationCursor)) throw error;
+        continue;
+      }
+      if (!this.current(live) || this.stopped || !Array.isArray(entries)) throw new Error("Native HEAD job journal is unavailable");
+      for (const entry of entries.map(record)) {
+        const message = entry.type === "custom_message" ? entry : entry.type === "message" ? record(entry.message) : {};
+        if (message.customType !== "async-result" || entry.type === "message" && message.role !== "custom") continue;
+        const batch = new Map([...this.headJobResults(message)].filter(([id]) => live.headJobOwners?.get(id)?.cursor === cursor));
+        if (!batch.size) continue;
+        live.headJobBatch = batch;
+        this.deliverHeadJobBatch(live, null); // Only the scoped native result, not a detached turn's assistant text.
+      }
+    }
+    this.wakeOutputs();
   }
 
   private deliverHeadJobBatch(live: Live, answer: string | null): void {
     const batch = live.headJobBatch;
-    live.headJobBatch = undefined;
-    if (!batch || this.stopped || this.headStopping || this.restartFence()) return;
+    if (!batch || !live.headJobBindingKey || !live.headJobOwners || this.stopped) return;
+    const remaining = new Map(live.headJobOwners);
+    const outputs: Pick<OutputRecord, "id" | "sourceId" | "route" | "text">[] = [];
     const owners = new Map<string, { input: InputRecord; jobs: string[] }>();
     let unknown = false;
     for (const id of batch.keys()) {
-      const owner = live.headJobOwners?.get(id);
+      const owner = live.headJobOwners?.get(id)?.input;
       if (!owner || this.store.input(owner.id)?.state !== "done") { unknown = true; continue; }
       const group = owners.get(owner.id);
       if (group) group.jobs.push(id);
@@ -8597,10 +8660,14 @@ export class Superagent {
       const id = `${input.id}:job-result:${key(JSON.stringify([live.sessionId, jobs]))}`;
       const text = !live.input && !unknown && owners.size === 1 && answer
         ? answer : jobs.map(job => batch.get(job)).join("\n\n");
-      if (text && !this.store.output(id))
-        this.store.queueOutput({ id, sourceId: input.id, route: input.route, text });
-      for (const job of jobs) live.headJobOwners?.delete(job);
+      if (text && !this.store.output(id)) outputs.push({ id, sourceId: input.id, route: input.route, text });
+      for (const job of jobs) remaining.delete(job);
     }
+    if (remaining.size !== live.headJobOwners.size) {
+      this.store.saveHeadJobs(live.headJobBindingKey, [...remaining].map(([job, owner]) => [job, owner.input.id, owner.cursor]), outputs);
+      live.headJobOwners = remaining;
+    }
+    live.headJobBatch = undefined;
   }
 
   private observe(live: Live, frame: Record<string, unknown>): void {
@@ -8663,13 +8730,14 @@ export class Superagent {
     }
     if (frame.type === "agent_end") {
       if (live.id === "main") {
+        const observedStart = live.headJobLoop;
         live.headJobLoop = false;
         const hadJobBatch = !!live.headJobBatch;
         const message = Array.isArray(frame.messages) ? frame.messages.findLast(value => record(value).role === "assistant") : undefined;
         const answer = record(message).stopReason === "stop" ? assistantText(message) : null;
         live.headJobYield = frame.isTerminal === false && frame.yielded === true && frame.awaitingAsyncWork === true ? { answer } : undefined;
         if (hadJobBatch) {
-          try { this.deliverHeadJobBatch(live, answer); }
+          try { this.deliverHeadJobBatch(live, observedStart && !this.store.hasInput("main", "uncertain") ? answer : null); }
           catch (error) { this.report(error); }
           this.background(this.flushOutputs());
           this.background(this.finish(live));
@@ -8850,17 +8918,30 @@ export class Superagent {
     const earlyAnswer = jobs && input ? live.headJobYield?.answer : undefined;
     if (jobs) {
       if (input) {
-        if (!earlyAnswer || !live.headJobPromptSeen || outcome !== "completed" || result?.status !== "completed"
+        if (!live.headJobBindingKey || !earlyAnswer || !live.headJobPromptSeen || outcome !== "completed" || result?.status !== "completed"
           || !result.agentInvoked || result.goalResume || live.recovery || admissions.length !== 1
           || this.store.input(input.id)?.state !== "submitted"
           || this.store.getMeta(`user-source:${input.id}`) !== "true"
           || live.scopeReviewRequested || this.scopeReviewActive()
           || jobs.some(id => !live.headJobStarts?.has(id) && !live.headJobOwners?.has(id))) return;
-        const owners = live.headJobOwners ??= new Map();
-        for (const id of jobs) if (!owners.has(id)) owners.set(id, input);
+        if (jobs.some(id => !live.headJobOwners?.has(id))) {
+          const cursor = await this.readJournalCursor(live, "checkpoint HEAD job ownership");
+          if (!this.current(live) || live.nativeVersion !== nativeVersion || live.input !== input || live.preparing
+            || this.stopped || this.headStopping || this.restartFence() || this.store.input(input.id)?.state !== "submitted") return;
+          const owners = new Map(live.headJobOwners);
+          for (const id of jobs) if (!owners.has(id)) owners.set(id, { input, cursor });
+          this.store.saveHeadJobs(live.headJobBindingKey, [...owners].map(([job, owner]) => [job, owner.input.id, owner.cursor]));
+          live.headJobOwners = owners;
+        }
       } else if (jobs.some(id => !live.headJobOwners?.has(id))) return;
     }
-    if (settled && !live.headJobLoop) live.headJobOwners?.clear();
+    if (settled && !live.headJobLoop && !live.headJobBatch && live.headJobBindingKey && live.headJobOwners?.size) {
+      // Native settlement proves there is no remaining work, not a successful
+      // result. Surface missing evidence to its original owner without a rerun.
+      live.headJobBatch = new Map([...live.headJobOwners.keys()].map(id => [id,
+        `백그라운드 작업 ${id}: HEAD 실행이 종료됐지만 작업 결과를 확인할 수 없습니다. 다시 실행하지 않았습니다.`]));
+      this.deliverHeadJobBatch(live, null);
+    }
     const scopeDialog = live.scopeReviewDialog;
     // Tool output can arrive before the controller's separate UI readback.
     // The exact callback wakes settlement once it confirms or fails that read.
@@ -9386,9 +9467,13 @@ export class Superagent {
     if (pending?.state === "sending") await this.routeOutbounds.get(physicalRouteKey(pending.route));
   }
 
+  private headJobDeliveryHeld(output: OutputRecord): boolean {
+    return output.id.startsWith(`${output.sourceId}:job-result:`) && (!!this.headStopping || !!this.restartFence());
+  }
+
   private filterFlushable(outputs: OutputRecord[]): OutputRecord[] {
-    return outputs.filter(output => this.watchDeliveryReady
-      || !(isLaneWatchNotice(output.id) || isPrIntakeOffer(output.id) || isPrObservation(output.sourceId)));
+    return outputs.filter(output => !this.headJobDeliveryHeld(output) && (this.watchDeliveryReady
+      || !(isLaneWatchNotice(output.id) || isPrIntakeOffer(output.id) || isPrObservation(output.sourceId))));
   }
 
   private async awaitInflightOutputs(): Promise<void> {
@@ -9456,6 +9541,7 @@ export class Superagent {
         return delivered;
       }
       for (const output of outputs) {
+        if (this.headJobDeliveryHeld(output)) continue; // the fence may have changed since this route's first read
         if (isPrIntakeOffer(output.id) && this.restartFence()) {
           deferredLaneNotices.add(output.id);
           continue;
