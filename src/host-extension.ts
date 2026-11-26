@@ -468,8 +468,9 @@ export default function hostExtension(pi: ExtensionAPI): void {
       [ref.id, ref.generation, ref.parentId, ref.session?.instanceKey, ref.sessionFile])))
       throw new DescendantOwnershipChanged("Native descendant identity changed during completion readback");
     const tree = identity.session.getAsyncJobTree({ recentLimit: 0 });
-    return { identity, tree, unknown: servicesUnknown || serviceDeliveryUnknown || descendantsUnknown(),
-      busy: liveGenerations.size > 0 || descendantsBusy() || deliveriesPending(identity.session) || !!tree?.running.length };
+    const otherWork = liveGenerations.size > 0 || descendantsBusy() || deliveriesPending(identity.session);
+    return { identity, tree, otherWork, unknown: servicesUnknown || serviceDeliveryUnknown || descendantsUnknown(),
+      busy: otherWork || !!tree?.running.length };
   };
   const owned = async (drain = false) => {
     const identity = exact();
@@ -621,10 +622,21 @@ export default function hostExtension(pi: ExtensionAPI): void {
       // The owner requires this first snapshot before opening its public socket.
       const prReviewPolicy = reviewCwd ? reviewPolicy(ownership.identity.session, reviewCwd) : undefined;
       if (!reviewCwd) loadedSuperkitPath ??= await verifyHostSuperkit(ownership.identity.session, selectedSuperkit);
+      const { session, ref } = ownership.identity;
+      const wakes = session.wakeSources;
+      const running = process.env.OMP_SUPERAGENT_ROLE === "head" && ownership.tree
+        ? ownership.tree.running.filter(job => job.ownerId === ref.id) : undefined;
+      const awaitingOnly = !ownership.unknown && !ownership.otherWork && !!running && !!wakes?.jobs.length
+        && wakes.agents.length === 0 && !wakes.queued && running.length === ownership.tree?.running.length
+        && running.length === wakes.jobs.length && wakes.jobs.every(id => running.some(job => job.id === id))
+        && session.isRunActive === true && !session.isDisposed && !session.isBusyForSnapshot && !session.isSessionTransitioning
+        && !session.hasAdmittedSubmission && !session.hasPostPromptWork && session.queuedMessageCount === 0
+        && !session.yieldQueue.has() && !session.getGoalModeState()?.enabled && !mutationHeld && !observationHeld;
       // Only an owner that implements the cursor command can advertise it to peers.
       return { ...ownerIdentity(ownership.identity), loadedSuperkitPath, prReviewPolicy, settingsScope: "session", modelSettings: snapshot(),
         journalCursorControlVersion: 1,
         ...(replyVoice?.available() ? { replyVoiceControlVersion: 2 } : {}),
+        ...(running ? { headJobs: { running: running.map(job => job.id), awaitingOnly } } : {}),
         fastMode: headFastMode(ownership.identity.session),
         hasOwnedRunningWork: ownership.unknown ? undefined : ownership.busy, mutationHeld, observationHeld,
         admitted: ownership.identity.session.hasAdmittedSubmission,

@@ -8,14 +8,14 @@ import { type Config, hostPaths, privateDirectory } from "../../src/config";
 import { physicalRouteKey, type Approval, type Inbound, type Lane, type LanePresetSnapshot, type Messenger, type OutputRecord,
   type Route, type ThreadInfo, type ThreadUpdate } from "../../src/contracts";
 import { buildHostArgs, HostConnection, startHost, type HostOptions } from "../../src/host";
-import { Superagent } from "../../src/runtime";
+import { Superagent, type RuntimeState } from "../../src/runtime";
 import { readOmpUsage } from "../../src/omp-usage";
 import { NativePresetManager } from "../../src/native-presets";
 import { Store } from "../../src/store";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { nativeDisabledProviders } from "./native-extension";
 import { modelAbortMarker, modelCompactAbortInstructions, modelCompactInstructions, modelCompactMarker, modelCompactSummary,
-  modelFixtureModels, modelFixtureProvider, modelJudgeMarker, modelRolesMarker } from "./model-selection-extension";
+  modelFixtureModels, modelFixtureProvider, modelHeadJobFixture, modelJudgeMarker, modelRolesMarker } from "./model-selection-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { nativeTestCommand } from "./native-command";
 import { offlineMnemopi } from "./native-memory";
@@ -167,6 +167,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   const agentConfig = {
     ...offlineMnemopi,
     disabledProviders: modelSelection ? nativeDisabledProviders.filter(provider => provider !== fastModel.provider) : nativeDisabledProviders,
+    async: modelSelection ? undefined : { enabled: true },
     ...(modelSelection ? {
       modelRoles: { default: `${mainModel.provider}/${mainModel.id}`, judge: `${modelFixtureProvider}/${modelFixtureModels.judge.id}` },
       modelPresets: {
@@ -211,7 +212,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   const config: Config = {
     path: path.join(root, "superagent.json"), stateDir: root, headCwd, command,
     maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model: `${mainModel.provider}/${mainModel.id}`,
-    discord: { tokenEnv: "NATIVE_RUNTIME_DISCORD_TOKEN", ownerId: "1", allowedGuildIds: ["3"], allowedChannelIds: ["4"] },
+    discord: { tokenEnv: "NATIVE_RUNTIME_DISCORD_TOKEN", ownerId: "1", allowedGuildIds: ["3"], allowedChannelIds: modelSelection ? ["4"] : ["4", "5"] },
   };
   await fs.writeFile(config.path, JSON.stringify(config), { mode: 0o600 });
   for (const directory of ["run", "sessions/main", "logs"]) privateDirectory(path.join(root, directory));
@@ -1012,6 +1013,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     }
 
     let cronResultId: string | undefined;
+    const headJobInputs = modelSelection ? [] : [modelHeadJobFixture.original.id, modelHeadJobFixture.other.id];
     if (!modelSelection) {
       const scheduled = inbound("250", threadRoute, '/cron add "in 1s" Deliver the scheduled fixture result.');
       await messenger.deliver(scheduled);
@@ -1028,6 +1030,58 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       await messenger.deliver(scheduled);
       await runtime.kick();
       expect(messenger.sent.filter(output => output.sourceId.startsWith("cron-run:")).map(output => output.sourceId)).toEqual([cronResultId]);
+
+      const { original, other, gate, resultMarker, resultAnswer } = modelHeadJobFixture;
+      const otherRoute = { ...route, channelId: "5" };
+      const sentBefore = messenger.sent.length;
+      const outboxBefore = outbox().length;
+      const sentSince = () => messenger.sent.slice(sentBefore).map(({ id, sourceId, route, text }) => ({ id, sourceId, route, text }));
+      const originalAnswer = { id: `${original.id}:answer`, sourceId: original.id, route, text: original.answer };
+      const otherAnswer = { id: `${other.id}:answer`, sourceId: other.id, route: otherRoute, text: other.answer };
+
+      await messenger.deliver(headInput(original.id, route, original.task));
+      await until(() => delivered(original.id), "original HEAD answer while native Bash job is running");
+      expect(sentSince()).toEqual([originalAnswer]);
+      const paused: RuntimeState = await initial.client.getState();
+      expect(paused).toMatchObject({
+        isSettled: false, hasOwnedRunningWork: true, headJobs: { running: [expect.any(String)], awaitingOnly: true },
+      });
+      const jobId = paused.headJobs!.running[0]!;
+      expect(headEvents).toContainEqual(expect.objectContaining({
+        type: "message_end",
+        message: expect.objectContaining({
+          role: "toolResult", toolName: "bash", isError: false,
+          details: expect.objectContaining({ async: { state: "running", type: "bash", jobId } }),
+        }),
+      }));
+
+      await messenger.deliver(headInput(other.id, otherRoute, other.task));
+      await until(() => delivered(other.id), "independent HEAD reply while the original Bash job is still running");
+      expect(sentSince()).toEqual([originalAnswer, otherAnswer]);
+      expect(await initial.client.getState()).toMatchObject({ isSettled: false, hasOwnedRunningWork: true, headJobs: paused.headJobs });
+
+      await fs.writeFile(path.join(headCwd, gate), `${resultMarker}\n`, { flag: "wx", mode: 0o600 });
+      const resultPrefix = `${original.id}:job-result:`;
+      await until(() => outbox().some(row => row.id.startsWith(resultPrefix) && row.state === "sent"),
+        "released native Bash continuation delivered to its original route");
+      await runtime.kick();
+      expect(headEvents).toContainEqual(expect.objectContaining({
+        type: "message_end",
+        message: expect.objectContaining({
+          role: "custom", customType: "async-result",
+          details: expect.objectContaining({ jobs: [expect.objectContaining({ jobId, type: "bash" })] }),
+        }),
+      }));
+      const completion = { id: expect.stringMatching(new RegExp(`^${resultPrefix}.+$`)), sourceId: original.id, route, text: resultAnswer };
+      expect(sentSince()).toEqual([originalAnswer, otherAnswer, completion]);
+      expect(outbox().slice(outboxBefore)).toEqual([originalAnswer, otherAnswer, {
+        ...completion, id: messenger.sent[sentBefore + 2]!.id,
+      }].map(output => ({
+        id: output.id, source_id: output.sourceId, route: JSON.stringify(output.route), text: output.text,
+        state: "sent", remote_id: `native-receipt:${output.id}`, error: null,
+      })));
+      expect(await initial.client.getState()).toMatchObject({ isSettled: true, hasOwnedRunningWork: false,
+        headJobs: { running: [], awaitingOnly: false } });
     }
     // stop() detaches rather than killing OMP. Inspect and explicitly shut down
     // only the native processes whose identities belong to this test's ledger.
@@ -1095,7 +1149,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     const laneRequestIds = requestIds(laneEntries);
     expect(headRequestIds).toEqual([ordinary.id, topic.id, report(firstHandoff), followup.id, report(followupHandoff),
       ...(modelSelection ? [modelChangeSource.id, changedFollowup.id, report(`handoff:${changedFollowup.id}:${created.id}`), "301", "303"] : []),
-      ...(cronResultId ? [cronResultId] : [])]);
+      ...(cronResultId ? [cronResultId] : []), ...headJobInputs]);
     expect(laneRequestIds).toEqual([firstHandoff, followupHandoff, ...(modelSelection ? [`handoff:${changedFollowup.id}:${created.id}`] : [])]);
     expect(new Set(headRequestIds).size).toBe(headRequestIds.length);
     expect(new Set(laneRequestIds).size).toBe(laneRequestIds.length);
@@ -1105,13 +1159,13 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       } | null;
       if (!receipt?.requestId) throw new Error(`Missing durable native dispatch receipt for ${id}`);
       expect(receipt.state).toBe(id === "301" ? "cancelled" : "done");
-      return receipt;
+      return { ...receipt, sessionSettled: !headJobInputs.some(jobInput => jobInput === id) };
     });
     expect(new Set(dispatched.map(input => input.requestId)).size).toBe(dispatched.length);
     expect(nativeResults.map(result => result.id).sort()).toEqual(dispatched.map(input => input.requestId).sort());
     for (const input of dispatched) {
       const result = nativeResults.find(result => result.id === input.requestId);
-      expect(result).toMatchObject({ status: input.requestId === cancelledRequestId ? "aborted" : "completed", agentInvoked: true, sessionSettled: true,
+      expect(result).toMatchObject({ status: input.requestId === cancelledRequestId ? "aborted" : "completed", agentInvoked: true, sessionSettled: input.sessionSettled,
         socketPath: input.target === "main" ? mainPaths.socketPath : firstLane.socketPath });
     }
     // Empty head answers produce discarded native internal turns, not new

@@ -12,6 +12,13 @@ export const modelCompactMarker = "omp-superagent-native-compact";
 export const modelCompactInstructions = "Preserve native messenger command decisions.\nKeep the independent lane identity and frozen role settings.";
 export const modelCompactAbortInstructions = "Wait for the native compaction AbortSignal before producing the summary.";
 export const modelCompactSummary = "## Goal\nVerify native messenger commands.\n## Decisions\nPreserve the independent lane identity and frozen role settings.\n## Next Steps\nContinue the existing head session.";
+export const modelHeadJobFixture = {
+  original: { id: "251", task: "Start the gated local Bash job and reply while it is running.", answer: "The native Bash job is running." },
+  other: { id: "252", task: "Answer this independent HEAD request while the job is running.", answer: "The other conversation has its own reply." },
+  gate: ".native-head-job-release",
+  resultMarker: "native-head-job-released",
+  resultAnswer: "The native Bash job finished after release.",
+} as const;
 export const modelFixtureModels = {
   head: { provider: modelFixtureProvider, id: "head" },
   lane: { provider: modelFixtureProvider, id: "lane" },
@@ -47,6 +54,26 @@ export default function modelSelectionFixture(pi: ExtensionAPI): void {
       const text = user?.role === "user" ? typeof user.content === "string" ? user.content
         : user.content.filter(part => part.type === "text").map(part => part.text).join("\n") : "";
       const requestId = /^Request ID: ([^\n]+)\n/m.exec(text)?.[1];
+      if (identity.provider === smoke.provider && process.env.OMP_SUPERAGENT_ROLE === "head") {
+        const { original, other, gate, resultMarker, resultAnswer } = modelHeadJobFixture;
+        const lastAssistant = context.messages.findLastIndex(message => message.role === "assistant");
+        if (context.messages.slice(lastAssistant + 1).some(message => {
+          if (message.role !== "user" && message.role !== "developer") return false;
+          const content = message.content;
+          return typeof content === "string" ? content.includes(resultMarker)
+            : content.some(part => part.type === "text" && part.text.includes(resultMarker));
+        })) return { content: [resultAnswer] };
+        if (requestId === original.id) {
+          if (!answered) return { content: [{ type: "toolCall", name: "bash", arguments: {
+            async: true, timeout: 90,
+            command: `while [ ! -s '${gate}' ]; do /bin/sleep 0.05; done; /bin/cat '${gate}'`,
+          } }] };
+          if (!context.messages.slice(userIndex + 1).some(message => message.role === "toolResult" && message.toolName === "bash" && !message.isError))
+            throw new Error("The native Bash job was not admitted");
+          return { content: [original.answer] };
+        }
+        if (requestId === other.id) return { content: [other.answer] };
+      }
       if (text.includes(`Additional focus: ${modelCompactInstructions}`)) {
         pi.appendEntry(modelCompactMarker, { phase: "provider-summary", instructions: modelCompactInstructions,
           prompt: text, model: identity });

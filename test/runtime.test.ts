@@ -12362,6 +12362,83 @@ describe("real Store runtime coordination", () => {
     expect(messenger.sent).toHaveLength(1);
   });
 
+  test.each(["separate", "coincident"] as const)("HEAD background job preserves its original route (%s delivery)", async delivery => {
+    const { runtime, main, store, messenger } = fixture();
+    const original = headMessage("background-job-original", route("51"));
+    const second = headMessage("background-job-second", route("52"));
+    const originalAnswer = "The background job is running.";
+    const secondAnswer = "The second request is answered independently.";
+    const followUp = "The background job finished successfully.";
+    const expected = [
+      { sourceId: original.id, route: original.route, text: originalAnswer },
+      { sourceId: second.id, route: second.route, text: secondAnswer },
+      { sourceId: original.id, route: original.route, text: followUp },
+    ];
+    const sent = () => messenger.sent.map(({ sourceId, route, text }) => ({ sourceId, route, text }));
+    const yieldAnswer = (prompt: Prompt, text: string) => {
+      const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
+      main.emit({ type: "message_end", message });
+      Object.assign(main.state, {
+        isSettled: false, isStreaming: false, hasPendingAsyncWork: true, hasOwnedRunningWork: true,
+        headJobs: { running: ["bg_1"], awaitingOnly: true },
+      });
+      main.emit({ type: "agent_end", isTerminal: false, yielded: true, awaitingAsyncWork: true, messages: [message] });
+      main.emit({ type: "prompt_result", id: prompt.id, status: "completed", agentInvoked: true, sessionSettled: false });
+    };
+
+    await runtime.start();
+    await admit(runtime, original);
+    expect(main.prompts).toHaveLength(1);
+    main.emit({ type: "message_end", message: { role: "user", content: main.prompts[0]!.command.message } });
+    main.emit({ type: "message_end", message: {
+      role: "toolResult", toolName: "bash", toolCallId: "call-bg-1", isError: false,
+      details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+    } });
+    yieldAnswer(main.prompts[0]!, originalAnswer);
+    await runtime.kick();
+    expect(sent()).toEqual(expected.slice(0, 1));
+    expect(messenger.sent[0]?.id).toBe(`${original.id}:answer`);
+
+    await admit(runtime, second);
+    expect(main.prompts).toHaveLength(2);
+    expect(store.input(second.id)).toMatchObject({ state: "submitted", requestId: main.prompts[1]!.id });
+    main.emit({ type: "message_end", message: { role: "user", content: main.prompts[1]!.command.message } });
+    const coincident = delivery === "coincident";
+    if (!coincident) {
+      yieldAnswer(main.prompts[1]!, secondAnswer);
+      await runtime.kick();
+      expect(sent()).toEqual(expected.slice(0, 2));
+      expect(messenger.sent[1]?.id).toBe(`${second.id}:answer`);
+      Object.assign(main.state, { isStreaming: true, headJobs: { running: [], awaitingOnly: false } });
+      main.emit({ type: "agent_start" });
+    }
+    const result = { role: "custom", customType: "async-result", content: "Original job stdout",
+      details: { jobs: [{ jobId: "bg_1" }] } };
+    const text = coincident ? `${secondAnswer}\n${followUp}` : followUp;
+    const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
+    main.emit({ type: "message_end", message: result });
+    main.emit({ type: "message_end", message: final });
+    main.emit({ type: "agent_end", isTerminal: true, messages: [result, final] });
+    Object.assign(main.state, { isSettled: true, isStreaming: false, hasPendingAsyncWork: false, hasOwnedRunningWork: false });
+    if (coincident)
+      main.emit({ type: "prompt_result", id: main.prompts[1]!.id, status: "completed", agentInvoked: true, sessionSettled: true });
+    main.emit({ type: "session_settled" });
+    await runtime.kick();
+    if (coincident) {
+      expect(sent().slice(0, 2)).toEqual([expected[0], { sourceId: original.id, route: original.route, text: result.content }]);
+      expect(messenger.sent[2]).toMatchObject({ sourceId: second.id, route: second.route });
+      expect(messenger.sent[2]?.text).not.toContain(followUp);
+    } else expect(sent()).toEqual(expected);
+    expect(main.prompts).toHaveLength(2);
+
+    const delivered = sent();
+    main.emit({ type: "agent_end", isTerminal: true, messages: [result, final] });
+    main.emit({ type: "session_settled" });
+    await runtime.kick();
+    expect(sent()).toEqual(delivered);
+    expect(messenger.attempted).toHaveLength(3);
+  });
+
   test.each(["replacement", "error", "aborted"] as const)("terminal-only HEAD continuation applies %s text without replaying an earlier run", async scenario => {
     const { runtime, main, store, messenger } = fixture();
     await runtime.start();
