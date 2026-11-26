@@ -1,5 +1,4 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { Type, type Static } from "@sinclair/typebox/type";
 import { Value } from "@sinclair/typebox/value";
 import type { WorkerPolicy } from "./worker-wire";
@@ -31,7 +30,9 @@ const launch = Type.Object({
     preset: Type.Object({
       modelRoles: Type.Record(role, text, { ...strict, maxProperties: 128 }),
       defaultThinkingLevel: Type.Optional(Type.Union(
-        [AUTO_THINKING, ...THINKING_EFFORTS].map(level => Type.Literal(level)),
+        // "auto" is a wire selector, not a provider effort. Keep the codec
+        // independent of the native coding agent, including on CLI status.
+        (["auto", ...THINKING_EFFORTS] as const).map(level => Type.Literal(level)),
       )),
     }, strict),
   }, strict)),

@@ -53,6 +53,8 @@ struct Manifest {
     helper_path: PathBuf,
     tools_explicitly_selected: bool,
     no_tools: bool,
+    #[serde(default)]
+    empty_tool_selection: bool,
     inventory: Option<Value>,
 }
 
@@ -916,10 +918,14 @@ pub(crate) async fn run(path: PathBuf) -> anyhow::Result<ExitCode> {
         "Owner manifest paths must be absolute"
     );
     ensure!(
-        !options.pr_review_only || manifest.no_tools && !manifest.tools_explicitly_selected
-            && env::var_os("OMP_SUPERAGENT_WORKER_ATTEMPT").is_none()
-            && options.model_preset.is_none() && options.model_settings.is_none(),
-        "Static PR review must be local with the stock no-tools selection"
+        !options.pr_review_only
+            || manifest.empty_tool_selection
+                && !manifest.no_tools
+                && manifest.tools_explicitly_selected
+                && env::var_os("OMP_SUPERAGENT_WORKER_ATTEMPT").is_none()
+                && options.model_preset.is_none()
+                && options.model_settings.is_none(),
+        "Static PR review must be local with an explicit empty tool selection"
     );
     // For an enrolled worker the stock CLI receives --cwd explicitly. Start
     // its runtime in private state so eager loader inputs aren't taken from
@@ -1023,12 +1029,16 @@ pub(crate) async fn run(path: PathBuf) -> anyhow::Result<ExitCode> {
 }
 
 async fn activate(owner: &Owner, manifest: &Manifest) -> anyhow::Result<()> {
+    let mut command = json!({
+        "type": "activate", "toolsExplicitlySelected": manifest.tools_explicitly_selected,
+        "noTools": manifest.no_tools,
+    });
+    if manifest.options.pr_review_only {
+        command["emptyToolSelection"] = json!(manifest.empty_tool_selection);
+    }
     let activated = owner
         .control()?
-        .request(json!({
-            "type": "activate", "toolsExplicitlySelected": manifest.tools_explicitly_selected,
-            "noTools": manifest.no_tools,
-        }))
+        .request(command)
         .await
         .context("Native lifecycle activation failed")?;
     require_success(&activated).context("Native lifecycle activation failed")

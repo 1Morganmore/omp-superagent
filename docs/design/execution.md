@@ -368,8 +368,8 @@ busy. A change requires Confirm on the original sent card and the same HEAD
 session, generation, model and selected mode shown as current when it opened.
 HEAD must be idle to change the active model family's tier; the owner serializes it as
 maintenance, and the extension uses native `AgentSession` fast/ultrafast
-controls and flushes the native journal. These APIs were checked in SDK 19.1.1
-and upstream `c308970263ae13744ea15ab67302e3dac840e266`. No lane, global default
+controls and flushes the native journal. These APIs were checked in the
+[pinned OMP SDK](../../DESIGN.md#stock-omp-and-verification-scope). No lane, global default
 or provider request is involved. Readback distinguishes the selected mode
 from whether OMP can use a fast tier for the current model, not whether a
 provider accepted it. Uncertain mutations are held, not replayed.
@@ -555,7 +555,10 @@ discarding custom commands or enabling disabled extensions.
   Static review uses a trusted workspace without a contributor checkout. Unlike
   ordinary coding lanes, this restricted local Host must attest a tool-less
   session on a supported native provider before the controller submits patch
-  data. It does not need manager, coordination, shell or editing tools. Fix
+  data. The stock launch explicitly selects an empty built-in tool list
+  (`--tools=`) and loads only the trusted lifecycle extension. Activation then
+  checks the native tool sets before admission. No manager, coordination,
+  shell or editing tools are available. Fix
   proposals and merge verdicts are data, not standing write authority. Each
   effect checks the enrolled repository, original route and policy revision;
   higher stages require an explicit policy or a fresh SHA-bound owner command.

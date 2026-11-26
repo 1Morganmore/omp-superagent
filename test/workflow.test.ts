@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import { containsMagicKeyword } from "@oh-my-pi/pi-coding-agent/session/magic-keywords";
 import type { WorkflowActivation, WorkflowName } from "../src/contracts";
 import { advertisedLegacyWorkflow, advertisedWorkflow, headWorkflow, leadingWorkflow, workflowChoice, workflowContext, workflowPrompt } from "../src/workflow";
 

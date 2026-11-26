@@ -174,8 +174,8 @@ lifecycle control, not a model turn. It can be admitted while the head is busy:
 
 ## Stock OMP and verification scope
 
-The [package manifest](package.json) pins the published SDK to **19.1.1**, with
-upstream [v19.1.1 source](https://github.com/can1357/oh-my-pi/commit/31ffee513f27a01bba7d4dfbe12bae239cdc646a).
+The [package manifest](package.json) pins the published SDK to **19.2.1**, with
+upstream [v19.2.1 source](https://github.com/can1357/oh-my-pi/commit/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac).
 That pin is not a CLI version allowlist. [CLI inspection](src/installed-omp.ts)
 checks CLI identity, public `rpc-ui`, resume, extension and model flags, and the
 advertised process interface. A process reuses an inspection only while the

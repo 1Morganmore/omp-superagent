@@ -28,10 +28,13 @@ export const PR_REVIEW_INPUT_PREFIX = "Static PR review input:\n";
 const prReviewSettings = {
   memory: { backend: "off" },
   goal: { enabled: false },
+  plan: { enabled: false },
   compaction: { enabled: false },
   advisor: { enabled: false },
   autolearn: { enabled: false },
   dev: { autoqa: false },
+  speechgen: { enabled: false },
+  externalThinking: false,
   skills: { enabled: false, enableSkillCommands: false, customDirectories: [] },
   mcp: { enableProjectConfig: false },
   marketplace: { autoUpdate: "off" },
@@ -348,8 +351,10 @@ export async function buildHostArgs(options: HostOptions, configPath = `${option
   }
   if (options.prReviewOnly) {
     await assertPrReviewLaunch(options);
+    // Both stock interfaces accept an explicit empty built-in list. Unlike
+    // --no-tools in OMP 19.2, this permits the exact trusted lifecycle module.
     return ["--mode", "rpc-ui", "--session", options.sessionFile, "--cwd", options.cwd,
-      "--no-tools", "--no-extensions", "--no-lsp", "--no-skills", "--no-rules", "--no-context-files",
+      "--tools=", "--no-extensions", "--no-lsp", "--no-skills", "--no-rules", "--no-context-files",
       "--no-title", "--no-prewalk", "--offline",
       "--trusted-extension", await fs.realpath(fileURLToPath(new URL("./host-extension.ts", import.meta.url))),
       "--system-prompt", PR_REVIEW_SYSTEM_PROMPT, "--config", configPath];
@@ -504,10 +509,11 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
     const flags = JSON.parse(prepared);
     if (typeof flags?.toolsExplicitlySelected !== "boolean" || typeof flags.noTools !== "boolean")
       throw new Error("Native session preparation did not confirm tool selection");
-    if (options.prReviewOnly && (!flags.noTools || flags.toolsExplicitlySelected))
-      throw new Error("Native launch did not resolve the stock no-tools selection");
+    if (options.prReviewOnly && (flags.emptyToolSelection !== true || flags.noTools || !flags.toolsExplicitlySelected))
+      throw new Error("Native launch did not resolve an explicit empty tool selection");
     await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, toolsExplicitlySelected: flags.toolsExplicitlySelected,
-      noTools: flags.noTools, inventory: flags.inventory }), { flag: "wx", mode: 0o600 });
+      noTools: flags.noTools, ...(options.prReviewOnly ? { emptyToolSelection: true } : {}),
+      inventory: flags.inventory }), { flag: "wx", mode: 0o600 });
     if (performance.now() >= deadline) throw new Error("Native Host startup timed out before launch");
     child = spawn(hostOwnerExecutable, [manifestPath], {
       cwd: options.cwd, env: options.env,

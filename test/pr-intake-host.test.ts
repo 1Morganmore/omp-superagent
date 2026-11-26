@@ -42,12 +42,16 @@ nativeTest("static PR Host keeps stock inference tool-free after detach and jour
   const ambientCanary = join(root, "ambient-loaded");
   const resource = join(root, "secret.txt");
   const resourceContents = "FILE_CONTENT_MUST_NOT_ENTER_PR_REVIEW_PROMPT";
+  const ambientContext = "PROFILE_SYSTEM_PROMPT_MUST_NOT_ENTER_PR_REVIEW_PROMPT";
   const wire: Record<string, unknown>[] = [];
+  let ambientMcpRequests = 0;
   let solicit: "bash" | "write" | null = null;
   const unsolicited: string[] = [];
   const shell = `printf canary > ${builtinCanary}`;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-    if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/chat/completions")
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/ambient-mcp") ambientMcpRequests++;
+    if (request.method !== "POST" || pathname !== "/v1/chat/completions")
       return new Response("Unexpected route", { status: 404 });
     const input: unknown = await request.json();
     if (!input || typeof input !== "object" || Array.isArray(input)) return new Response("Bad payload", { status: 400 });
@@ -84,7 +88,13 @@ nativeTest("static PR Host keeps stock inference tool-free after detach and jour
       `import { writeFileSync } from "node:fs"; export default function () { writeFileSync(${JSON.stringify(ambientCanary)}, "loaded"); }`,
       { mode: 0o600 });
     await fs.writeFile(resource, resourceContents, { mode: 0o600 });
-    const config = JSON.stringify({ disabledProviders: nativeDisabledProviders, goal: { enabled: true } });
+    await fs.writeFile(join(agent, "SYSTEM.md"), ambientContext, { mode: 0o600 });
+    await fs.writeFile(join(agent, "mcp.json"), JSON.stringify({
+      mcpServers: { ambient: { type: "http", url: `${server.url.origin}/ambient-mcp` } },
+    }), { mode: 0o600 });
+    const config = JSON.stringify({ disabledProviders: nativeDisabledProviders, goal: { enabled: true },
+      plan: { enabled: true, defaultOnStartup: true }, speechgen: { enabled: true }, externalThinking: true,
+      dev: { autoqa: true } });
     await fs.writeFile(join(agent, "config.yml"), config, { mode: 0o600 });
     const chat = (id: string) => ({ id, name: id, contextWindow: 32768, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -153,8 +163,12 @@ nativeTest("static PR Host keeps stock inference tool-free after detach and jour
     for (const [index, request] of wire.entries()) {
       expect(request.model).toBe(index < beforeSelection ? previous.previousModelId : replacement.modelId);
       expect(request.tools ?? []).toEqual([]);
+      expect(request.functions ?? []).toEqual([]);
+      expect(request.mcp_servers ?? []).toEqual([]);
       expect(JSON.stringify(request.messages)).not.toContain(resourceContents);
+      expect(JSON.stringify(request.messages)).not.toContain(ambientContext);
     }
+    expect(ambientMcpRequests).toBe(0);
     await expect(fs.lstat(builtinCanary)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.lstat(writeCanary)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.lstat(ambientCanary)).rejects.toMatchObject({ code: "ENOENT" });

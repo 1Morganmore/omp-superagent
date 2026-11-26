@@ -49,12 +49,12 @@
     "bun": ">=1.4.4"
   },
   "dependencies": {
-    "@oh-my-pi/pi-ai": "19.1.1",
-    "@oh-my-pi/pi-catalog": "19.1.1",
-    "@oh-my-pi/pi-coding-agent": "19.1.1",
-    "@oh-my-pi/pi-natives": "19.1.1",
-    "@oh-my-pi/pi-tui": "19.1.1",
-    "@oh-my-pi/pi-utils": "19.1.1",
+    "@oh-my-pi/pi-ai": "19.2.1",
+    "@oh-my-pi/pi-catalog": "19.2.1",
+    "@oh-my-pi/pi-coding-agent": "19.2.1",
+    "@oh-my-pi/pi-natives": "19.2.1",
+    "@oh-my-pi/pi-tui": "19.2.1",
+    "@oh-my-pi/pi-utils": "19.2.1",
     "@sinclair/typebox": "^0.34.41",
     "cron-parser": "5.10.6"
   },

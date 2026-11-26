@@ -75,8 +75,9 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
       const argv = resolveCliArgv(bootstrap.argv);
       if ("error" in argv) throw new Error(argv.error);
       const parsed = parseArgs(argv.argv.slice(1));
+      const emptyToolSelection = parsed.tools?.length === 0;
       if (options.prReviewOnly) {
-        if (parsed.noTools !== true || parsed.tools !== undefined || !parsed.noExtensions ||
+        if (parsed.noTools === true || !emptyToolSelection || !parsed.noExtensions ||
             !parsed.noSkills || !parsed.noRules || !parsed.noContextFiles || !parsed.noLsp ||
             !parsed.noTitle || !parsed.noPrewalk || !parsed.offline ||
             parsed.trustedExtensions?.length !== 1 || parsed.config?.length !== 1 || parsed.config[0] !== manifest.configPath)
@@ -153,6 +154,7 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
       }
       const { hostInventoryManifest } = await import("./host-inventory-manifest");
       return { toolsExplicitlySelected: parsed.tools !== undefined, noTools: parsed.noTools === true,
+        ...(options.prReviewOnly ? { emptyToolSelection } : {}),
         inventory: await hostInventoryManifest(manifest.processBackend, options.cwd) };
     }
     case "inventory": {

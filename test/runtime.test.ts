@@ -6,7 +6,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { basename, delimiter, dirname, join } from "node:path";
 import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequest, Inbound, Lane, LaneModel, LanePresetSnapshot, ResolvedLanePreset, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "../src/contracts";
 import { physicalRoute, physicalRouteKey, routeKey } from "../src/contracts";
-import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import { containsMagicKeyword } from "@oh-my-pi/pi-coding-agent/session/magic-keywords";
 import { type Config, hostPaths } from "../src/config";
 import { parseDiscordCommand } from "./oracles/bun-gateway/discord-commands";
 import { PR_REVIEW_INPUT_PREFIX, type HostOptions } from "../src/host";

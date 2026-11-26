@@ -72,9 +72,7 @@ function git(root: string, ...args: string[]): string {
 }
 
 function expectRestrictedTools(request: Wire, required: readonly string[]) {
-  const names = (request.tools ?? []).map(tool => tool.function.name).sort();
-  // Some stock CLIs also advertise the QA reporter in restricted mode.
-  expect([required, [...required, "report_issue"].sort()]).toContainEqual(names);
+  expect((request.tools ?? []).map(tool => tool.function.name).sort()).toEqual([...required]);
 }
 
 test.skipIf(!capable)("restricted chat stays stateless without work tools or filesystem expansion", async () => {
@@ -178,6 +176,26 @@ test.skipIf(!capable)("restricted work edits only its detached checkout, without
     expect(JSON.stringify(fx.requests)).not.toContain(scopeSecret);
   } finally { await fx.cleanup(); }
 }, 240_000);
+
+test.skipIf(!capable)("restricted work refuses an unsolicited built-in shell call", async () => {
+  const fx = await fixture((_wire, stateDir, count) => count === 1
+    ? toolResponse([["shell", "bash", { command: `printf canary > '${join(stateDir, "shell-executed")}'` }]])
+    : response({ content: "Do not report a successful run" }, "stop"));
+  try {
+    const repository = join(fx.root, "repo");
+    await mkdir(repository);
+    git(repository, "init");
+    git(repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "setup");
+    const result = await runRestrictedGroup({
+      mode: "work", text: "Review the checkout", id: "job:shell-refusal",
+      repository, executable, model, stateDir: fx.stateDir,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.text).toBeUndefined();
+    expect(fx.requests[1]?.messages.some(message => message.role === "tool" && message.tool_call_id === "shell")).toBe(true);
+    expect(await Bun.file(join(fx.stateDir, "shell-executed")).exists()).toBe(false);
+  } finally { await fx.cleanup(); }
+}, 60_000);
 
 test.skipIf(!capable)("cancelling a live restricted request does not deliver model text", async () => {
   const stop = new AbortController();

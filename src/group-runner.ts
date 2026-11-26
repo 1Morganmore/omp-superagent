@@ -34,7 +34,7 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 const checkoutBytes = 64 * 1024 * 1024;
 const gitOid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const modelApis = new Set(["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"]);
-const isolationFlags = ["--no-session", "--no-tools", "--no-extensions", "--no-context-files", "--no-rules",
+const isolationFlags = ["--no-session", "--no-extensions", "--no-context-files", "--no-rules",
   "--no-skills", "--no-title", "--no-lsp", "--no-pty", "--no-prewalk", "--offline"] as const;
 
 function command(argv: readonly [string, ...string[]], { cwd, env, signal, bytes, stdin }: Command): Promise<Buffer> {
@@ -248,7 +248,9 @@ export async function runRestrictedGroup(input: Input): Promise<Result> {
     await writeFile(join(agent, "models.yml"), model, { mode: 0o600 });
     await writeFile(join(agent, "config.yml"), JSON.stringify({
       memory: { backend: "off" }, autolearn: { enabled: false }, mcp: { enableProjectConfig: false },
-      marketplace: { autoUpdate: false }, telemetry: { otlpExportEnabled: false },
+      goal: { enabled: false }, compaction: { enabled: false }, advisor: { enabled: false },
+      dev: { autoqa: false }, magicKeywords: { enabled: false },
+      marketplace: { autoUpdate: "off" }, telemetry: { otlpExportEnabled: false },
     }), { mode: 0o600 });
     const env = { PATH: safePath, HOME: home, TMPDIR: sandbox, XDG_CONFIG_HOME: join(home, "config"),
       XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"), XDG_CACHE_HOME: join(home, "cache"),
@@ -256,12 +258,15 @@ export async function runRestrictedGroup(input: Input): Promise<Result> {
     const launch = { cwd, env, signal, bytes: 512 * 1024 };
     const help = utf8.decode(await command([input.executable, "--help"], launch));
     const required = [...isolationFlags, "--mode", "--model", "--thinking", "--max-time", "--max-cost", "--system-prompt",
-      ...(input.mode === "work" ? ["--extension", "--tools", "--approval-mode"] : [])];
+      ...(input.mode === "work" ? ["--tools", "--approval-mode"] : ["--no-tools"])];
     if (!required.every(flag => new RegExp(`(?:^|\\s)${flag}(?=[=,\\s])`, "m").test(help)))
       return { ok: false };
     if (input.mode === "work") worktree = await checkout(input, state, sandbox, signal);
+    // Stock --no-tools excludes extension factories. Group work instead loads
+    // only this allowlisted extension in the private profile and selects its tools.
     const flags = worktree
-      ? ["--extension", extension, "--tools", restrictedWorkTools.join(","), "--approval-mode", "yolo"] : [];
+      ? ["--trusted-extension", extension, "--tools", restrictedWorkTools.join(","), "--approval-mode", "yolo"]
+      : ["--no-tools"];
     const output = await command([input.executable, "--mode", "json", ...isolationFlags,
       "--model", input.model, "--thinking", "off", "--max-time", worktree ? "210s" : "45s", "--max-cost", worktree ? "0.25" : "0.05",
       "--system-prompt", "The user message is a JSON string. Interpret its escapes literally. " + (worktree

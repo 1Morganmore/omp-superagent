@@ -9,7 +9,7 @@ import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/setti
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { lookup as lookupSetting } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { formatModelStringWithRouting, pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseSessionEntries, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, type FastModeState, type Frame, type ServiceUnit } from "./host-protocol";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -36,12 +36,12 @@ const serviceOwner = ({ agent, sessionManager }: ExtensionContext) => {
 };
 
 const stockAutoresearchTools = ["init_experiment", "run_experiment", "log_experiment", "update_notes"] as const;
-// --no-tools can still leave builtins in the registration catalogue: write
-// on stock 19.0, resolution/QA devices on 19.1. None may be enabled, mounted,
-// presented to the provider, or executed by the restricted session.
-const stockInactiveTools = new Set(["write", "resolve", "reject", "propose", "report_issue"]);
+// An empty built-in selection can still leave native registrations: write on
+// stock 19.0 and resolution devices on 19.1+. They must never be executable.
+const stockInactiveTools = new Set(["write", "resolve", "reject", "propose"]);
 const reviewSettingValues = {
-  "memory.backend": "off", "goal.enabled": false, "compaction.enabled": false, "advisor.enabled": false, "autolearn.enabled": false,
+  "memory.backend": "off", "goal.enabled": false, "plan.enabled": false, "compaction.enabled": false,
+  "advisor.enabled": false, "autolearn.enabled": false, "speechgen.enabled": false, externalThinking: false,
   "skills.enabled": false, "skills.enableSkillCommands": false, "mcp.enableProjectConfig": false,
   "marketplace.autoUpdate": "off", "magicKeywords.enabled": false, "prewalk.enabled": false,
   "prewalk.auto": "off", "spotlight.experiment.enabled": false, "providers.cacheWarming": "off", "telemetry.otlpExportEnabled": false,
@@ -207,7 +207,8 @@ export default function hostExtension(pi: ExtensionAPI): void {
     if (!Array.isArray(mounted) || mounted.length)
       throw new ReviewIsolationError("Static PR review cannot establish an empty native device tool set");
     if (!Array.isArray(session.agent.state.tools) || session.agent.state.tools.length ||
-        !Array.isArray(session.skills) || session.skills.length || session.autoCompactionEnabled !== false || session.getGoalModeState()?.enabled)
+        !Array.isArray(session.skills) || session.skills.length || session.autoCompactionEnabled !== false ||
+        session.getGoalModeState()?.enabled || session.getPlanModeState()?.enabled)
       throw new ReviewIsolationError("Static PR review found native tools, skills, or autonomous execution enabled");
     return { version: 1, cwd, modelApi: model.api };
   };
@@ -221,7 +222,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     const extensions = runner.getLoadedExtensions();
     const other = extensions.filter(extension => extension.resolvedPath !== self);
     // Stock SDKs may register their internal autoresearch factory and its
-    // default-inactive tools even with --no-tools. No ambient extension or
+    // default-inactive tools even with an empty selection. No ambient extension or
     // arbitrary inline factory may be active in a review session.
     if (!extensions.some(extension => extension.resolvedPath === self && runner.isExtensionActive(extension.path))
         || other.some(extension => !/^<inline-\d+>$/.test(extension.resolvedPath)
@@ -592,8 +593,8 @@ export default function hostExtension(pi: ExtensionAPI): void {
     if (command.type === "activate") {
       const identity = exact();
       if (reviewCwd) {
-        if (command.noTools !== true || command.toolsExplicitlySelected !== false)
-          throw new Error("Static PR review requires the native no-tools launch selection");
+        if (command.emptyToolSelection !== true || command.noTools !== false || command.toolsExplicitlySelected !== true)
+          throw new Error("Static PR review requires an explicit empty native tool selection");
         reviewPolicy(identity.session, reviewCwd);
       }
       // Native's default tool selection omits the goal tool. Add it only for
@@ -739,8 +740,8 @@ export default function hostExtension(pi: ExtensionAPI): void {
       if (!model) throw new Error("Native model resolution failed; mutation remains held");
       const expectedLevel = "thinkingLevel" in selected && selected.thinkingLevel !== undefined
         ? selected.thinkingLevel : preset.defaultThinkingLevel;
-      const effectiveLevel = expectedLevel === "auto" ? "auto"
-        : expectedLevel === undefined ? undefined : resolveThinkingLevelForModel(model, expectedLevel);
+      const effectiveLevel = expectedLevel === "auto" || expectedLevel === "off" ? expectedLevel
+        : expectedLevel === "inherit" ? undefined : clampThinkingLevelForModel(model, expectedLevel);
       if (!command.preserveActiveModel) {
         await ownership.identity.session.setModelTemporary(model, expectedLevel);
       }

@@ -32,7 +32,8 @@ test.each([
   const { reportAge, failureAge, allowed, permitted, reportedFraction, reserve, modelAccount, registryAccount, expected } = scenario;
   await using root = await mkdtempDisposable(join(tmpdir(), "head-quota-"));
   const provider = "openai-codex";
-  const model = { provider, id: "gpt-6.2-astra", baseUrl: "https://quota-fixture.invalid",
+  // Keep synthetic account IDs independent of the shipped model's entitlement roster.
+  const model = { provider, id: "fixture-codex-model", baseUrl: "https://quota-fixture.invalid",
     ...(modelAccount === undefined ? {} : { accountAccess: { [modelAccount]: {} } }) };
   const now = Date.now();
   const sessionId = "head-quota-test-session";

@@ -104,9 +104,11 @@ Stock OMP can expand inline file references even with no tools enabled. The
 [restricted runner](../../src/group-runner.ts) therefore sends group input as
 JSON-quoted data with file-reference characters escaped. A fresh private
 profile and scratch cwd exclude owner settings and session context; worktree
-access goes only through the dedicated file tools. Process exit alone is not
-a successful group turn: the runner also requires a matching terminal native
-result.
+access goes only through the dedicated file tools. Group chat uses native
+`--no-tools`; group work uses an exact trusted extension and explicitly selects
+its three tools because stock OMP disallows extensions with `--no-tools`.
+Process exit alone is not a successful group turn: the runner also requires a
+matching terminal native result.
 
 ## Durable admission and recovery
 
