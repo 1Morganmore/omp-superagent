@@ -776,7 +776,9 @@ describe("Telegram approvals and exact-card interaction", () => {
       };
       runtime = createHead(headStore);
       await runtime.start();
-      await eventually(() => server.headReady);
+      // Detach after the initial history frame is receipted: the approval
+      // answer below must be the first event in this offline interval.
+      await eventually(() => server.headReady && gateway.pending() === 0);
       const original = headStore.approvals("lane")[0]!;
       const id = Number(original.remoteId);
       const card = structuredClone(http.remote.get(id)!);

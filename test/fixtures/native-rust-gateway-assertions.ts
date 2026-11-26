@@ -37,8 +37,11 @@ export const headInput = (id: string) => input(id, `/head Native lifecycle reque
 
 export function ledger<T>(fixture: NativeRustGateway, inspect: (db: Database) => T): T {
   const db = new Database(join(fixture.root, "coordination.sqlite"), { readonly: true, strict: true });
-  try { return inspect(db); }
-  finally { db.close(); }
+  try {
+    // The successor can be recovering the WAL after the predecessor crashed.
+    db.run("PRAGMA busy_timeout = 5000");
+    return inspect(db);
+  } finally { db.close(); }
 }
 
 export function meta(db: Database, key: string): string | undefined {

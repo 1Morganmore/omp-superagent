@@ -107,6 +107,7 @@ export function gatewayFixture(root: string, profile: "debug" | "release" = "deb
       // daemon proves ownership. Only send status to the published listener.
       const db = new Database(join(root, "coordination.sqlite"), { readonly: true });
       try {
+        db.run("PRAGMA busy_timeout = 5000");
         const owner = db.query<{ pid: number; dev: number; ino: number }, []>(
           `SELECT json_extract(value,'$.pid') AS pid, json_extract(value,'$.dev') AS dev,
             json_extract(value,'$.ino') AS ino FROM metadata WHERE key='gateway:socket'`).get();
