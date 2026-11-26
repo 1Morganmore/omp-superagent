@@ -295,6 +295,7 @@ interface Live {
   headJobPromptSeen?: boolean;
   headJobBatch?: Map<string, string>;
   headJobMixed?: boolean;
+  headJobCleanAnswer?: string;
   releasing?: boolean;
   lostDuringRelease?: boolean;
   nextReleaseProbe?: number;
@@ -8422,6 +8423,7 @@ export class Superagent {
       live.scopeReviewRequested = false;
       live.headJobStarts = undefined;
       live.headJobMixed = false;
+      live.headJobCleanAnswer = undefined;
       live.scopeReviewUnsafe = false;
       if (live.id === "main") this.markActiveLaneReview(this.isLaneRecoveryReport(input.id) || input.id.startsWith(scopeReviewPrefix)
         ? input.id : undefined);
@@ -8575,13 +8577,22 @@ export class Superagent {
       && live.headJobOwners?.size)) return;
     const input = live.input;
     if (message.role === "user" && !message.synthetic && input) {
-      const first = Array.isArray(message.content) ? record(message.content[0]).text : message.content;
+      const first = Array.isArray(message.content)
+        ? record(message.content.find(part => record(part).type === "text")).text : message.content;
       if (typeof first === "string") {
-        for (const match of first.matchAll(/^`{3,}superagent-runtime-context\nRequest ID: ([^\n]+)\n/gm)) {
+        for (const match of first.matchAll(/^`{3,}superagent-runtime-context\r?\nRequest ID: ([^\r\n]+)\r?\n/gm)) {
           if (!input.workflow && match.index !== 0) break;
           if (match[1] === input.id) { live.headJobPromptSeen = true; break; }
         }
       }
+    }
+    if (message.role === "assistant" && live.headJobPromptSeen && live.running && !live.headJobMixed) {
+      // Once a foreign result enters the run, only the final answer that
+      // was already observed can still be attributed to the input.
+      if (message.stopReason === "stop")
+        live.headJobCleanAnswer = assistantText(message) ?? live.headJobCleanAnswer;
+      else if (message.stopReason === "error" || message.stopReason === "aborted")
+        live.headJobCleanAnswer = undefined;
     }
     if (message.role === "toolResult" && live.headJobPromptSeen && live.running && message.isError !== true) {
       const job = record(record(message.details).async);
@@ -9009,7 +9020,7 @@ export class Superagent {
       const state = completed ? "done" : outcome === "aborted" || toolFree ? "cancelled" : "uncertain";
       headFailed = live.id === "main" && state === "uncertain";
       const text = completed ? (live.headJobMixed
-        ? "다른 요청의 백그라운드 결과와 함께 생성된 응답이라 이 대화에 전달하지 않았습니다. HEAD 세션에서 확인할 수 있습니다."
+        ? live.headJobCleanAnswer ?? "다른 요청의 백그라운드 결과와 함께 생성된 응답이라 이 대화에 전달하지 않았습니다. HEAD 세션에서 확인할 수 있습니다."
         : result!.agentInvoked || result!.goalResume && live.ownedRuns > 0 ? earlyAnswer ?? live.text : "") : outcome === "aborted"
         ? "실행이 중단되었습니다. 작업 완료로 처리하지 않았습니다."
         : laneError

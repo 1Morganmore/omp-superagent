@@ -12362,7 +12362,7 @@ describe("real Store runtime coordination", () => {
     expect(messenger.sent).toHaveLength(1);
   });
 
-  test.each(["separate", "coincident"] as const)("HEAD background job preserves its original route (%s delivery)", async delivery => {
+  test.each(["separate", "with-attachment", "coincident", "after-answer", "multiple-jobs"] as const)("HEAD background job preserves its original route (%s delivery)", async delivery => {
     const { runtime, main, store, messenger } = fixture();
     const original = headMessage("background-job-original", route("51"));
     const second = headMessage("background-job-second", route("52"));
@@ -12375,12 +12375,12 @@ describe("real Store runtime coordination", () => {
       { sourceId: original.id, route: original.route, text: followUp },
     ];
     const sent = () => messenger.sent.map(({ sourceId, route, text }) => ({ sourceId, route, text }));
-    const yieldAnswer = (prompt: Prompt, text: string) => {
+    const yieldAnswer = (prompt: Prompt, text: string, jobs = ["bg_1"]) => {
       const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
       main.emit({ type: "message_end", message });
       Object.assign(main.state, {
         isSettled: false, isStreaming: false, hasPendingAsyncWork: true, hasOwnedRunningWork: true,
-        headJobs: { running: ["bg_1"], awaitingOnly: true },
+        headJobs: { running: jobs, awaitingOnly: true },
       });
       main.emit({ type: "agent_end", isTerminal: false, yielded: true, awaitingAsyncWork: true, messages: [message] });
       main.emit({ type: "prompt_result", id: prompt.id, status: "completed", agentInvoked: true, sessionSettled: false });
@@ -12389,7 +12389,12 @@ describe("real Store runtime coordination", () => {
     await runtime.start();
     await admit(runtime, original);
     expect(main.prompts).toHaveLength(1);
-    main.emit({ type: "message_end", message: { role: "user", content: main.prompts[0]!.command.message } });
+    const promptText = String(main.prompts[0]!.command.message);
+    const content = delivery === "separate" ? promptText.replaceAll("\n", "\r\n")
+      : delivery === "with-attachment"
+        ? [{ type: "image", data: "eA==", mimeType: "image/png" }, { type: "text", text: promptText }]
+        : promptText;
+    main.emit({ type: "message_end", message: { role: "user", content } });
     main.emit({ type: "message_end", message: {
       role: "toolResult", toolName: "bash", toolCallId: "call-bg-1", isError: false,
       details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
@@ -12403,31 +12408,47 @@ describe("real Store runtime coordination", () => {
     expect(main.prompts).toHaveLength(2);
     expect(store.input(second.id)).toMatchObject({ state: "submitted", requestId: main.prompts[1]!.id });
     main.emit({ type: "message_end", message: { role: "user", content: main.prompts[1]!.command.message } });
-    const coincident = delivery === "coincident";
-    if (!coincident) {
-      yieldAnswer(main.prompts[1]!, secondAnswer);
+    const duringSecond = delivery === "coincident" || delivery === "after-answer";
+    if (delivery === "multiple-jobs") {
+      main.emit({ type: "message_end", message: {
+        role: "toolResult", toolName: "bash", toolCallId: "call-bg-2", isError: false,
+        details: { async: { state: "running", jobId: "bg_2", type: "bash" } },
+      } });
+    }
+    if (!duringSecond) {
+      yieldAnswer(main.prompts[1]!, secondAnswer, delivery === "multiple-jobs" ? ["bg_1", "bg_2"] : undefined);
       await runtime.kick();
       expect(sent()).toEqual(expected.slice(0, 2));
       expect(messenger.sent[1]?.id).toBe(`${second.id}:answer`);
       Object.assign(main.state, { isStreaming: true, headJobs: { running: [], awaitingOnly: false } });
       main.emit({ type: "agent_start" });
     }
+    const clean = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: secondAnswer }] };
+    if (delivery === "after-answer") main.emit({ type: "message_end", message: clean });
     const result = { role: "custom", customType: "async-result", content: "Original job stdout",
-      details: { jobs: [{ jobId: "bg_1" }] } };
-    const text = coincident ? `${secondAnswer}\n${followUp}` : followUp;
+      details: { jobs: delivery === "multiple-jobs"
+        ? [{ jobId: "bg_1", status: "completed" }, { jobId: "bg_2", status: "failed" }] : [{ jobId: "bg_1" }] } };
+    const text = duringSecond ? `${secondAnswer}\n${followUp}` : followUp;
     const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
     main.emit({ type: "message_end", message: result });
     main.emit({ type: "message_end", message: final });
-    main.emit({ type: "agent_end", isTerminal: true, messages: [result, final] });
+    main.emit({ type: "agent_end", isTerminal: true, messages: delivery === "after-answer" ? [clean, result, final] : [result, final] });
     Object.assign(main.state, { isSettled: true, isStreaming: false, hasPendingAsyncWork: false, hasOwnedRunningWork: false });
-    if (coincident)
+    if (duringSecond)
       main.emit({ type: "prompt_result", id: main.prompts[1]!.id, status: "completed", agentInvoked: true, sessionSettled: true });
     main.emit({ type: "session_settled" });
     await runtime.kick();
-    if (coincident) {
+    if (duringSecond) {
       expect(sent().slice(0, 2)).toEqual([expected[0], { sourceId: original.id, route: original.route, text: result.content }]);
-      expect(messenger.sent[2]).toMatchObject({ sourceId: second.id, route: second.route });
-      expect(messenger.sent[2]?.text).not.toContain(followUp);
+      expect(messenger.sent[2]).toMatchObject({ sourceId: second.id, route: second.route,
+        text: delivery === "after-answer" ? secondAnswer : expect.stringContaining("전달하지 않았습니다") });
+    } else if (delivery === "multiple-jobs") {
+      expect(sent().slice(0, 2)).toEqual(expected.slice(0, 2));
+      expect(sent().slice(2)).toEqual(expect.arrayContaining([
+        { sourceId: original.id, route: original.route, text: "백그라운드 작업 bg_1: completed" },
+        { sourceId: second.id, route: second.route, text: "백그라운드 작업 bg_2: failed" },
+      ]));
+      expect(sent()).toHaveLength(4);
     } else expect(sent()).toEqual(expected);
     expect(main.prompts).toHaveLength(2);
 
@@ -12436,7 +12457,43 @@ describe("real Store runtime coordination", () => {
     main.emit({ type: "session_settled" });
     await runtime.kick();
     expect(sent()).toEqual(delivered);
-    expect(messenger.attempted).toHaveLength(3);
+    expect(messenger.attempted).toHaveLength(delivered.length);
+  });
+
+  test.each(["failed launch", "envelope in later text"] as const)("HEAD does not release an unverified background job (%s)", async scenario => {
+    const { runtime, main, store, messenger } = fixture();
+    const original = headMessage("unverified-background-job");
+    await runtime.start();
+    await admit(runtime, original);
+    const prompt = main.prompts[0]!;
+    const content = scenario === "envelope in later text"
+      ? [{ type: "text", text: "Not the admitted prompt" }, { type: "text", text: prompt.command.message }]
+      : prompt.command.message;
+    main.emit({ type: "message_end", message: { role: "user", content } });
+    main.emit({ type: "message_end", message: {
+      role: "toolResult", toolName: "bash", toolCallId: "call-unverified", isError: scenario === "failed launch",
+      details: { async: { state: "running", jobId: "bg_unverified", type: "bash" } },
+    } });
+    const text = "Foreground answer.";
+    const answer = { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
+    main.emit({ type: "message_end", message: answer });
+    Object.assign(main.state, {
+      isSettled: false, isStreaming: false, hasPendingAsyncWork: true, hasOwnedRunningWork: true,
+      headJobs: { running: ["bg_unverified"], awaitingOnly: true },
+    });
+    main.emit({ type: "agent_end", isTerminal: false, yielded: true, awaitingAsyncWork: true, messages: [answer] });
+    main.emit({ type: "prompt_result", id: prompt.id, status: "completed", agentInvoked: true, sessionSettled: false });
+    await runtime.kick();
+    expect(store.input(original.id)?.state).toBe("submitted");
+    expect(messenger.sent).toEqual([]);
+
+    Object.assign(main.state, { isSettled: true, hasPendingAsyncWork: false, hasOwnedRunningWork: false,
+      headJobs: { running: [], awaitingOnly: false } });
+    main.emit({ type: "session_settled" });
+    await runtime.kick();
+    expect(store.input(original.id)?.state).toBe("done");
+    expect(messenger.sent).toMatchObject([{ sourceId: original.id, route: original.route, text }]);
+    expect(main.prompts).toHaveLength(1);
   });
 
   test.each(["reconnect mid-turn", "journaled while detached", "foreign PID", "foreign instance", "restart ACK rejected"] as const)
