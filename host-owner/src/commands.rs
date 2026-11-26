@@ -234,7 +234,7 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
     }
     if matches!(
         command.name.as_str(),
-        "shutdown_host" | "set_model_preset" | "set_pr_review_model" | "set_lane_model"
+        "shutdown_host" | "set_model_preset" | "set_pr_review_model" | "set_lane_model" | "set_head_fast_mode"
     ) {
         if state.maintenance_active || state.active_commands != 0 || !state.requests.is_empty() {
             return command.respond(peer, busy("Host is busy (session_busy)"));

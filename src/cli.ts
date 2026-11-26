@@ -94,6 +94,7 @@ Owner controls in chat (not shell commands):
   /model [list|provider/id]     Inspect or select the shared HEAD model; changes require an idle HEAD.
   /model preset [list|NAME]     Inspect or select a preset. Only NAME --global also saves future defaults.
   /effort [LEVEL]               Inspect or change HEAD thinking effort; existing lanes keep their settings.
+  /fast                        Open the HEAD fast tier menu; select a mode and press Confirm.
   /compact [instructions]       Compact idle HEAD context, optionally with multiline instructions.
   /cron [help]                  Schedule and manage one-time or recurring jobs in this conversation.
   /cron pr-add "every 5m" OWNER/REPO  Review newly opened external PRs and comment on GitHub (Discord guild parent).

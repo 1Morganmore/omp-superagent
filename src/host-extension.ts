@@ -11,7 +11,7 @@ import { lookup as lookupSetting } from "@oh-my-pi/pi-coding-agent/config/regist
 import { formatModelStringWithRouting, pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
 import { parseSessionEntries, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, type Frame, type ServiceUnit } from "./host-protocol";
+import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, type FastModeState, type Frame, type ServiceUnit } from "./host-protocol";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -492,6 +492,14 @@ export default function hostExtension(pi: ExtensionAPI): void {
       && !session.yieldQueue.has()
       && !session.getGoalModeState()?.enabled;
   };
+  const headFastMode = (session: NativeSession): FastModeState | undefined => {
+    if (process.env.OMP_SUPERAGENT_ROLE !== "head" || typeof session.setFastMode !== "function"
+      || typeof session.setUltrafastMode !== "function" || typeof session.isUltrafastModeEnabled !== "function") return;
+    return {
+      mode: session.isUltrafastModeEnabled() ? "ultra" : session.isFastModeEnabled() ? "on" : "off",
+      active: session.isFastModeActive(),
+    };
+  };
   const rotationState = (): RotationNative | null => {
     if (process.env.OMP_SUPERAGENT_ROLE !== "head" || !localIdle()) return null;
     const { id, file, session } = exact();
@@ -616,11 +624,32 @@ export default function hostExtension(pi: ExtensionAPI): void {
       return { ...ownerIdentity(ownership.identity), loadedSuperkitPath, prReviewPolicy, settingsScope: "session", modelSettings: snapshot(),
         journalCursorControlVersion: 1,
         ...(replyVoice?.available() ? { replyVoiceControlVersion: 2 } : {}),
+        fastMode: headFastMode(ownership.identity.session),
         hasOwnedRunningWork: ownership.unknown ? undefined : ownership.busy, mutationHeld, observationHeld,
         admitted: ownership.identity.session.hasAdmittedSubmission,
         postPromptWork: ownership.identity.session.hasPostPromptWork,
         ...(typeof ownership.identity.session.configuredThinkingLevel === "function"
           ? { configuredThinkingLevel: ownership.identity.session.configuredThinkingLevel() ?? null } : {}) };
+    }
+    if (command.type === "set_head_fast_mode") {
+      const { mode } = command;
+      if (mode !== "on" && mode !== "ultra" && mode !== "off") throw new Error("Invalid fast mode");
+      if (!localIdle()) throw new Error("session_busy");
+      const ownership = await owned(true);
+      const { session, ref } = ownership.identity;
+      if (ownership.unknown || ownership.busy || exact().ref !== ref || !localIdle()) throw new Error("session_busy");
+      if (!headFastMode(session) || !session.model || session.model.provider !== command.provider
+        || session.model.id !== command.modelId) return { result: "unavailable" };
+      mutationHeld = true;
+      const applied = mode === "ultra" ? session.setUltrafastMode(true) : session.setFastMode(mode === "on");
+      if (!applied) {
+        mutationHeld = false;
+        return { result: "unsupported" };
+      }
+      if (headFastMode(session)?.mode !== mode) throw new Error("Native fast tier readback differs");
+      session.sessionManager.flushSync();
+      mutationHeld = false;
+      return { result: "applied" };
     }
     if (command.type === "set_lane_model") {
       if (reviewCwd || process.env.OMP_SUPERAGENT_ROLE !== "lane")

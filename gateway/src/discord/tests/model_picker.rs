@@ -50,14 +50,19 @@ async fn click(
     value: Option<&Value>,
 ) -> Value {
     let id = sequence.to_string();
+    let callback = component_interaction(&id, source, control, value);
+    dispatch(socket, sequence, "INTERACTION_CREATE", callback).await;
+    received(observed, &format!("/interactions/{id}/offline-interaction/callback")).await
+}
+
+fn component_interaction(id: &str, source: &Value, control: &Value, value: Option<&Value>) -> Value {
     let mut data = json!({"custom_id":control["custom_id"],"component_type":control["type"]});
     if let Some(value) = value {
         data["values"] = json!([value]);
     }
-    let mut callback = thread_interaction(&id, 3, data);
+    let mut callback = thread_interaction(id, 3, data);
     callback["message"] = source.clone();
-    dispatch(socket, sequence, "INTERACTION_CREATE", callback).await;
-    received(observed, &format!("/interactions/{id}/offline-interaction/callback")).await
+    callback
 }
 
 fn select(card: &Value, row: usize) -> &Value {
@@ -70,7 +75,8 @@ fn select(card: &Value, row: usize) -> &Value {
 }
 
 fn button<'a>(card: &'a Value, label: &str) -> &'a Value {
-    card["components"][2]["components"].as_array().unwrap().iter()
+    card["components"].as_array().unwrap().iter()
+        .flat_map(|row| row["components"].as_array().unwrap())
         .find(|button| button["type"] == 2 && button["label"] == label)
         .unwrap_or_else(|| panic!("missing {label} button"))
 }
@@ -160,6 +166,86 @@ async fn scoped_model_card_browses_and_admits_only_the_current_target_and_page()
     assert_eq!(picked["input"]["pickerSelection"],
         json!({"outputId":"lane-model-card","cardId":"701","group":1,"option":9,"target":"lane"}));
     let reply = click(&mut socket, &mut observed, 14, &lane_page, lane_select, Some(value)).await;
+    refused(&reply, &store);
+
+    hub.stop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn discord_fast_picker_admits_only_one_confirmation_on_the_original_owner_card() {
+    let (_temporary, store, hub, ws, mut observed, _, server) =
+        discord_fixture(json!({"discord":{}})).await;
+    let mut socket = addressing_tests::start(&hub, &ws, false).await;
+    let slash = thread_interaction("3", 2, json!({"type":1,"name":"fast"}));
+    dispatch(&mut socket, 3, "INTERACTION_CREATE", slash).await;
+    let ack = received(&mut observed, "/interactions/3/offline-interaction/callback").await;
+    assert_eq!(ack["type"], 4);
+    let opened = event(&hub, &store).await;
+    let input = &opened["input"];
+    let route = &input["route"];
+    assert_eq!(input["text"], "/fast");
+    assert_eq!(input["interactionId"], "3");
+    assert_eq!(input["messageId"], Value::Null);
+    assert_eq!(route, &json!({"platform":"discord","accountId":"71","authorityId":"42",
+        "guildId":"77","channelId":"88","threadId":"90"}));
+
+    let remote = hub.effect("send", &[json!({
+        "id":"fast-card","route":route,"text":"Fast mode: off",
+        "picker":{"kind":"fast","current":"off","expiresAt":crate::store::now().unwrap()+300_000,
+            "groups":[{"label":"Fast mode","options":["off","on","ultra"]}]}
+    })]).await.unwrap();
+    let posted = received(&mut observed, "/channels/90/messages").await;
+    assert_eq!(posted["components"].as_array().unwrap().len(), 2);
+    assert_eq!(store.pending().unwrap(), 0, "posting does not admit a change");
+    let card = json!({"id":remote,"guild_id":"77","channel_id":"90","author":{"id":"71","bot":true},
+        "components":posted["components"]});
+    let menu = select(&card, 0);
+    assert_eq!(menu["options"], json!([
+        {"label":"✓ off","value":"0"},{"label":"on","value":"1"},{"label":"ultra","value":"2"}
+    ]));
+    let ultra = &menu["options"][2]["value"];
+    let reply = click(&mut socket, &mut observed, 4, &card, menu, Some(ultra)).await;
+    assert_eq!(reply["type"], 7);
+    let text = reply["data"]["content"].as_str().unwrap();
+    assert!(text.contains("shared HEAD") && text.contains("ultra"));
+    assert_eq!(store.pending().unwrap(), 0, "the first choice must only edit the card");
+    let mut review = card.clone();
+    review["components"] = reply["data"]["components"].clone();
+    let rows = review["components"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "confirmation must not render an empty select");
+    assert_eq!(rows[0]["components"].as_array().unwrap().len(), 3);
+    for label in ["Back", "Cancel"] {
+        assert!(button(&review, label)["custom_id"].is_string());
+    }
+    let confirm = button(&review, "Confirm");
+
+    let reply = click(&mut socket, &mut observed, 5, &card, menu, Some(ultra)).await;
+    refused(&reply, &store);
+    for (sequence, field, invalid) in [
+        (6, "/member/user/id", "43"),
+        (7, "/message/id", "702"),
+    ] {
+        let id = sequence.to_string();
+        let mut forged = component_interaction(&id, &review, confirm, None);
+        *forged.pointer_mut(field).expect("callback field") = json!(invalid);
+        dispatch(&mut socket, sequence, "INTERACTION_CREATE", forged).await;
+        let reply = received(&mut observed, &format!("/interactions/{id}/offline-interaction/callback")).await;
+        refused(&reply, &store);
+    }
+
+    let closed = click(&mut socket, &mut observed, 8, &review, confirm, None).await;
+    assert_eq!(closed["type"], 7);
+    assert_eq!(closed["data"]["components"], json!([]));
+    assert_eq!(store.pending().unwrap(), 1, "admission must precede closure");
+    let confirmed = event(&hub, &store).await;
+    assert_eq!(confirmed["kind"], "message");
+    assert_eq!(&confirmed["input"]["route"], route);
+    assert_eq!(confirmed["input"]["messageId"], Value::Null);
+    assert_eq!(confirmed["input"]["pickerSelection"], json!({
+        "outputId":"fast-card","cardId":remote,"group":0,"option":2,"confirmed":true
+    }));
+    let reply = click(&mut socket, &mut observed, 9, &review, confirm, None).await;
     refused(&reply, &store);
 
     hub.stop().await.unwrap();

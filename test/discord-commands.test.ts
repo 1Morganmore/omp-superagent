@@ -6,7 +6,7 @@ import { parseDiscordCommand } from "./oracles/bun-gateway/discord-commands.ts";
 describe("Discord command catalog", () => {
   test("registers only supported Superagent commands for guild installs and owner bot DMs", () => {
     expect(DISCORD_COMMANDS.map(command => command.name)).toEqual([
-      "help", "head", "status", "restart", "context", "usage", "cron", "resume", "resolve", "main", "model", "effort", "compact", "stop", "new",
+      "help", "head", "status", "restart", "context", "usage", "cron", "resume", "resolve", "main", "model", "effort", "fast", "compact", "stop", "new",
       "usage-reset",
     ]);
     for (const command of DISCORD_COMMANDS) {
@@ -29,9 +29,10 @@ describe("Discord command catalog", () => {
     expect(parseDiscordCommand(name, [{ name: "text", type: ApplicationCommandOptionType.String, value: "  first line\nsecond line  " }])).toBe(`/${name} first line\nsecond line`);
   });
 
-  test("Discord usage and usage-reset both reject stale options", () => {
+  test("Discord usage, usage-reset and fast reject stale options", () => {
     expect(parseDiscordCommand("usage-reset", [{ name: "text", type: ApplicationCommandOptionType.String, value: "anthropic/9" }])).toBeNull();
     expect(parseDiscordCommand("usage", [{ name: "text", type: ApplicationCommandOptionType.String, value: "reset" }])).toBeNull();
+    expect(parseDiscordCommand("fast", [{ name: "text", type: ApplicationCommandOptionType.String, value: "on" }])).toBeNull();
   });
 
   test("rejects unknown commands and every stale option shape instead of ignoring data", () => {

@@ -417,8 +417,9 @@ are not security sandboxes.
 
 Register Discord autocomplete commands explicitly. Before registration, both the Gateway
 and HEAD must be running the new version. Replacing only the Gateway may reconnect it to
-an old HEAD. Send `/help` in Discord and check that `/usage-reset` is listed. If it is
-not, do not register commands; finish updating HEAD first. Do not kill a busy HEAD.
+an old HEAD. Send `/help` in Discord and check that `/usage-reset` and the `/fast`
+menu with Confirm are listed. If not, finish updating HEAD before registering
+commands. Do not kill a busy HEAD.
 
 ```sh
 bun --no-env-file src/cli.ts discord-commands --config config.local.json
@@ -1219,7 +1220,7 @@ or current topic. The runtime only records the edit and sends a fixed notice ask
 new control message. The same policy applies to Slack's `!` controls. Editing an ordinary work
 message creates a new input revision and does not undo external effects that have already occurred.
 
-### Model Selection and Head Effort
+### Model Selection, Head Effort and Fast Mode
 
 In a Discord lane thread, run **`/model` by itself**. In the first dropdown, select **HEAD** or
 **the current lane**. Select a provider in the second dropdown; that dropdown then shows the
@@ -1238,9 +1239,17 @@ and `/superagent-effort`. There is no separate HTTP endpoint.
 | `/model --lane <provider/id>` | Directly changes only the model of the idle lane bound to the current conversation. Does not call the HEAD model or rerun a failed request. |
 | `/effort` | Shows the current effort and opens the picker for levels supported by the current model. |
 | `/effort <level>` | Changes head effort to a level shown by the query. |
+| `/fast` | Shows the current shared HEAD mode even while busy. Select `off`, `on` (Fast), or `ultra` (Ultrafast), then press **Confirm**. Changes require an idle HEAD and model support. |
 | `/model preset` or `/model preset list` | Lists existing native presets, their validity, and their available default models. |
 | `/model preset <name>` | Applies all roles and default effort from the named native preset to the idle head session. |
 | `/model preset <name> --global` | Also saves the identical snapshot applied and verified on the current head as the native global default roles and effort. |
+
+Use `/fast` without arguments in Discord or Telegram and `!fast` or `/superagent-fast`
+in Slack (`!fast` in threads). Choosing a mode alone does not change it; **Back**
+returns to the choices and **Cancel** closes the menu without a change.
+Update the Gateway and HEAD, then refresh the registered command menus separately.
+The command does not run a model or change lanes or global defaults. Later
+requests using Fast or Ultrafast may cost more.
 
 If a lane model's quota is confirmed exhausted, the runtime notifies the original conversation
 once. Follow-up requests in that lane wait for the operator to pick a model. If it is unclear

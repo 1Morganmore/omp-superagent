@@ -13,6 +13,7 @@
   { "name": "model", "description": "Choose a Superagent HEAD model or preset, or use --lane for the bound lane.", "text": "Omit for the menu, or enter list, provider/model, --lane provider/model, or a preset command.",
     "discord": { "description": "Choose a model for the Superagent HEAD or the current lane.", "text": true } },
   { "name": "effort", "description": "Choose the Superagent HEAD thinking effort.", "text": "Omit for the menu, or enter an exact advertised effort level." },
+  { "name": "fast", "description": "Choose and confirm the Superagent HEAD fast service tier." },
   { "name": "compact", "description": "Compact Superagent HEAD context when idle.", "text": "Optional compaction instructions, including multiple lines." },
   { "name": "stop", "description": "Stop Superagent work in this conversation, the shared HEAD, or a named lane.", "text": "Omit for this conversation, or specify head or an exact lane ID." },
   { "name": "new", "description": "Start a Superagent work topic; use a sibling for a new request in an existing thread.", "text": "An optional first request for the new topic." },

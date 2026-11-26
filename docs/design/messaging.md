@@ -380,7 +380,15 @@ is a separate explicit apply, not a side effect of setup, doctor or start. Comma
 intake must not wait for a model; Discord's ephemeral admission reply and Slack's
 Socket Mode acknowledgement are not the actual command result.
 
-The head sends model, effort, and saved-reset menus through its normal outbox. The Gateway
+`/fast` is an owner control on the shared HEAD, even from a bound topic.
+It opens an argumentless menu showing the current mode (`off`, `on` or `ultra`).
+Choosing a mode displays the proposed change and Confirm, Back and Cancel.
+Only Confirm on that revision admits a change; Back and Cancel change no
+settings. The result goes to the original route. Slack accepts `!fast` and
+registered `/superagent-fast`. Text arguments cannot bypass the confirmation,
+and edits cannot open the menu.
+
+The head sends model, effort, fast and saved-reset menus through its normal outbox. The Gateway
 renders native components and binds each click to the owner, exact sent card,
 physical conversation, and displayed page. Navigation and cancellation only
 edit the card. One final click admits an ordinary durable control receipt on

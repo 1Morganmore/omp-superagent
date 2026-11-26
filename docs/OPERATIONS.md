@@ -338,7 +338,7 @@ export DISCORD_BOT_TOKEN
 
 Discord 자동완성 목록은 명시적으로 등록한다. 명령을 등록하기 전에 Gateway와 HEAD 모두
 새 버전으로 실행 중이어야 한다. Gateway만 교체하면 기존 HEAD에 재연결될 수 있다.
-Discord에서 `/help`를 보내 `/usage-reset`이 표시되는지 확인한다. 표시되지 않으면
+Discord에서 `/help`를 보내 `/usage-reset`과 `/fast` 메뉴의 Confirm 안내가 표시되는지 확인한다. 표시되지 않으면
 등록하지 말고 HEAD 업데이트를 먼저 마친다. 작업 중인 HEAD를 강제 종료하지 않는다.
 
 ```sh
@@ -1008,7 +1008,7 @@ paused native lane goal도 재개한다. 자동 report·재연결·새 queued �
 기록과 고정 안내만 남기고 새 메시지로 제어하도록 요청한다. Slack의 `!` 제어도 같은 정책이다.
 일반 작업 메시지 수정은 새 입력 revision이며 이미 실행된 외부 효과를 취소하지 않는다.
 
-### 모델 선택과 헤드의 effort
+### 모델 선택, 헤드 effort, Fast 모드
 
 Discord에서는 레인 스레드에서 **`/model`만** 실행하면 된다. 첫 번째 드롭다운에서
 **HEAD** 또는 **현재 레인**을 고른다. 두 번째 드롭다운에서 공급자를 고르면 같은 자리에
@@ -1027,9 +1027,16 @@ Discord는 등록된 슬래시 명령을 함께 지원한다. Slack은 일반 `!
 | `/model --lane <provider/id>` | 현재 대화에 연결된 유휴 레인의 모델만 직접 변경. HEAD 모델 호출이나 실패한 요청 재실행 없음 |
 | `/effort` | 현재 effort 표시 및 현재 모델이 지원하는 강도 선택 메뉴 열기 |
 | `/effort <level>` | 조회에 표시된 값으로 헤드 effort 변경 |
+| `/fast` | 공유 HEAD의 현재 모드 표시 및 선택창 열기. `off`, `on`(Fast), `ultra`(Ultrafast) 중 고른 뒤 **Confirm**을 누른다. 조회는 작업 중에도 가능하며, 변경은 유휴 HEAD와 지원 모델에서만 가능 |
 | `/model preset` 또는 `/model preset list` | 기존 native 프리셋의 이름·유효성·가용 기본 모델 조회 |
 | `/model preset <name>` | 해당 native 프리셋의 전체 역할·기본 effort를 유휴 헤드 세션에 적용 |
 | `/model preset <name> --global` | 현재 헤드에 적용·확인한 동일 snapshot을 native 전역 기본 역할·effort에도 저장 |
+
+Discord·Telegram에서는 인자 없이 `/fast`, Slack에서는 `!fast` 또는 `/superagent-fast`를 사용한다
+(스레드에서는 `!fast`). 모드를 고르는 것만으로는 변경되지 않는다. **Back**은 선택창으로 돌아가고
+**Cancel**은 변경 없이 닫는다. Gateway와 HEAD를 업데이트한 뒤 등록 메뉴는 별도로 갱신한다.
+명령 자체가 모델을 호출하거나 레인·전역 기본값을
+바꾸지 않는다. 이후 Fast나 Ultrafast로 처리되는 요청의 비용은 더 높을 수 있다.
 
 레인 모델의 쿼터 소진이 확인되면 코드가 원래 대화에 한 번 알린다. 해당 레인의 후속 요청은
 운영자가 모델을 선택할 때까지 기다린다. 실행 여부가 불확실한 요청은 원래 효과를 확인한 뒤

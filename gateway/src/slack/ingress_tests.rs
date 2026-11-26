@@ -5,6 +5,7 @@ fn normalizes_only_exact_owner_command_spellings() {
     for (input, expected) in [
         ("!resolve held-input", "/resolve held-input"),
         ("!effort\u{feff}high", "/effort\u{feff}high"),
+        ("!fast", "/fast"),
         ("!resolved", "!resolved"),
         ("quoted !resolve", "quoted !resolve"),
         (" !new request", " !new request"),
@@ -17,6 +18,7 @@ fn normalizes_only_exact_owner_command_spellings() {
         Some("/model exact\nargument")
     );
     assert_eq!(slash_text("/superagent-status", "not accepted"), None);
+    assert_eq!(slash_text("/superagent-fast", "ultra"), None);
     assert_eq!(slash_text("/status", ""), None);
 }
 
@@ -51,6 +53,7 @@ fn slash_ingress_accepts_only_the_registered_names_and_argument_contract() {
             "/model --global provider/model",
         ),
         ("/superagent-usage", " reset ", "/usage reset"),
+        ("/superagent-fast", " ", "/fast"),
         (
             "/superagent-compact",
             "  first line\nsecond line  ",

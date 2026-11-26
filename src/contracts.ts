@@ -259,6 +259,7 @@ export type HeadPicker = {
     };
   } }
   | { readonly kind: "effort"; readonly forModel: LaneModel }
+  | { readonly kind: "fast"; readonly forModel: LaneModel }
   | { readonly kind: "usage-reset"; readonly accounts: readonly Pick<OmpResetAccount, "target" | "label" | "identity" | "offer">[] }
 );
 

@@ -168,6 +168,18 @@ async fn slack_picker_admits_only_the_linked_owner_selection_before_ack() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slack_usage_reset_admits_only_one_confirm_on_the_linked_owner_card() {
+    confirm_on_linked_owner_card("usage-reset", &[
+        "Account staging: 2 saved requests",
+        "Account lab-research-with-a-long-display-label-for-token-usage: 23 saved requests",
+    ], 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slack_fast_admits_only_one_confirm_on_the_linked_owner_card() {
+    confirm_on_linked_owner_card("fast", &["off", "on", "ultra"], 2).await;
+}
+
+async fn confirm_on_linked_owner_card(kind: &str, options: &[&str], option: usize) {
     let mut fixture = Fixture::new().await;
     let (mut peer, result) = fixture.start("ALOCAL").await;
     result.expect("authenticated Slack workspace");
@@ -177,16 +189,17 @@ async fn slack_usage_reset_admits_only_one_confirm_on_the_linked_owner_card() {
         "guildId": null, "channelId": "DOWNER", "threadId": "1000.000001",
         "topicId": "original-logical-topic",
     });
-    let target = "Account lab-research-with-a-long-display-label-for-token-usage: 23 saved requests";
+    let target = options[option];
+    let output_id = format!("{kind}-output");
     let remote = fixture
         .hub
         .effect(
             "send",
             &[json!({
-                "id": "reset-output", "route": route, "text": "Saved usage",
+                "id": output_id, "route": route, "text": "Current HEAD status",
                 "picker": {
-                    "kind": "usage-reset", "expiresAt": crate::store::now().unwrap() + 300_000,
-                    "groups": [{"label": "Accounts", "options": ["Account staging: 2 saved requests", target]}],
+                    "kind": kind, "expiresAt": crate::store::now().unwrap() + 300_000,
+                    "groups": [{"label": "Choices", "options": options}],
                 },
             })],
         )
@@ -194,8 +207,8 @@ async fn slack_usage_reset_admits_only_one_confirm_on_the_linked_owner_card() {
         .expect("post Slack picker");
     fixture.called("chat.postMessage").await;
     let mut card = fixture.state.card.lock().await.clone();
-    send(&mut peer, selection("choose-account", &card, 1)).await;
-    assert_eq!(ack(&mut peer).await, json!({"envelope_id": "choose-account"}));
+    send(&mut peer, selection("choose-option", &card, option)).await;
+    assert_eq!(ack(&mut peer).await, json!({"envelope_id": "choose-option"}));
     let review = fixture.called("chat.update").await;
     assert_eq!(review["ts"], remote);
     assert_eq!(fixture.store.pending().unwrap(), 0);
@@ -235,11 +248,11 @@ async fn slack_usage_reset_admits_only_one_confirm_on_the_linked_owner_card() {
 
     send(&mut peer, click.clone()).await;
     assert_eq!(ack(&mut peer).await, json!({"envelope_id": "confirmed"}));
-    let row = fixture.store.next(None).unwrap().expect("durable reset input");
+    let row = fixture.store.next(None).unwrap().expect("durable confirmed input");
     assert_eq!(row.event["input"]["route"], route);
     assert_eq!(
         row.event["input"]["pickerSelection"],
-        json!({"outputId": "reset-output", "cardId": remote, "group": 0, "option": 1, "confirmed": true})
+        json!({"outputId": output_id, "cardId": remote, "group": 0, "option": option, "confirmed": true})
     );
     let closed = fixture.called("chat.update").await;
     assert!(closed["blocks"].as_array().unwrap().iter().all(|block| block["type"] != "actions"));

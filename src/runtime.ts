@@ -23,7 +23,7 @@ import { groupRoom } from "./group-policy";
 import { discardResultAttachment, isOriginalAttachmentMessage, pruneResultAttachments, readResultAttachmentIntent, readResultAttachmentStart,
   requestedResultPath, ResultAttachmentError, stageResultAttachment, type ResultAttachmentIntent } from "./result-attachment";
 import { HostConnection, type HostOptions, PR_REVIEW_INPUT_PREFIX, startHost } from "./host";
-import { LANE_MODEL_PROMOTION_RECEIPT } from "./host-protocol";
+import { LANE_MODEL_PROMOTION_RECEIPT, type FastModeState } from "./host-protocol";
 import { compareMessageIds } from "./message-order";
 import { acceptsRestrictedModelSelector, codingModels, isLaneModel, laneModelArgument, resolveLaneModelChoice, sameLaneModel, type LaneModelCandidate } from "./lane-models";
 import { advertisedLegacyWorkflow, advertisedWorkflow, headWorkflow, leadingWorkflow, workflowChoice, workflowContext, workflowPrompt } from "./workflow";
@@ -114,7 +114,7 @@ const presetSyncMaxRetries = 5;
 // auto-compaction fires, matching host-extension.ts, Gateway rotation.rs, and DESIGN.md.
 const HEAD_ROTATION_CONTEXT_PERCENT = 50;
 const headPickerLifetimeMs = 5 * 60_000;
-const headControlPattern = /^\/(help|status|stop|restart|context|compact|usage|usage-reset|model|effort|resolve|cron)(?:\s+([\s\S]*))?$/;
+const headControlPattern = /^\/(help|status|stop|restart|context|compact|usage|usage-reset|model|effort|fast|resolve|cron)(?:\s+([\s\S]*))?$/;
 const dialogs = new Set(["select", "confirm", "input", "editor", "ask"]);
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
@@ -186,11 +186,18 @@ function codeHandledControl(text: string, platform: Route["platform"]): boolean 
   return command === "/resume" || matchHeadControl(command, platform) !== null || prModeArgument(command) !== null;
 }
 
+const fastModes = ["off", "on", "ultra"] as const satisfies readonly FastModeState["mode"][];
+
+function fastModeStatus({ mode, active }: FastModeState): string {
+  return `Fast mode: ${mode}; native fast tier ${active ? "active" : "inactive"} for the current model.`;
+}
+
 export interface RuntimeState {
   sessionFile?: string;
   sessionId: string;
   readonly journalCursorVersion?: 1;
   readonly replyVoiceVersion?: 1 | 2;
+  readonly fastMode?: FastModeState;
   model?: LaneModel | null;
   thinkingLevel?: string;
   configuredThinkingLevel?: string | null;
@@ -339,7 +346,7 @@ interface DmCommandBoundary {
 }
 const laneDecisionReview = "lane-decision-review:";
 interface HeadCommand {
-  name: "help" | "status" | "stop" | "restart" | "context" | "compact" | "usage" | "usage-reset" | "model" | "effort" | "resolve" | "cron";
+  name: "help" | "status" | "stop" | "restart" | "context" | "compact" | "usage" | "usage-reset" | "model" | "effort" | "fast" | "resolve" | "cron";
   argument: string;
   readonly picker?: true;
 }
@@ -1653,7 +1660,7 @@ export class Superagent {
       const selected = this.scopedLaneModelSelection(source, lane);
       if (!selected || source.generation !== selected.picker.generation || !sameLaneModel(selected.model, selection.model)
         || !this.currentModelPickerHead(selected.picker, checkExpiry)) throw new StaleLaneModelPicker();
-    } else if (!this.originalLaneModelControl(source) || this.laneModelSelector(source) !== laneModelArgument(selection.model)) {
+    } else if (!this.originalOwnerControl(source) || this.laneModelSelector(source) !== laneModelArgument(selection.model)) {
       throw new Error("The owner command no longer authorizes this exact bound lane selection");
     }
     return source;
@@ -2950,7 +2957,11 @@ export class Superagent {
     const matchesOpener = picker?.kind === "usage-reset"
       ? opener && matchesUsageReset(opener, input.route.platform) && !opener.picker
         && selection.confirmed === true && selection.group === 0
-      : opener?.name === picker?.kind && opener?.argument === "" && selection.confirmed === undefined;
+      : opener?.name === picker?.kind && opener?.argument === "" && !opener.picker
+        && (picker?.kind === "fast"
+          ? selection.confirmed === true && selection.group === 0 && source?.state === "done"
+            && output?.id === `${source.id}:head-control` && this.originalOwnerControl(source)
+          : selection.confirmed === undefined);
     if (!output || !picker || !matchesOpener || !choice
       || input.id !== `picker:${output.id}` || routeKey(input.route) !== routeKey(output.route)
       || typeof selection.cardId !== "string" || !selection.cardId
@@ -2959,7 +2970,7 @@ export class Superagent {
       if (input.route.platform !== "discord" || input.reply || input.discordOriginalText !== undefined
         || !picker.modelTargets || !source || source.state !== "done"
         || routeKey(source.route) !== routeKey(output.route) || output.id !== `${source.id}:head-control`
-        || !this.originalLaneModelControl(source) || (selection.target !== "head" && (selection.target !== "lane" || !picker.modelTargets.lane))) return null;
+        || !this.originalOwnerControl(source) || (selection.target !== "head" && (selection.target !== "lane" || !picker.modelTargets.lane))) return null;
     } else if (selection.target !== undefined) return null;
     return { output, picker, group: choice.group, argument: choice.option };
   }
@@ -6234,6 +6245,7 @@ export class Superagent {
     return command.name === "resolve" || ["help", "status", "context"].includes(command.name)
       || (command.name === "usage" || command.name === "usage-reset") && !command.picker
       || command.name === "effort" && !command.argument
+      || command.name === "fast" && !command.picker
       || !!preset && (!!preset.error || !preset.name)
       || command.name === "model" && ["", "list"].includes(command.argument);
   }
@@ -6293,6 +6305,7 @@ export class Superagent {
         `${usageResetHint(input.route.platform)}${input.route.platform === "slack" ? " or /superagent-usage reset" : ""} — list usable saved reset tickets. Choose an account and use Confirm to spend one ticket on it.`,
         ...(input.route.platform === "discord" ? ["/model — choose HEAD or the current lane, then choose a provider and model."] : []),
         "/model and /effort open selection menus. HEAD text commands: /model list; /model <exact provider/id>; /model preset; /model preset list; /model preset <exact-name>; /effort <advertised-level>. HEAD changes require idle, unambiguous state.",
+        `${input.route.platform === "slack" ? "!fast or /superagent-fast" : "/fast"} — show the current HEAD fast tier and open the menu. Select off, on or ultra, then press Confirm. Changes require idle HEAD; faster tiers may cost more.`,
         "/model --lane <exact provider/id> — select the bound lane's model, not the HEAD model. Requires an idle lane and never replays a failed prompt.",
         "/model preset <exact-name> --global — first apply and verify the shared HEAD session, then save those exact roles/thinking as future/default settings. Existing lanes remain unchanged. --global is only supported for named preset selection, not queries/lists, direct models or effort; duplicate/unknown flags are rejected. A failed/unconfirmed global save does not undo the session change and is never automatically replayed.",
         "/compact [instructions] — native shared HEAD compaction; multiline instructions allowed; requires idle, unambiguous state.",
@@ -6860,6 +6873,12 @@ export class Superagent {
     if (presetCommand?.error) { reply(presetCommand.error, "cancelled"); return; }
     const mutation = !this.readOnlyHeadCommand(command);
     const prefix = input.route.platform === "slack" ? "!" : "/";
+    const fast = command.name === "fast" && command.picker ? fastModes.find(mode => mode === command.argument) : undefined;
+    const fastCommand = input.route.platform === "slack" ? "!fast or /superagent-fast" : "/fast";
+    if (command.name === "fast" && (command.picker ? !fast : command.argument && command.argument !== "status")) {
+      reply(`Open ${fastCommand}, choose a mode and press Confirm. Nothing was changed.`, "cancelled");
+      return;
+    }
     let submitted = false;
     try {
       const live = this.live.get("main");
@@ -6871,6 +6890,24 @@ export class Superagent {
       }
       if (!live || !this.current(live)) { reply("Native HEAD is unavailable; nothing was changed.", "cancelled"); return; }
       let state = await this.state(live);
+      if (command.name === "fast") {
+        if (!state.fastMode) { reply("Native fast control is unavailable on this HEAD Host; nothing was changed.", "cancelled"); return; }
+        if (!fast) {
+          const status = fastModeStatus(state.fastMode);
+          if (command.argument === "status") { reply(status); return; }
+          if (!this.originalOwnerControl(input)) {
+            reply(`Open ${fastCommand} as a new owner command without attachments.`, "cancelled");
+            return;
+          }
+          if (!isLaneModel(state.model)) { reply(`${status} No verified model is selected; no menu was opened.`, "cancelled"); return; }
+          reply(`${status} Confirm to change the mode. Fast and Ultrafast may cost more.`, "done", {
+            kind: "fast", forModel: { provider: state.model.provider, id: state.model.id },
+            sessionId: state.sessionId, generation: live.generation, expiresAt: Date.now() + headPickerLifetimeMs,
+            current: state.fastMode.mode, groups: [{ label: "Fast mode", options: fastModes }],
+          });
+          return;
+        }
+      }
       if (await this.queryHead(input, command, live, state)) return;
       if (!mutation) {
         if (command.name === "model" && command.argument === "list") {
@@ -6889,7 +6926,7 @@ export class Superagent {
               groups: [{ label: "Effort", options: levels }],
             } : undefined);
         } else if (command.name === "model") {
-          if (scopedOpening && !this.originalLaneModelControl(input)) {
+          if (scopedOpening && !this.originalOwnerControl(input)) {
             reply("Open /model from an original owner command in this conversation.", "cancelled");
             return;
           }
@@ -6941,9 +6978,15 @@ export class Superagent {
         picker = choice.picker;
         state = await this.state(live);
       }
+      if (fast && picker?.kind !== "fast") {
+        reply(`Open ${fastCommand}, choose a mode and press Confirm. Nothing was changed.`, "cancelled");
+        return;
+      }
       const stalePicker = (current: RuntimeState) => !!picker && (picker.expiresAt <= Date.now()
         || picker.sessionId !== current.sessionId || picker.generation !== live.generation
         || picker.kind === "effort" && !sameLaneModel(picker.forModel, current.model)
+        || picker.kind === "fast" && (!sameLaneModel(picker.forModel, current.model)
+          || picker.current !== current.fastMode?.mode)
         || picker.kind === "model" && picker.modelTargets !== undefined
           && (!this.scopedModelSelection(input, "head") || !this.currentModelPickerHead(picker)));
       if (stalePicker(state)) {
@@ -6995,6 +7038,10 @@ export class Superagent {
       if (busy(state)) { reply("HEAD became busy; no change was made. Send a new command after it is idle.", "cancelled"); return; }
       if (state.settingsScope !== "session") { reply("Native session-only settings scope could not be verified; no change was made.", "cancelled"); return; }
       const beforeModel = isLaneModel(state.model) ? { provider: state.model.provider, id: state.model.id } : null;
+      if (fast && (!beforeModel || !state.fastMode)) {
+        reply("Native model or fast mode state could not be verified; no change was made.", "cancelled");
+        return;
+      }
       if (command.name === "effort") {
         if (!capabilityModel || !beforeModel) {
           reply("Native model state could not be verified; no change was made.", "cancelled"); return;
@@ -7011,6 +7058,28 @@ export class Superagent {
       const requestId = `sg-head-${key(input.id)}-${live.generation}`;
       if (!this.store.submit(input.id, requestId, live.generation)) return;
       submitted = true;
+      if (fast && beforeModel) {
+        const envelope = record(await live.connection.request({
+          type: "set_head_fast_mode", mode: fast, provider: beforeModel.provider, modelId: beforeModel.id,
+        }, requestId));
+        if (envelope.success === false && (envelope.code === "session_busy" || envelope.error === "session_busy")) {
+          reply("HEAD became busy; no change was made. Send a new command after it is idle.", "cancelled");
+          return;
+        }
+        const { result } = successful(envelope, "set_head_fast_mode");
+        if (result === "unsupported" || result === "unavailable") {
+          reply(result === "unsupported" ? "The requested Fast tier control is unavailable for the current model; nothing was changed."
+            : "The native model or fast control changed before admission; nothing was changed.", "cancelled");
+          return;
+        }
+        const actual = await this.state(live);
+        if (result !== "applied" || actual.settingsScope !== "session" || !sameLaneModel(actual.model, beforeModel)
+          || actual.fastMode?.mode !== fast) {
+          throw new Error("Native fast mode readback did not verify the requested state");
+        }
+        reply(fastModeStatus(actual.fastMode));
+        return;
+      }
       if (command.name === "compact") {
         const compaction = { id: input.id, cancelled: false };
         this.headCompaction = compaction;
@@ -7104,7 +7173,7 @@ export class Superagent {
       reply(`Changed ${command.name}; ${this.headStatus(actual)}.`);
     } catch {
       reply(submitted
-        ? "The native change outcome is uncertain. It was not repeated; later HEAD work is held. Use /model or /effort to inspect the actual state and reconcile the original request."
+        ? `The native change outcome is uncertain. It was not repeated; later HEAD work is held. Use ${fast ? fastCommand : "/model or /effort"} to inspect the actual state and reconcile the original request.`
         : "Native HEAD state or capabilities could not be verified; no change was made.", submitted ? "uncertain" : "cancelled");
     }
   }
@@ -7115,7 +7184,7 @@ export class Superagent {
     return command.argument.replace(/^--lane(?:\s+|$)/, "");
   }
 
-  private originalLaneModelControl(input: InputRecord): boolean {
+  private originalOwnerControl(input: InputRecord): boolean {
     if (input.pickerSelection || input.attachments.length || messengerEdit(input) || !authorizeRoute(this.config, input.route)) return false;
     if (input.discordOriginalText === undefined) return true;
     let written = input.discordOriginalText.trim();
@@ -7208,7 +7277,7 @@ export class Superagent {
     // be fresh on the new controller. Recovery never invokes the native setter.
     const selected = this.scopedModelSelection(input, "lane");
     const selector = selected ? laneModelArgument(selected.model) : this.laneModelSelector(input);
-    const operator = selected ? selected.lane && input.generation === selected.picker.generation : this.originalLaneModelControl(input);
+    const operator = selected ? selected.lane && input.generation === selected.picker.generation : this.originalOwnerControl(input);
     const laneId = this.store.getMeta(laneModelControlKey(input.id));
     const saved = laneId && this.store.getMeta(`lane-model:${laneId}:receipt:${input.id}`);
     if (selector && laneId && saved && operator) {
@@ -7247,7 +7316,7 @@ export class Superagent {
       this.controlReply(input, "레인 모델 메뉴가 만료되었거나 원래 세션과 일치하지 않습니다. /model을 다시 열어 주세요. 모델을 변경하지 않았습니다.", "cancelled");
       return;
     }
-    if (!lane || !selected && !this.originalLaneModelControl(input)) {
+    if (!lane || !selected && !this.originalOwnerControl(input)) {
       this.controlReply(input, "변경 가능한 레인의 원래 대화에서 모델을 선택하세요. 모델을 변경하지 않았습니다.", "cancelled");
       return;
     }

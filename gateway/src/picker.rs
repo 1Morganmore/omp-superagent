@@ -25,6 +25,7 @@ enum Kind {
     Model,
     Effort,
     UsageReset,
+    Fast,
 }
 
 #[derive(Clone, Deserialize)]
@@ -134,7 +135,7 @@ struct Screen {
 #[derive(Clone, Copy)]
 enum Stage {
     Browse { group: Option<usize>, page: usize },
-    ConfirmUsageReset { option: usize },
+    Confirm { option: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -188,10 +189,11 @@ impl Pickers {
         text: &str,
         spec: &Picker,
     ) -> Result<Option<Opening>, EffectError> {
-        if spec.expires_at <= time()?
-            || spec.groups.is_empty()
-            || (spec.kind == Kind::UsageReset && spec.groups.len() != 1)
-        {
+        let valid_groups = match spec.kind {
+            Kind::Model | Kind::Effort => !spec.groups.is_empty(),
+            Kind::UsageReset | Kind::Fast => spec.groups.len() == 1,
+        };
+        if spec.expires_at <= time()? || !valid_groups {
             return Ok(None);
         }
         let scope = match (spec.kind, route["platform"].as_str(), &spec.model_targets) {
@@ -211,7 +213,7 @@ impl Pickers {
                 stage: Stage::Browse {
                     group: match spec.kind {
                         Kind::Model => None,
-                        Kind::Effort | Kind::UsageReset => Some(0),
+                        Kind::Effort | Kind::UsageReset | Kind::Fast => Some(0),
                     },
                     page: 0,
                 },
@@ -323,7 +325,7 @@ impl Pickers {
                             return Ok(None);
                         }
                         match (entry.picker.kind, group) {
-                            (Kind::UsageReset, Some(0)) => Stage::ConfirmUsageReset { option: index },
+                            (Kind::UsageReset | Kind::Fast, Some(0)) => Stage::Confirm { option: index },
                             (Kind::Model | Kind::Effort, Some(group)) => {
                                 let target = match scope {
                                     ModelScope::Unscoped => None,
@@ -333,7 +335,7 @@ impl Pickers {
                                 return Ok(Some(card.select(action, group, index, current, target)));
                             }
                             (Kind::Model, None) => Stage::Browse { group: Some(index), page: 0 },
-                            (Kind::UsageReset, _) | (Kind::Effort, None) => return Ok(None),
+                            (Kind::UsageReset | Kind::Fast, _) | (Kind::Effort, None) => return Ok(None),
                         }
                     }
                     Action::Previous
@@ -343,7 +345,7 @@ impl Pickers {
                     | Action::Cancel => return Ok(None),
                 }
             }
-            (Stage::ConfirmUsageReset { option }, action) => match action {
+            (Stage::Confirm { option }, action) => match action {
                 Action::Back => Stage::Browse { group: Some(0), page: option / PAGE },
                 Action::Confirm => return Ok(Some(card.select(action, 0, option, current, None))),
                 Action::Previous | Action::Next | Action::Pick(_) | Action::Target(_) | Action::Cancel => {

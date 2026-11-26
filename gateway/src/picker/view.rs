@@ -14,9 +14,13 @@ impl Entry {
         };
         let (group, page) = match screen.stage {
             Stage::Browse { group, page } => (group, page),
-            Stage::ConfirmUsageReset { option } => {
+            Stage::Confirm { option } => {
                 let label = self.picker.groups.first()?.options.get(option)?;
-                let footer = format!("\n\nUse one currently available OMP usage reset credit for:\n{label}");
+                let footer = match self.picker.kind {
+                    Kind::UsageReset => format!("\n\nUse one currently available OMP usage reset credit for:\n{label}"),
+                    Kind::Fast => format!("\n\nSet fast mode for the shared HEAD to {label}?"),
+                    Kind::Model | Kind::Effort => return None,
+                };
                 return Some(Menu {
                     text: self.with_footer(&footer)?,
                     select_id: control("s"),
@@ -62,6 +66,7 @@ impl Entry {
         let title = match (self.picker.kind, group) {
             (Kind::Effort, _) => "Choose thinking effort".to_owned(),
             (Kind::UsageReset, _) => "Choose an account for a usage reset".to_owned(),
+            (Kind::Fast, _) => "Choose fast mode for the shared HEAD".to_owned(),
             (Kind::Model, Some(group)) => {
                 format!("Choose a model from {}", shorten(&group.label, LABEL_LIMIT))
             }

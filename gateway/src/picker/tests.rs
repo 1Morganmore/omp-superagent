@@ -169,29 +169,69 @@ fn usage_reset_back_invalidates_confirmation_and_cancel_admits_nothing() -> Resu
 }
 
 #[test]
-fn usage_reset_retries_only_the_frozen_confirmation_after_expiry() -> Result<(), EffectError> {
-    let (pickers, opening) = reset_fixture()?;
-    let account = opening.menu.options[1].control.clone();
-    pickers.posted(opening, "reset-card".to_owned())?;
-    let choose = |control: &str| {
-        pickers.choose(control, None, |route, id| route == "fixture-route" && id == "reset-card")
-    };
-    let Some(Change::Show(review)) = choose(&account)? else {
-        panic!("choosing an account must only start a card edit");
-    };
-    pickers.navigated(&review, &Ok(()))?;
-    let confirm = button(&review.menu, "Confirm");
-    let Some(Change::Select(frozen)) = choose(confirm)? else {
-        panic!("a confirmed reset must be ready for durable admission");
-    };
-    pickers.cards.lock().unwrap().get_mut(&frozen.token).unwrap().entry.picker.expires_at = time()? - 1;
-    assert!(choose(button(&review.menu, "Cancel"))?.is_none());
-    assert!(choose(button(&review.menu, "Back"))?.is_none());
-    let Some(Change::Select(replay)) = choose(confirm)? else {
-        panic!("only the exact frozen confirmation can reconcile on retry");
-    };
-    assert_eq!(replay.event, frozen.event);
-    pickers.admitted(&replay)?;
-    assert!(choose(confirm)?.is_none());
+fn confirm_pickers_reconcile_only_the_frozen_confirmation_after_expiry() -> Result<(), EffectError> {
+    for (kind, options) in [
+        ("usage-reset", &["Account 4", "Account 7"][..]),
+        ("fast", &["off", "on", "ultra"][..]),
+    ] {
+        let pickers = Pickers::default();
+        let spec: Picker = serde_json::from_value(json!({
+            "kind": kind, "expiresAt": time()? + 60_000,
+            "groups": [{"label": "Choose an option", "options": options}]
+        }))
+        .map_err(|_| ledger_error())?;
+        let opening = pickers
+            .open("output", json!("fixture-route"), "Status", &spec)?
+            .ok_or_else(ledger_error)?;
+        let choice = opening.menu.options[1].control.clone();
+        pickers.posted(opening, "card".to_owned())?;
+        let choose = |control: &str| {
+            pickers.choose(control, None, |route, id| route == "fixture-route" && id == "card")
+        };
+        let Some(Change::Show(review)) = choose(&choice)? else {
+            panic!("{kind}: choosing an option must only start a card edit");
+        };
+        pickers.navigated(&review, &Ok(()))?;
+        let confirm = button(&review.menu, "Confirm");
+        let Some(Change::Select(frozen)) = choose(confirm)? else {
+            panic!("{kind}: confirmation must be ready for durable admission");
+        };
+        assert_eq!(frozen.event["input"]["pickerSelection"], json!({
+            "outputId":"output","cardId":"card","group":0,"option":1,"confirmed":true
+        }));
+        pickers.cards.lock().unwrap().get_mut(&frozen.token).unwrap().entry.picker.expires_at = time()? - 1;
+        assert!(choose(button(&review.menu, "Cancel"))?.is_none());
+        assert!(choose(button(&review.menu, "Back"))?.is_none());
+        let Some(Change::Select(replay)) = choose(confirm)? else {
+            panic!("{kind}: only the exact frozen confirmation can reconcile on retry");
+        };
+        assert_eq!(replay.event, frozen.event);
+        pickers.admitted(&replay)?;
+        assert!(choose(confirm)?.is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn fast_picker_requires_one_group_and_preserves_option_order() -> Result<(), EffectError> {
+    let pickers = Pickers::default();
+    let valid = json!({"label":"Fast mode","options":["ultra","off","on"]});
+    for groups in [json!([]), json!([valid, valid])] {
+        let spec: Picker = serde_json::from_value(json!({
+            "kind":"fast","expiresAt":time()? + 60_000,"groups":groups
+        }))
+        .map_err(|_| ledger_error())?;
+        assert!(pickers.open("output", json!("fixture-route"), "Status", &spec)?.is_none(), "{groups}");
+    }
+
+    let spec: Picker = serde_json::from_value(json!({
+        "kind":"fast","expiresAt":time()? + 60_000,"groups":[valid]
+    }))
+    .map_err(|_| ledger_error())?;
+    let opening = pickers
+        .open("output", json!("fixture-route"), "Status", &spec)?
+        .ok_or_else(ledger_error)?;
+    let labels: Vec<_> = opening.menu.options.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["ultra", "off", "on"]);
     Ok(())
 }

@@ -363,6 +363,17 @@ default roles/thinking; ordinary head and lane changes leave global configuratio
 and other lanes alone. Native preset bootstrap/refresh and native auth updates
 have separate scopes.
 
+`/fast` displays the current mode and opens a menu on shared HEAD, even while
+busy. A change requires Confirm on the original sent card and the same HEAD
+session, generation, model and selected mode shown as current when it opened.
+HEAD must be idle to change the active model family's tier; the owner serializes it as
+maintenance, and the extension uses native `AgentSession` fast/ultrafast
+controls and flushes the native journal. These APIs were checked in SDK 19.1.1
+and upstream `c308970263ae13744ea15ab67302e3dac840e266`. No lane, global default
+or provider request is involved. Readback distinguishes the selected mode
+from whether OMP can use a fast tier for the current model, not whether a
+provider accepted it. Uncertain mutations are held, not replayed.
+
 Argumentless `/model` and `/effort` use the same read-only native catalogue and
 effort capabilities to construct menus. A selection is a new owner control on
 the original topic, not a model turn or native approval. The head validates

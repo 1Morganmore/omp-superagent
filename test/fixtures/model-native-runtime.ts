@@ -136,6 +136,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   const providerFixture = selectionProviderFixture;
   const mainModel = modelSelection ? modelFixtureModels.head : { provider: "socket-host-smoke", id: "local" };
   const laneModel = modelSelection ? modelFixtureModels.lane : mainModel;
+  const fastModel = { provider: "openai", id: "gpt-fast-fixture" };
   const modelReason = modelSelection
     ? "The native judge advised the head model; the head independently selected this available text chat model for the isolated lane."
     : "Use the available deterministic local text chat model for the native lifecycle proof.";
@@ -165,7 +166,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   // base policy. Never probe bundled providers or local model servers in smoke QA.
   const agentConfig = {
     ...offlineMnemopi,
-    disabledProviders: nativeDisabledProviders,
+    disabledProviders: modelSelection ? nativeDisabledProviders.filter(provider => provider !== fastModel.provider) : nativeDisabledProviders,
     ...(modelSelection ? {
       modelRoles: { default: `${mainModel.provider}/${mainModel.id}`, judge: `${modelFixtureProvider}/${modelFixtureModels.judge.id}` },
       modelPresets: {
@@ -185,7 +186,12 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     } : {}),
   };
   await fs.writeFile(path.join(agent, "config.yml"), JSON.stringify(agentConfig), { mode: 0o600 });
-  await fs.writeFile(path.join(agent, "models.yml"), "providers: {}\n", { mode: 0o600 });
+  await fs.writeFile(path.join(agent, "models.yml"), JSON.stringify({ providers: modelSelection ? {
+    [fastModel.provider]: {
+      api: "openai-responses", apiKey: "local-test-only", baseUrl: "http://127.0.0.1:1/v1",
+      models: [{ id: fastModel.id, name: fastModel.id, contextWindow: 32768, maxTokens: 4096 }],
+    },
+  } : {} }), { mode: 0o600 });
   const nativeSettings = new Map(await Promise.all(["config.yml", "models.yml"].map(async name =>
     [name, await fs.readFile(path.join(agent, name))] as const)));
   const unchangedNativeSettings = async () => {
@@ -211,7 +217,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   for (const directory of ["run", "sessions/main", "logs"]) privateDirectory(path.join(root, directory));
   const mainPaths = hostPaths(config, "main");
   const headOptions: HostOptions = {
-    ...mainPaths, command, cwd: headCwd, env, extensionPath: providerFixture, managedUlwPath,
+    ...mainPaths, command, cwd: headCwd, env: { ...env, OMP_SUPERAGENT_ROLE: "head" }, extensionPath: providerFixture, managedUlwPath,
     model: config.model, subagentConcurrency: 1,
   };
   const databasePath = path.join(root, "coordination.sqlite");
@@ -541,12 +547,60 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
         expect(response.text).not.toContain("mock://");
         return { input, text: response.text, output: response };
       };
+      const pickerInput = (output: OutputRecord, value: string,
+        fields: Partial<NonNullable<Inbound["pickerSelection"]>> = {}): Inbound => {
+        const groups = output.picker?.groups ?? [];
+        const group = groups.findIndex(entry => entry.options.includes(value));
+        const option = groups[group]?.options.indexOf(value) ?? -1;
+        const cardId = store.output(output.id)?.remoteId;
+        if (option < 0 || !cardId) throw new Error("The exact native fixture selection or card receipt is unavailable");
+        return { id: `picker:${output.id}`, route: output.route, messageId: null, text: "", receivedAt: Date.now(), attachments: [],
+          pickerSelection: { outputId: output.id, cardId, group, option, ...fields } };
+      };
+      const confirmFast = async (output: OutputRecord, mode: string, outcome: "done" | "cancelled" = "done") => {
+        const input = pickerInput(output, mode, { confirmed: true });
+        await messenger.deliver(input);
+        await until(() => store.input(input.id)?.state === outcome
+          && outbox().some(row => row.source_id === input.id && row.state === "sent"), `confirmed HEAD fast mode ${mode}`);
+        const response = messenger.sent.find(result => result.sourceId === input.id);
+        expect(response?.route).toEqual(threadRoute);
+        return { input, text: response?.text };
+      };
       const visibleNumber = (text: string, value: number) => {
         expect(Number.isFinite(value)).toBe(true);
         expect(text.replaceAll(",", "")).toMatch(new RegExp(`\\b${String(value).replaceAll(".", "\\.")}\\b`));
       };
       const { text: help } = await commandReply("210", "/help");
-      for (const name of ["help", "status", "stop", "context", "compact", "usage", "model", "effort"]) expect(help).toContain(`/${name}`);
+      for (const name of ["help", "status", "stop", "context", "compact", "usage", "model", "effort", "fast"]) expect(help).toContain(`/${name}`);
+
+      const { output: unsupportedMenu } = await commandReply("2120", "/fast");
+      expect((await confirmFast(unsupportedMenu, "on", "cancelled")).text).toContain("unavailable for the current model");
+      const { output: staleFastMenu } = await commandReply("2123", "/fast");
+      await commandReply("2121", `/model ${fastModel.provider}/${fastModel.id}`);
+      expect((await confirmFast(staleFastMenu, "ultra", "cancelled")).text).toContain("menu is stale");
+      const { output: offMenu, text: offStatus } = await commandReply("2122", "/fast");
+      expect(offStatus).toContain("Fast mode: off");
+      expect(offMenu.picker).toMatchObject({ kind: "fast", current: "off", forModel: fastModel });
+      await expect(messenger.deliver(pickerInput(offMenu, "on"))).rejects.toThrow("Picker selection does not match");
+      expect((await commandReply("2127", "/fast on", "cancelled")).text).toContain("press Confirm");
+      expect((await initial.client.getState()).fastModeEnabled).toBe(false);
+      const { input: enableFast, text: enabledFast } = await confirmFast(offMenu, "on");
+      expect(enabledFast).toContain("Fast mode: on; native fast tier active");
+      const { output: onMenu } = await commandReply("2124", "/fast");
+      expect((await confirmFast(onMenu, "ultra")).text).toContain("Fast mode: ultra; native fast tier active");
+      await messenger.deliver(enableFast);
+      await runtime.kick();
+      const { output: ultraMenu, text: ultraStatus } = await commandReply("2125", "/fast");
+      expect(ultraStatus).toContain("Fast mode: ultra");
+      expect((await confirmFast(ultraMenu, "off")).text).toContain("Fast mode: off; native fast tier inactive");
+      await commandReply("2128", `/model ${mainModel.provider}/${mainModel.id}`);
+      const fastEntries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
+      expect(fastEntries.flatMap(entry => entry.type === "service_tier_change" ? [entry.serviceTier] : []))
+        .toEqual([{ openai: "priority" }, { openai: "ultrafast" }, null]);
+      expect(await fs.readFile(finalLane.sessionFile, "utf8")).toBe(laneTranscriptBefore);
+      expect(nativeResults).toHaveLength(resultsBefore);
+      await unchangedNativeSettings();
+
       if (stockEffortSelectors) {
         const { output } = await commandReply("2101", "/effort");
         expect(output.picker).toBeUndefined();
@@ -642,21 +696,11 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       // its thinking policy differs from the later transcript effort. Resume
       // must restore both sources independently, not reapply the preset.
       const pick = async (output: OutputRecord, value: string, target: "head" | "lane" = "head") => {
-        const groups = output.picker?.groups ?? [];
-        const group = groups.findIndex(entry => entry.options.includes(value));
-        const option = groups[group]?.options.indexOf(value) ?? -1;
-        if (option < 0) throw new Error("The installed OMP did not advertise the fixture selection");
-        const id = `picker:${output.id}`;
-        const cardId = store.output(output.id)?.remoteId;
-        if (!cardId) throw new Error("The fixture menu has no confirmed delivery receipt");
         const scoped = output.picker?.kind === "model" && output.picker.modelTargets !== undefined;
         if (target === "lane" && !scoped) throw new Error("The lane fixture requires a scoped model menu");
-        const selection: Inbound = {
-          id, route: output.route, messageId: null, text: "", receivedAt: Date.now(), attachments: [],
-          pickerSelection: { outputId: output.id, cardId, group, option, ...(scoped ? { target } : {}) },
-        };
+        const selection = pickerInput(output, value, scoped ? { target } : {});
         await messenger.deliver(selection);
-        await until(() => delivered(id), `${target} applied picker value ${value}`);
+        await until(() => delivered(selection.id), `${target} applied picker value ${value}`);
         return selection;
       };
       const { output: modelPicker } = await commandReply("207", "/model");
@@ -788,6 +832,9 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
         expect(duringCompact).toContain(headState.sessionId);
         await commandReply("307", "/context");
         await commandReply("308", "/usage");
+        const { output: busyFastMenu, text: busyFastStatus } = await commandReply("2129", "/fast");
+        expect(busyFastStatus).toContain("Fast mode: off");
+        await confirmFast(busyFastMenu, "ultra", "cancelled");
         if (stockEffortSelectors) {
           const { output } = await commandReply("310", "/effort");
           expect(output.picker).toMatchObject({
