@@ -31,7 +31,7 @@ const READ_ENTRY: OFlag = OFlag::O_RDONLY.union(OFlag::O_CLOEXEC)
     .union(OFlag::O_NOFOLLOW).union(OFlag::O_NONBLOCK);
 
 static NAME_CHARS: LazyLock<Result<Regex, regex::Error>> =
-    LazyLock::new(|| Regex::new(r"\A[\p{L}\p{N}\p{M}_. -]+\z"));
+    LazyLock::new(|| Regex::new(r"\A[\p{L}\p{N}\p{M}_. &-]+\z"));
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

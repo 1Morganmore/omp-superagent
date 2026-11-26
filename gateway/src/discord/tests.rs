@@ -31,6 +31,8 @@ mod addressing_tests;
 mod addressing_authority_tests;
 #[path = "tests/addressing_recovery.rs"]
 mod addressing_recovery_tests;
+#[path = "tests/commands.rs"]
+mod command_tests;
 #[path = "tests/model_picker.rs"]
 mod model_picker_tests;
 #[path = "tests/presence.rs"]

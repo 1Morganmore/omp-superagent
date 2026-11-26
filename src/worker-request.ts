@@ -1,6 +1,6 @@
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { Type, type Static } from "@sinclair/typebox/type";
 import { Value } from "@sinclair/typebox/value";
+import type { LanePresetSnapshot } from "./contracts";
 import type { WorkerPolicy } from "./worker-wire";
 
 export class WorkerRefusal extends Error {}
@@ -23,17 +23,16 @@ const laneRefSchema = Type.Object({
   laneId: Type.String({ pattern: `^lane-[A-Za-z0-9_-]{1,48}${end}` }),
 }, strict);
 const role = Type.String({ pattern: `^[a-zA-Z][a-zA-Z0-9_-]{0,127}${end}` });
+type NativeLevel = NonNullable<LanePresetSnapshot["defaultThinkingLevel"]>;
+// Worker protocol v1 (host-owner/src/worker_rpc.rs), not the installed catalog.
+const workerLevels = ["auto", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly `${NativeLevel}`[];
 const launch = Type.Object({
   model: Type.Optional(Type.String({ maxLength: 1024, pattern: `^[a-zA-Z0-9][a-zA-Z0-9_.-]*/[^\\s\\u0000-\\u001f\\u007f]+${end}` })),
   modelPreset: Type.Optional(Type.Object({
     name: role,
     preset: Type.Object({
       modelRoles: Type.Record(role, text, { ...strict, maxProperties: 128 }),
-      defaultThinkingLevel: Type.Optional(Type.Union(
-        // "auto" is a wire selector, not a provider effort. Keep the codec
-        // independent of the native coding agent, including on CLI status.
-        (["auto", ...THINKING_EFFORTS] as const).map(level => Type.Literal(level)),
-      )),
+      defaultThinkingLevel: Type.Optional(Type.Union(workerLevels.map(level => Type.Literal(level as NativeLevel)))),
     }, strict),
   }, strict)),
   subagentConcurrency: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),

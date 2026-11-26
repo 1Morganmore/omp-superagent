@@ -99,20 +99,15 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
       "Actual native workflow production tool failed");
     assert.deepEqual(turn.failed, [], "Actual native workflow dispatch failed");
     const { succeeded: called, invoke } = turn;
-    const results = turn.executions.map(dispatch => dispatch.result);
     if (role === "lane") {
       const expectedNotice = requestId === "handoff:303:lane" ? "ultrathink-notice"
         : requestId.startsWith("handoff:308:") ? "jevify-notice" : "orchestrate-notice";
       assert(notices.some(message => message.customType === expectedNotice),
         "Selected lane workflow did not bridge to its real native keyword mode");
-      if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
-      assert(JSON.stringify(results).includes("super-run quoted-board-only"), "Lane did not consume actual board data");
-      if (!called("board_post")) return invoke("board_post", { channel: "general", text: "super-run report-and-board-data-only", mentions: ["head"] });
       return { content: [`super-run LANE:${requestId}; this is report data, not a user invocation.`] };
     }
     assert.equal(role, "head");
     if (requestId === "303") {
-      if (!called("board_post")) return invoke("board_post", { channel: "general", text: "super-run quoted-board-only", mentions: ["head"] });
       if (!called("lane_start")) return invoke("lane_start", {
         sourceId: requestId, title: "Actual native SUPER lane proof", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: join(root, "topic"),
         model: { provider: "gateway-native", id: "local" }, modelReason: "Deterministic local native integration model, without paid requests.",
@@ -135,7 +130,6 @@ export default function nativeUlwProvider(pi: ExtensionAPI): void {
     }
     if (requestId.startsWith("report:")) {
       assert(text.includes("super-run LANE:"), "Head lost real lane report text");
-      if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
       const sourceId = /Internal lane report: [^;]+; sourceId: ([^;]+);/.exec(text)?.[1];
       assert(sourceId, "Head lost original report source ID");
       return { content: [`HEAD:${sourceId}`] };

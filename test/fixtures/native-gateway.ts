@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { parseSessionEntries, type FileEntry } from "@oh-my-pi/pi-coding-agent";
 import { type Config, hostPaths, privateDirectory } from "../../src/config";
 import type { Approval, Inbound, Lane, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../../src/contracts";
+import { decisionId } from "../../src/decisions";
 import { gatewayPaths } from "../../src/gateway-protocol";
 import type { GatewayStatus } from "../../src/gateway-wire";
 import { startGateway, type GatewayService } from "../oracles/bun-gateway/gateway";
@@ -27,6 +28,7 @@ let detectNativeFailure: (() => Promise<void>) | undefined;
 class RecordingMessenger implements Messenger {
   readonly sent: OutputRecord[] = [];
   readonly activities: Array<{ message: MessageReference; activity: MessageActivity }> = [];
+  readonly approvalAttempts: string[] = [];
   handlers?: Handlers;
   async start(handlers: Handlers): Promise<void> { this.handlers = handlers; }
   async deliver(input: Inbound): Promise<void> {
@@ -45,7 +47,10 @@ class RecordingMessenger implements Messenger {
   async setActivity(message: MessageReference, activity: MessageActivity): Promise<void> {
     this.activities.push({ message: { route: structuredClone(message.route), messageId: message.messageId }, activity });
   }
-  async showApproval(_approval: Approval): Promise<string> { throw new Error("Unexpected native Gateway approval"); }
+  async showApproval(approval: Approval): Promise<string> {
+    this.approvalAttempts.push(approval.id);
+    throw new Error("Unexpected native Gateway approval");
+  }
   async dismissApproval(_approval: Approval): Promise<void> { throw new Error("Unexpected native Gateway approval dismissal"); }
   async createThread(_route: Route, _title: string): Promise<Route> { throw new Error("The original independent topic already exists"); }
   async fetchAfter(): Promise<Inbound[]> { return []; }
@@ -408,6 +413,12 @@ try {
   owned.set(initialHead.hostPid, mainPaths);
   const observationOutputs: OutputRecord[] = [];
   const observationStatusId = "native-observation-status";
+  // Stock OMP supersedes earlier read results for the same path. Give each
+  // delegated request distinct evidence so all four receipts remain verifiable.
+  const evidenceFiles = inputs.slice(2, 6).map(({ id }) => ({
+    path: path.join(laneCwd, `evidence-${id}.txt`), text: `Native topic evidence for ${id}`,
+  }));
+  for (const evidence of evidenceFiles) await fs.writeFile(evidence.path, evidence.text, { mode: 0o600 });
   for (const item of inputs.slice(0, 3)) {
     await messenger.deliver(item);
     if (item.id === "202") {
@@ -576,6 +587,14 @@ try {
     ? [entry.data] : []);
   assert.deepEqual(laneAuthority, laneIds.map(requestId => ({ requestId, registered: [], enabled: [], advertised: [] })),
     "Every lane request must lack head management in the registry, enabled capabilities, and native provider payload");
+  const topicReads = laneDispatches.filter(call => call.name === "read" && evidenceFiles.some(file => call.args?.path === file.path));
+  assert.deepEqual(topicReads.map((call, index) => ({
+    inputId: call.result.toolCallId.split(":read:")[0],
+    ok: call.ok,
+    observed: call.args?.path === evidenceFiles[index]?.path &&
+      call.result.content.some(part => part.type === "text" && part.text.includes(evidenceFiles[index]!.text)),
+  })), expectedLaneRequests.slice(1).map(id => ({ inputId: `gateway-native:${id}`, ok: true, observed: true })),
+    "Every delegated follow-up must finish its real native read even when steering joins another request");
   const artifactDispatches = laneDispatches.filter(call => call.name === "fixture_gateway_artifact");
   assert.deepEqual(artifactDispatches.map(call => ({ mode: call.mode, ok: call.ok })), [
     { mode: "help", ok: true }, { mode: "execute", ok: true },
@@ -640,28 +659,6 @@ try {
   const outputs = db.query("SELECT id,source_id,state,remote_id FROM outputs ORDER BY sequence").all() as Array<{ id: string; source_id: string; state: string; remote_id: string }>;
   assert.deepEqual(outputs.map(output => output.source_id).sort(), [...expectedOutputSources].sort());
   assert(outputs.every(output => output.state === "sent" && output.remote_id === `gateway-native-receipt:${output.id}`));
-  const boardPosts = [...headDispatches, ...laneDispatches].filter(call => call.name === "board_post" && call.mode === "execute");
-  const posted = boardPosts.map(({ ok, result: post }) => {
-    assert.equal(ok, true);
-    const value = JSON.parse(post.content.filter(part => part.type === "text").map(part => part.text).join("")) as {
-      id: number; actor: string; role: string; sessionId: string; channel: string; text: string; mentions: string[];
-    };
-    assert(Number.isSafeInteger(value.id) && value.id > 0);
-    return { ...value, toolCallId: post.toolCallId };
-  });
-  assert.deepEqual(posted.map(value => ({ actor: value.actor, role: value.role, sessionId: value.sessionId,
-    channel: value.channel, text: value.text, mentions: value.mentions })), [
-    { actor: "head", role: "head", sessionId: initialHead.sessionId, channel: "general", text: "native-gateway:head-brief", mentions: [] },
-    ...laneIds.map(id => ({ actor: firstLane.id, role: "lane", sessionId: firstLane.sessionId, channel: "general",
-      text: `native-gateway:lane-finding:${id}`, mentions: ["head"] })),
-  ], "Required actual head/lane posts must have exact native actors, sessions and handed-off request identities");
-  assert.equal(new Set(posted.map(value => value.id)).size, posted.length, "No native post may appear twice under the same board ID");
-  assert.equal(new Set(posted.map(value => JSON.stringify([value.sessionId, value.toolCallId]))).size, posted.length,
-    "Every request-bearing post must originate from one unique native session/tool execution");
-  const headReads = headDispatches.filter(call => call.name === "board_read" && call.mode === "execute" && call.ok);
-  const laneReads = laneDispatches.filter(call => call.name === "board_read" && call.mode === "execute" && call.ok);
-  assert.equal(headReads.length, expectedReports.length);
-  assert.equal(laneReads.length, laneIds.length);
   if (presetScenario === "create") {
     const source: Inbound = { id: "208", messageId: "208", route: thread, receivedAt: Date.now(), attachments: [],
       text: "/head Please switch your own model to gateway-native/alternate." };
@@ -714,6 +711,51 @@ try {
       [["direct", true, { sourceId: review, id: firstLane.id, text: original.text }]]);
     assert.equal(input(review)?.state, "done");
     assert.equal(input(correction)?.target, firstLane.id);
+
+    const topicChoice: Inbound = { id: "discord:2:242:original", messageId: "242", route: thread,
+      text: "Use HEAD to choose the reversible local index format, then report here.", receivedAt: Date.now(), attachments: [] };
+    const topicHandoff = `handoff:${topicChoice.id}:${firstLane.id}`;
+    const topicAnswer = `${topicHandoff}:answer`;
+    await fs.writeFile(path.join(headCwd, "README.md"), "HEAD-only reference fixture", { flag: "wx" });
+    await messenger.deliver(topicChoice);
+    await until(() => messenger.sent.some(output => output.id === topicAnswer), "native topic lane resumes with HEAD's original decision answer");
+    assert.deepEqual(messenger.sent.filter(output => output.sourceId === topicChoice.id || output.replyTo?.messageId === topicChoice.messageId)
+      .map(output => [output.id, output.text, output.route, output.replyTo?.messageId]), [
+      [topicAnswer, "HEAD selected Flat; the answer stayed in the original topic.", thread, topicChoice.messageId],
+    ]);
+    assert.equal(input(topicHandoff)?.target, firstLane.id);
+    assert.deepEqual(messenger.approvalAttempts, [], "Explicit internal review must not present a messenger card");
+    const approval = db.query(`SELECT approvals.id, target, generation, state, remote_id
+      FROM approvals JOIN metadata ON metadata.key = 'topic-approval:' || approvals.id
+      WHERE metadata.value = ?`).get(topicChoice.id) as {
+        id: string; target: string; generation: number; state: string; remote_id: string | null;
+      } | null;
+    assert(approval, "The choice must retain its original bound-topic approval identity");
+    assert.deepEqual(approval, { id: approval.id, target: firstLane.id, generation: firstLane.generation, state: "answered", remote_id: null });
+    const topicReview = `lane-decision-review:${approval.id}`;
+    await until(() => input(topicReview)?.state === "done", "exact native HEAD review settlement");
+    const decisionEntries = parseSessionEntries(await fs.readFile(firstLane.sessionFile, "utf8"));
+    const decisionCalls = nativeJournalDispatches(decisionEntries).filter(call =>
+      call.name === "decision_ask" && call.mode === "execute" && call.args?.to === "head");
+    assert.equal(decisionCalls.length, 1);
+    const [decision] = decisionCalls;
+    assert.equal(decision.ok, true);
+    const id = decisionId(firstLane.sessionId, decision.result.toolCallId);
+    const answers = [{ id: `${id}:head:0`, selectedOptions: ["Flat ^index"] }];
+    assert.deepEqual(decision.details, { id, status: "submitted", answers: [
+      { ...answers[0], question: "Which reversible local index format? See @README.md for context.", options: ["Flat ^index", "Nested"], multi: false },
+    ] });
+    const reviewEntries = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
+    assert(!requestIds(reviewEntries).includes(topicChoice.id), "The bound-topic owner turn must not move to HEAD");
+    const reviewCalls = nativeJournalDispatches(reviewEntries).filter(call =>
+      call.result.toolCallId.startsWith(`gateway-native:${topicReview}:`));
+    assert.deepEqual(reviewCalls.map(call => [call.name, call.presentation, call.ok]), [
+      ["write", "direct", false], ["lane_review_decision", "direct", true],
+    ]);
+    assert.equal(reviewCalls[1]?.args?.id, id);
+    assert.deepEqual(reviewCalls[1]?.args?.answers, answers);
+    assert.equal(existsSync(path.join(root, "forbidden-decision-review-write")), false,
+      "A lane choice must not authorize unrelated native writes");
   }
   for (const [name, bytes] of settingsBytes) assert.deepEqual(await fs.readFile(path.join(agent, name)), bytes);
   assert.deepEqual(errors, []);

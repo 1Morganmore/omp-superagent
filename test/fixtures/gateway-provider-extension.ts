@@ -17,7 +17,8 @@ const managers = [
   "pr_watch", "pr_watch_list", "decision_list", "decision_inspect", "decision_withdraw",
 ];
 const evidenceTool = "fixture_gateway_artifact";
-const findingPrefix = "native-gateway:lane-finding:";
+const followupSources = ["203", "204", "205", "206"];
+const delegatedSources = new Set([...followupSources, "209"]);
 
 export default function gatewayProvider(pi: ExtensionAPI): void {
   const root = process.env.OMP_NATIVE_GATEWAY_ROOT;
@@ -25,6 +26,8 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
   const role = process.env.OMP_SUPERAGENT_ROLE;
   const startup = "Native preset startup initialization (internal control turn, not a messenger user request).";
   const artifact = join(root, "topic", "native-observation-evidence.txt");
+  const laneEvidence = new Map<string, string>(followupSources.map(id =>
+    [`handoff:${id}:${process.env.OMP_SUPERAGENT_LANE}`, join(root, "topic", `evidence-${id}.txt`)]));
   const recordedAuthority = new Set<string>();
   if (role === "lane" && process.env.OMP_NATIVE_GATEWAY_PRESETS === "create") {
     pi.registerTool({
@@ -60,23 +63,27 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     const exchanges = nativeToolExchanges(context.messages);
     const all = nativeToolTurn(pi, context, exchanges);
     const delegated = new Set<string>();
-    const findings = new Set<string>();
     for (const { name, args } of all.executions) {
       if (name === "lane_message" && typeof args?.sourceId === "string") delegated.add(args.sourceId);
-      if (name === "board_post" && typeof args?.text === "string" && args.text.startsWith(findingPrefix))
-        findings.add(args.text.slice(findingPrefix.length));
     }
     // Steering can arrive between discovering a manager device and invoking it.
     // Finish every explicit source decision in order; newest-user-only selection
     // can abandon 205 when 206 arrives after discovery but before execution.
     const activeUsers = users.slice(Math.max(0, users.findLastIndex(user => !user.steering)));
-    const selected = activeUsers.find(user => user.requestId && (role === "head"
-      ? ["203", "204", "205", "206", "209"].includes(user.requestId) && !delegated.has(user.requestId)
-      : role === "lane" && !findings.has(user.requestId))) ?? activeUsers.at(-1);
+    const selected = activeUsers.find(({ requestId }) => {
+      if (!requestId) return false;
+      if (role === "head") return delegatedSources.has(requestId) && !delegated.has(requestId);
+      return role === "lane" && laneEvidence.has(requestId) && !all.executions.some(dispatch =>
+        dispatch.name === "read" && dispatch.args?.path === laneEvidence.get(requestId)
+        && dispatch.result.toolCallId.startsWith(`gateway-native:${requestId}:read:`));
+    }) ?? activeUsers.at(-1);
     if (!selected) throw new Error("Unexpected native Gateway model input: no runtime request or startup turn");
     const { index: userIndex, text, requestId, bootstrap } = selected;
     const callPrefix = `gateway-native:${requestId ?? "bootstrap"}:`;
     const messages = context.messages.slice(userIndex + 1);
+    const explicitHeadReview = role === "head" && requestId?.startsWith("lane-decision-review:")
+      && text.includes("Which reversible local index format?");
+    const reviewWriteId = explicitHeadReview ? `${callPrefix}forbidden-write` : undefined;
     const turn = nativeToolTurn(pi, context, nativeToolExchanges(messages)
       .filter(({ result }) => role !== "lane" || result.toolCallId.startsWith(callPrefix)));
     if (role === "lane") {
@@ -93,9 +100,11 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
       }
     }
     const failures = messages.filter(message => message.role === "toolResult" && message.isError &&
+      message.toolCallId !== reviewWriteId &&
       (role !== "lane" || message.toolCallId.startsWith(callPrefix)));
     if (failures.length) throw new Error(`Production tool failed: ${JSON.stringify(failures)}`);
-    if (turn.failed.length) throw new Error(`Native tool dispatch failed: ${JSON.stringify(turn.failed)}`);
+    const dispatchFailures = turn.failed.filter(dispatch => dispatch.result.toolCallId !== reviewWriteId);
+    if (dispatchFailures.length) throw new Error(`Native tool dispatch failed: ${JSON.stringify(dispatchFailures)}`);
     const results = turn.executions.map(dispatch => dispatch.result);
     const called = (name: string) => name === "lane_message" ? delegated.has(requestId ?? "") : turn.succeeded(name);
     const invoke = (name: string, args: Record<string, unknown>): MockResponse =>
@@ -148,9 +157,26 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
       if (requestId.startsWith("lane-decision-review:")) {
         const id = /Internal review for lane [^,]+, decision (d-[a-f0-9]{24})\./.exec(text)?.[1];
         if (!id) throw new Error("Native HEAD review lost its exact decision identity");
+        const rawQuestions = /^Original native questions: (.+)$/m.exec(text)?.[1];
+        if (!rawQuestions) throw new Error("Native HEAD review did not receive the original questions");
+        const questions: Array<{ id: string; question: string; options: { label: string }[] }> = JSON.parse(rawQuestions);
+        const expectedQuestion = explicitHeadReview ? `${id}:head:0` : `${id}:0`;
+        if (questions.length !== 1 || questions[0]?.id !== expectedQuestion)
+          throw new Error("Native HEAD review lost the exact original question identity");
+        if (reviewWriteId) {
+          if (text.includes("HEAD-only reference fixture") || rawQuestions.includes("@") || rawQuestions.includes("^")
+            || !questions[0]!.question.includes("@README.md")
+            || questions[0]!.options[0]?.label !== "Flat ^index")
+            throw new Error("Native HEAD review must receive the exact question and labels without expanding references");
+          const attempt = turn.dispatches.find(dispatch => dispatch.result.toolCallId === reviewWriteId);
+          if (!attempt) return { content: [{ type: "toolCall", id: reviewWriteId, name: "write",
+            arguments: { path: join(root, "forbidden-decision-review-write"), content: "An internal review must not write files." } }] };
+          if (attempt.ok) throw new Error("Internal HEAD review was allowed to execute an unrelated write");
+        }
+        if (turn.presentation("lane_review_decision") !== "direct") throw new Error("HEAD must use the direct decision review tool");
         if (!called("lane_review_decision")) return invoke("lane_review_decision", {
-          id, reason: "A flat layout is simpler and reversible within this local assignment.",
-          answers: [{ id: `${id}:0`, selectedOptions: ["Flat"] }],
+          id, reason: "The flat option is simpler and reversible within this local assignment.",
+          answers: [{ id: questions[0].id, selectedOptions: [questions[0].options[0]!.label] }],
         });
         return { content: [] };
       }
@@ -161,9 +187,6 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
         return { content: [`OBSERVATION:202:${observation.waiting ? "waiting" : "resolved"}`] };
       }
       if (requestId === "202") {
-        if (!called("board_post")) return invoke("board_post", {
-          channel: "general", text: "native-gateway:head-brief", mentions: [],
-        });
         if (!called("lane_start")) return invoke("lane_start", {
           sourceId: requestId, title: "Native Gateway independent topic", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: join(root, "topic"),
           ...(process.env.OMP_NATIVE_GATEWAY_PRESETS === "create" ? { brief: "Read-only parser inspection." } : {}),
@@ -172,7 +195,7 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
         });
         return { content: [] };
       }
-      if (["203", "204", "205", "206", "209"].includes(requestId)) {
+      if (delegatedSources.has(requestId)) {
         if (!called("lane_message")) {
           const binding = /Bound lane reference \(coordination state, not a transcript\): (\{[^\n]+\})/.exec(text)?.[1];
           const id: unknown = binding ? JSON.parse(binding).id : undefined;
@@ -184,8 +207,6 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
         return { content: [] };
       }
       if (requestId.startsWith("report:")) {
-        if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
-        if (!JSON.stringify(results).includes("native-gateway:lane-finding")) throw new Error("Head did not read the actual lane board post");
         const sourceId = /Internal lane report: [^;]+; sourceId: ([^;]+);/.exec(text)?.[1];
         if (!sourceId || !text.includes("LANE:")) throw new Error("Head report lost the original source or native lane result");
         const sources = [...text.matchAll(/^LANE:handoff:([^:\r\n]+):[^\r\n]+$/gm)].map(match => match[1]!);
@@ -225,8 +246,19 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
       if (!JSON.stringify(results).includes("Flat")) throw new Error("Lane did not receive the selected native option");
       return { content: [`LANE:${requestId}`] };
     }
-    if (!called("board_read")) return invoke("board_read", { channel: "general", unreadOnly: false });
-    if (!JSON.stringify(results).includes("native-gateway:head-brief")) throw new Error("Lane did not read the actual head board post");
+    if (requestId === `handoff:discord:2:242:original:${process.env.OMP_SUPERAGENT_LANE}`) {
+      if (!called("decision_ask")) return invoke("decision_ask", { to: "head",
+        questions: [{ question: "Which reversible local index format? See @README.md for context.", options: [{ label: "Flat ^index" }, { label: "Nested" }] }],
+      });
+      const received = turn.executions.find(dispatch => dispatch.name === "decision_ask")?.details as {
+        id: string; status: string; answers?: Array<{ id: string; selectedOptions: string[] }>;
+      } | undefined;
+      const [answer] = received?.answers ?? [];
+      if (received?.status !== "submitted" || received.answers?.length !== 1 || answer?.id !== `${received.id}:head:0`
+        || answer.selectedOptions.length !== 1 || answer.selectedOptions[0] !== "Flat ^index")
+        throw new Error("The original lane did not receive HEAD's exact native answer");
+      return { content: ["HEAD selected Flat; the answer stayed in the original topic."] };
+    }
     if (requestId === "handoff:202:lane" && process.env.OMP_NATIVE_GATEWAY_PRESETS === "create") {
       const waiting = { kind: "dependency", target: "Native observation smoke release" };
       if (!turn.executions.some(call => call.name === "lane_report" && call.args?.status === "waiting")) {
@@ -253,9 +285,8 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
       }
       await released("release-observation-final");
     }
-    if (!called("board_post")) return invoke("board_post", {
-      channel: "general", text: `${findingPrefix}${requestId}`, mentions: ["head"],
-    });
+    const evidencePath = laneEvidence.get(requestId);
+    if (evidencePath && !called("read")) return invoke("read", { path: evidencePath });
     return { content: [activeUsers.map(user => `LANE:${user.requestId}`).join("\n")] };
   } });
   pi.registerProvider(provider, {

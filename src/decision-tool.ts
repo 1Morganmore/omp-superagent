@@ -22,10 +22,15 @@ export function registerDecisionAsk(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "decision_ask", label: "Request a tracked decision", approval: "read", loadMode: "essential",
     description: (role === "lane"
-      ? "In topic reply mode, ask only when the owner must decide. In manager handoff mode, HEAD can select routine options within the original assignment; important or unresolved choices go to the owner. A submitted answer does not grant execution approval or expand scope. "
+      ? "Use to: \"head\" for an in-scope coordination choice that needs HEAD's answer, even from a work topic. " +
+        "Omit to for the normal recipient (topic: owner; manager handoff: HEAD). " +
+        "HEAD may select an original option or escalate the same question to the owner. " +
+        "On corrective assignments, to: \"head\" is cancelled privately, not sent to the owner. " +
+        "An answer never grants execution approval or changes scope. "
       : "Ask the owner structured questions on this managed session's native UI. ") +
-      "Returns a stable decision id and the actual submitted answers or cancellation, timeout, or chat state. Recommendations, timeouts and chat are not acceptance. No default answers, timeout, messenger routing, or automatic work resume.",
+      "Returns a stable decision id and the actual submitted answers or cancellation, timeout, or chat state. Recommendations, timeouts and chat are not acceptance. No default answers, route override, or automatic work resume.",
     parameters: Type.Object({
+      ...(role === "lane" ? { to: Type.Optional(Type.Literal("head")) } : {}),
       questions: Type.Array(Type.Object({
         question: Type.String(),
         header: Type.Optional(Type.String()),
@@ -40,9 +45,12 @@ export function registerDecisionAsk(pi: ExtensionAPI): void {
     }, { additionalProperties: false }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       if (ctx.agent.kind !== "main") throw new Error(restricted);
+      if (params.to !== undefined && (role !== "lane" || params.to !== "head"))
+        throw new Error("Only a managed lane can direct a coordination question to HEAD");
       const id = decisionId(ctx.sessionManager.getSessionId(), toolCallId);
+      const prefix = role === "lane" && params.to === "head" ? `${id}:head` : id;
       const dialog = parseDialog({ method: "ask", questions: Array.isArray(params.questions)
-        ? params.questions.map((question, index) => ({ ...question, id: `${id}:${index}` })) : params.questions });
+        ? params.questions.map((question, index) => ({ ...question, id: `${prefix}:${index}` })) : params.questions });
       if (dialog.method !== "ask") throw new Error("Expected structured decision questions");
       if (!ctx.ui.askDialog) throw new Error("Native structured decision UI is unavailable on this host");
       if (asking) throw new Error("An owner decision dialog is already pending in this native session");

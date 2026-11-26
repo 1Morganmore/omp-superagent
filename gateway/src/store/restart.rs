@@ -160,8 +160,23 @@ fn validate_restart(db: &Connection, request: &Value) -> Result<Value> {
         return Err(RESTART_SOURCE.into());
     }
     let input: Value = serde_json::from_str(&data)?;
-    if input["id"] != input_id || input["text"].as_str().map(js_trim) != Some("/restart") {
+    let text = input["text"].as_str().unwrap_or_default();
+    if input["id"] != input_id || js_trim(text) != "/restart" {
         return Err(RESTART_SOURCE.into());
+    }
+    if input["route"]["platform"] == "telegram" && input["pickerSelection"].is_null() {
+        // A sent reply to a formatted example is not a restart acknowledgement.
+        let blocked = input["telegramProtectedCommand"]
+            .as_bool()
+            .unwrap_or_else(|| {
+                input["routingText"].as_str().is_some_and(|view| {
+                    js_trim(view) != "/restart"
+                        || view.split('/').next() != text.split('/').next()
+                })
+            });
+        if blocked {
+            return Err(RESTART_SOURCE.into());
+        }
     }
     let ack = db
         .query_row(

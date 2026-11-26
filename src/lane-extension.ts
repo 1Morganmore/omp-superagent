@@ -31,7 +31,9 @@ const parameters = Type.Union([
     { additionalProperties: false }),
   Type.Object({ status: Type.Literal("scope_review"), sourceId: nonempty }, { additionalProperties: false }),
 ]);
-const coordinationTool = (name: string) => name === "lane_report" || name === RESULT_ATTACH_TOOL || name.startsWith("board_");
+// Resumed native journals can still contain retired board tools. They were never work evidence.
+const coordinationTool = (name: string) =>
+  name === "lane_report" || name === RESULT_ATTACH_TOOL || name === "decision_ask" || name.startsWith("board_");
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
@@ -117,12 +119,26 @@ function toolEvidence(id: string, records: ReturnType<typeof toolRecords>): Lane
   if (!call || !result || result.toolName !== call.name || result.isError !== false ||
       coordinationTool(call.name) || (typeof call.arguments.path === "string" &&
         /^xd:\/\/(?:lane_report|board_[a-z_]+)(?:[/?#]|$)/.test(call.arguments.path)) ||
-      parseLaneReportResult(result) || (record(result.details) && result.details.type === "superagent-scope-review")) {
-    throw new Error("Lane tool evidence requires a completed successful native tool call, not report/board chatter");
+      parseLaneReportResult(result) || (record(result.details) && result.details.type === "superagent-scope-review") ||
+      transportedCoordination(call, result)) {
+    throw new Error("Lane tool evidence requires a completed successful native tool call, not a coordination receipt");
   }
   // Native identity/time envelopes are not evidence of changed work.
   const resultRecord = { toolName: result.toolName, content: result.content, details: result.details, isError: result.isError };
   return { kind: "tool", ref: id, fingerprint: createHash("sha256").update(JSON.stringify(resultRecord)).digest("hex") };
+}
+
+function transportedCoordination(call: ToolCall, result: ToolResultMessage): boolean {
+  const details = result.details;
+  if (!record(details)) return false;
+  const device = details.xdev;
+  if (call.name === "write" && record(device) && device.mode === "execute" &&
+      typeof device.tool === "string" && call.arguments.path === `xd://${device.tool}` && coordinationTool(device.tool))
+    return true;
+  // The shell's dispatch records, not command text or stdout, identify tools that ran.
+  return call.name === "bash" && Array.isArray(details.toolCommands) &&
+    details.toolCommands.some((dispatch: unknown) => record(dispatch) && dispatch.mode === "execute" &&
+      typeof dispatch.exitCode === "number" && typeof dispatch.tool === "string" && coordinationTool(dispatch.tool));
 }
 
 /** A worker role entrypoint, never the head's manager or messenger client. */
@@ -190,11 +206,13 @@ export default function laneExtension(pi: ExtensionAPI): void {
     name: "lane_report", label: "Report lane observations", approval: "read", loadMode: "essential",
     description: "Record an evidence-backed progress, waiting, or resolved observation in this lane's native tool journal. " +
       "Progress/resolved require selected real file paths or completed successful native toolCallIds; hashes are computed here. " +
+      "Decision receipts and other coordination activity are not evidence of work. " +
       "Waiting/resolved name the exact tool/approval/job ID or a dependency label. Native tool/approval/job waiting IDs must be observable now. " +
+      "Topic observations do not notify HEAD. For manager handoffs, changed evidence or wait transitions are queued for HEAD. " +
       "For a standalone original owner message in the active bound topic that appears to supersede the existing assignment, " +
       "call lane_report directly with status scope_review and its Original source ID, never via eval, bash, or write. " +
       "This only requests HEAD review; it does not grant permission. " +
-      "Reports do not send messages, prove acceptance, dispatch, resume, or change execution authority. Board/report chatter is not evidence.",
+      "Reports do not themselves send messenger messages, prove acceptance, dispatch, resume, or change execution authority.",
     parameters,
     async execute(id, params, signal, _onUpdate, ctx) {
       if (ctx.agent.kind !== "main") throw new Error("Lane reporting is restricted to the root lane session");

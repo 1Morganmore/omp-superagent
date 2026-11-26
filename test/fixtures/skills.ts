@@ -97,7 +97,7 @@ type CompositionPayload = {
   instructions: string;
   input: Array<{ role: "user"; content: string }>;
 };
-const childRole = "You are a read-only repository investigator. Do not edit files or acquire manager, board, or messenger authority.";
+const childRole = "You are a read-only repository investigator. Do not edit files or acquire manager or messenger authority.";
 const childAssignment = "Assignment: inspect the requested implementation, do not run builds or tests, and return findings plus unrun checks to the parent only.";
 const authStorage = await AuthStorage.create(":memory:");
 const settings = await Settings.loadIsolated({ cwd: workspace, agentDir });
@@ -255,10 +255,9 @@ try {
   }
   assert.deepEqual(sessionManager.getBranch(), branchBefore, "Prompt inspection must not arm workflows or enqueue work");
   const registered = session.getAllToolInfos();
-  assert(!registered.some(tool => tool.name.startsWith("board_")), "An unmanaged fixture cannot acquire board authority");
   assert(!session.isStreaming, "No model/provider execution is allowed");
   assert(!(await fs.readdir(root, { recursive: true })).some(name => /(?:^|\/)coordination\.sqlite(?:-|$)/.test(name)),
-    "Hook composition must not activate a board instance");
+    "Unmanaged hook composition must not create coordination state");
 
   const discovered = session.skills;
   for (const name of ["superagent-head", "superagent-lane", "project-existing", "user-existing", "custom-existing"]) {

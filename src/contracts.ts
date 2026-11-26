@@ -133,6 +133,10 @@ export interface Inbound {
   readonly discordOriginalText?: string;
   /** Adapter-verified routing-only view; an empty string excludes the entire message. */
   readonly routingText?: string;
+  /** Telegram's authenticated formatting verdict; absent on pre-upgrade receipts. */
+  readonly telegramProtectedCommand?: boolean;
+  /** Original Telegram text or caption when an addressed bot suffix was removed. */
+  readonly telegramOriginalText?: string;
   receivedAt: number;
   attachments: Attachment[];
   reply?: ReplyContext;

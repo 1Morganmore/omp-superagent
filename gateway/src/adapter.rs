@@ -185,6 +185,20 @@ impl Context {
         self.rooms.owner_route(route)?;
         self.store.discord_admitted_input(input, confirmation)
     }
+    pub(crate) fn telegram_admitted_input(
+        &self,
+        event: &Value,
+        addressed_elsewhere: bool,
+        legacy: Option<(&str, &str)>,
+    ) -> Result<bool> {
+        let route = &event["input"]["route"];
+        ensure!(
+            self.platform == "telegram" && route["platform"] == self.platform,
+            "Telegram source crossed platform boundary"
+        );
+        self.rooms.owner_route(route)?;
+        self.store.telegram_admitted_input(event, addressed_elsewhere, legacy)
+    }
     pub(crate) fn insert_meta_if_absent(
         &self,
         keys: impl IntoIterator<Item = String>,

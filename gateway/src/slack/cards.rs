@@ -46,6 +46,31 @@ struct Decision {
     id: String,
 }
 
+impl Decision {
+    fn matches_questions(&self, dialog: &Dialog) -> bool {
+        let Dialog::Ask { questions } = dialog else {
+            return false;
+        };
+        let Some(hash) = self.id.strip_prefix("d-") else {
+            return false;
+        };
+        if hash.len() != 24
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return false;
+        }
+        // HEAD escalation carries the original IDs, including the routing marker.
+        ["", ":head"].into_iter().any(|mode| {
+            questions
+                .iter()
+                .enumerate()
+                .all(|(index, question)| question.id == format!("{}{mode}:{index}", self.id))
+        })
+    }
+}
+
 impl Approval {
     fn token(&self) -> String {
         approval_token(
@@ -222,12 +247,12 @@ impl Inner {
             return Ok(receipt.as_str().to_owned());
         }
         let dialog = Dialog::parse(&approval.request).and_then(|dialog| {
-            if let Some(decision) = &approval.decision {
-                let valid = matches!(&dialog, Dialog::Ask { questions } if questions.iter().enumerate()
-                    .all(|(index, question)| question.id == format!("{}:{index}", decision.id)));
-                if !valid {
-                    return Err(EffectError::rejected("Slack decision does not match its original questions"));
-                }
+            if let Some(decision) = &approval.decision
+                && !decision.matches_questions(&dialog)
+            {
+                return Err(EffectError::rejected(
+                    "Slack decision does not match its original questions",
+                ));
             }
             Ok(dialog)
         });

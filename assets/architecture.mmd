@@ -1,26 +1,18 @@
 flowchart LR
     M["Messengers<br/>Discord · Telegram · Slack"]
     G["Gateway<br/>Always-on service<br/>Admit · route · reply"]
-    H["OMP Head<br/>Agent session<br/>Decides · works<br/>Head-only lane control"]
+    H["OMP Head<br/>Model + controller<br/>Bound topics bypass the model"]
     A["Lane A<br/>Independent session<br/>repo / topic A"]
     B["Lane B<br/>Independent session<br/>repo / topic B"]
-    S["Shared board<br/>Information only · not control"]
-
     M --> G
     G --> H
-    H -->|Head-only control| A
-    H -->|Head-only control| B
-    A -->|Results| H
-    B -->|Results| H
+    H -->|"lane_start / lane_message"| A
+    H -->|"lane_start / lane_message"| B
+    A -->|"Manager results / decisions for HEAD / scope reviews"| H
+    B -->|"Manager results / decisions for HEAD / scope reviews"| H
     H --> G
     G --> M
-    H -.- S
-    A -.- S
-    B -.- S
-
     classDef head fill:#faf3ff,stroke:#9c4ffb,color:#7a2bd6,stroke-width:2px
     classDef lane stroke:#22b8d4
-    classDef board fill:#f5f1fb,stroke:#8b82a3,color:#1d1530,stroke-dasharray:5 5
     class H head
     class A,B lane
-    class S board

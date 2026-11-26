@@ -369,7 +369,6 @@ export async function buildHostArgs(options: HostOptions, configPath = `${option
   const managedUlwPath = selectManagedUlw(options);
   const extensions = composition?.extensionPaths ?? [
     fileURLToPath(new URL("../", import.meta.url)), managedUlwPath, options.extensionPath,
-    fileURLToPath(new URL("./board-extension.ts", import.meta.url)),
     fileURLToPath(new URL("./host-extension.ts", import.meta.url)),
   ];
   return [
@@ -486,7 +485,7 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
     const helperPath = fileURLToPath(new URL("./host-sdk-helper.ts", import.meta.url));
     let manifest: Record<string, unknown> | undefined;
     const extensionPaths = managedUlwPath === undefined ? [] : [fileURLToPath(new URL("../", import.meta.url)),
-      managedUlwPath, options.extensionPath, fileURLToPath(new URL("./board-extension.ts", import.meta.url)),
+      managedUlwPath, options.extensionPath,
       fileURLToPath(new URL("./host-extension.ts", import.meta.url))];
     // The same helper discovers composition and then prepares the session.
     // The worker launch fence is committed only immediately before the manifest

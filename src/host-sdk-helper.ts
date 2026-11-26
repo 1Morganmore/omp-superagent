@@ -23,29 +23,24 @@ type Exit = {
 };
 
 async function verifyExit({ options }: Manifest, exit: Exit) {
-  const { visitEntriesFromFileStream } = await import("@oh-my-pi/pi-coding-agent/session/session-loader");
+  const { scanNativeJournal } = await import("./native-journal");
   const expected = new Map(exit.expectedObservations);
   const starts = new Set<number>();
   let duplicate = false;
-  let malformed = false;
-  let header = false;
-  await visitEntriesFromFileStream(options.sessionFile, entry => {
-    if (entry.type === "session") { header ||= entry.id === exit.sessionId; return; }
+  const session = await scanNativeJournal(options.sessionFile, entry => {
     if (entry.type !== "custom" || !entry.data || typeof entry.data !== "object") return;
-    const data = entry.data as Frame;
+    const data = entry.data as Readonly<Frame>;
     if (data.instanceKey !== (exit.instanceKey ?? undefined)) return;
-    if (entry.customType === "rpc_prompt_result" && expected.has(entry.id) &&
+    if (entry.customType === "rpc_prompt_result" && typeof entry.id === "string" && expected.has(entry.id) &&
         isDeepStrictEqual(data.frame, expected.get(entry.id))) expected.delete(entry.id);
     if (entry.customType === "rpc_agent_start" && data.hostPid === exit.pid && typeof data.runOrdinal === "number" &&
         Number.isSafeInteger(data.runOrdinal) && data.runOrdinal >= 1 && data.runOrdinal <= exit.runOrdinal) {
       duplicate ||= starts.has(data.runOrdinal);
       starts.add(data.runOrdinal);
     }
-  }, { throwIfMissing: true, onMalformedRecord: () => { malformed = true; } });
-  const journal = Bun.file(options.sessionFile);
-  const size = journal.size;
-  const persisted = header && !malformed && size > 0 && (await journal.slice(size - 1, size).text()) === "\n";
-  const observationsFlushed = !exit.observationFailure && !expected.size && !duplicate && starts.size === exit.runOrdinal;
+  });
+  const persisted = session !== undefined && session === exit.sessionId;
+  const observationsFlushed = persisted && !exit.observationFailure && !expected.size && !duplicate && starts.size === exit.runOrdinal;
   const { pid, ownerPid, sessionId, code, signal } = exit;
   const receipt = `${options.socketPath}.exit.json`;
   const temporary = `${receipt}.${crypto.randomUUID()}`;
@@ -176,7 +171,6 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
       if (!result.success || result.command !== "abort_and_restore_queue") throw new Error("Cannot fit restored queue");
       return { ...result, data: { ...result.data, ...flags } };
     }
-    case "exit": return verifyExit(manifest, input as Exit);
     default: throw new Error("Unknown Host SDK operation");
   }
 }
@@ -226,7 +220,8 @@ try {
   else {
     const input = await Bun.stdin.json();
     const manifest: Manifest = await Bun.file(path!).json();
-    process.stdout.write(JSON.stringify(await run(operation, manifest, input)));
+    const result = operation === "exit" ? await verifyExit(manifest, input as Exit) : await run(operation, manifest, input);
+    process.stdout.write(JSON.stringify(result));
   }
 } catch {
   // SDK errors may contain native frames, authorization data or prompt content.

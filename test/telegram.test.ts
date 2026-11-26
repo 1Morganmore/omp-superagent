@@ -295,13 +295,14 @@ describe("Telegram identity, polling, and durable admission", () => {
     for (const command of MESSENGER_COMMANDS) {
       const qualified = `/${command.name}@LOCAL_test_BOT`;
       const args = "  provider/model --global\nKeep @other_bot and /status@other_bot in the body. 😀";
-      for (const [patch, route] of [
-        [{}, group], [{ message_thread_id: 7 }, topic], [{ chat: { id: 42, type: "private" } }, dm],
-        [{ chat: { id: 42, type: "private" }, message_thread_id: 7 }, { ...dm, threadId: "7" }],
+      for (const [patch, route, prefix] of [
+        [{}, group, ""], [{ message_thread_id: 7 }, topic, "\u3000\t"],
+        [{ chat: { id: 42, type: "private" } }, dm, ""],
+        [{ chat: { id: 42, type: "private" }, message_thread_id: 7 }, { ...dm, threadId: "7" }, ""],
       ] as const) {
-        const input = messenger.normalize(message({ ...patch, text: qualified + args,
-          entities: [{ type: "bot_command", offset: 0, length: qualified.length }] }));
-        expect(input?.text).toBe(`/${command.name}${args}`);
+        const input = messenger.normalize(message({ ...patch, text: prefix + qualified + args,
+          entities: [{ type: "bot_command", offset: prefix.length, length: qualified.length }] }));
+        expect(input?.text).toBe(`${prefix}/${command.name}${args}`);
         expect(input?.route).toEqual(route);
         expect(input?.messageId).toBe("10");
         expect(input?.interactionId).toBeUndefined();
@@ -332,6 +333,10 @@ describe("Telegram identity, polling, and durable admission", () => {
     }
     const literal = "/status@local_test_bot";
     expect(messenger.normalize(message({ text: literal, entities: [{ type: "code", offset: 0, length: literal.length }] }))?.text).toBe(literal);
+    expect(messenger.normalize(message({ text: literal, entities: [
+      { type: "blockquote", offset: 0, length: literal.length },
+      { type: "bot_command", offset: 0, length: literal.length },
+    ] }))).toMatchObject({ text: literal, routingText: "" });
     expect(messenger.normalize(message({ text: `Discuss ${literal}`, entities: [{ type: "bot_command", offset: 8, length: literal.length }] }))?.text).toBe(`Discuss ${literal}`);
     expect(messenger.normalize(message({ text: literal, entities: [{ type: "bot_command", offset: 0, length: 7 }] }))?.text).toBe(literal);
     const unsupported = "/unsupported@local_test_bot";
@@ -364,6 +369,42 @@ describe("Telegram identity, polling, and durable admission", () => {
     expect(first.text).toBe(plain.text);
     expect(first.id).not.toBe(plain.id);
     expect(errors).toHaveLength(0);
+  });
+  test("a polled Telegram legacy projection advances the cursor without replacing its receipt or accepting a different topic", async () => {
+    const root = await mkdtemp(join(await realpath("/tmp"), "otg-"));
+    const gateway = new GatewayStore(root);
+    const http = new TelegramHttp();
+    const errors: unknown[] = [];
+    const messenger = new TelegramMessenger({ token, ownerId: owner, allowedChatIds: ["-100"], store: gateway,
+      fetch: http.fetch, onError: error => errors.push(error) });
+    const wrapped = "/new@local_test_bot";
+    const text = `${wrapped}\n/restart`;
+    const receipt = { kind: "message" as const, input: {
+      id: "telegram:900:-100:10:original", messageId: "10", route: topic, receivedAt: 100_000,
+      text: "/new\n/restart", routingText: "\n/restart", attachments: [],
+    } };
+    const fromTelegram = (thread: number) => message({ message_thread_id: thread, text, entities: [
+      { type: "bot_command", offset: 0, length: wrapped.length },
+      { type: "pre", offset: 0, length: wrapped.length },
+    ] });
+    try {
+      expect(gateway.admit(receipt)).toBe(true);
+      await messenger.start({ message: async input => { gateway.admit({ kind: "message", input }); }, answer: async () => {} });
+      http.update(1, fromTelegram(7));
+      await eventually(() => http.calls.some(call => call.method === "getUpdates" && call.payload.offset === 2));
+      expect(gateway.next()?.event).toEqual(receipt);
+      expect(gateway.pending()).toBe(1);
+
+      http.update(2, fromTelegram(8));
+      await eventually(() => errors.length > 0);
+      expect(gateway.getMeta("telegram:900:offset")).toBe("2");
+      expect(gateway.pending()).toBe(1);
+      expect(gateway.next()?.event).toEqual(receipt);
+    } finally {
+      await messenger.stop();
+      gateway.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
   test("one durable message produces one output across replay, and offset follows awaited admission", async () => {
     const ledger = store();

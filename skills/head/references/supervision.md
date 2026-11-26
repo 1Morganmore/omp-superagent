@@ -1,8 +1,10 @@
 # Event-driven lane supervision
 
-Read when a lane event needs a corrective or closure decision, an owner choice,
-or state reconciliation. Do useful independent work or yield for actual events.
-No polling, duty model, aggregate goal for lanes, or follow-up just for a report.
+Read when a lane event needs a corrective or closure decision or state
+reconciliation. In an isolated decision or scope review, use only the supplied
+context and the allowed tool, as specified in the Main head operating contract.
+Do useful independent work or yield for actual events. No polling, duty model,
+aggregate goal for lanes, or follow-up just for a report.
 
 ## Progress, results, and corrective instructions
 
@@ -30,7 +32,10 @@ No polling, duty model, aggregate goal for lanes, or follow-up just for a report
 - `observation`/`observationState` are recorded evidence and waits, not live
   guarantees. `ownerCurrent: false` preserves history only; identical bytes or
   repeated waits do not advance evidence or its clock. Ordinary commentary is not
-  a structured evidence transition. Waits and model advice are not permission.
+  a structured evidence transition. Direct-topic observations do not notify HEAD;
+  changed manager-handoff evidence or wait transitions are queued to HEAD.
+  Observations are not decision requests or permission; inspect live state only
+  when an actual decision depends on it.
 - For a result, compare the lane evidence to the actual acceptance and scope.
   A native `done` or subtask `completed` says execution yielded, not that its
   claimed artifacts, checks, or delivery are correct. Correct a verified gap or
@@ -68,15 +73,19 @@ with only the reason or focused clarification.
 - Resolve available facts first. Consult the packaged `model-selection.md`
   for meaningful capability/brief risks or an explicitly authorized idle-lane
   model change. An unrelated workspace is a separate routing decision.
-- In an internal review of the exact lane decision, use `lane_review_decision`.
-  Select original options only for routine, reversible choices already in scope;
-  record the reason internally and do not send a separate update. Omit `answers`
-  to escalate the original card when the owner must decide requirements, cost,
-  scope, external commitments, permissions, irreversible effects, or an
-  open-ended answer. Give a short reason the owner can read on the card: what
-  needs their decision and why, without quoting private data or internal
-  discussion. Preserve the original choices and any recommendation. Never
-  resolve execution approvals here or open a separate question.
+- When the controller queues a lane decision review, use `lane_review_decision`
+  on that exact pending native dialog. This covers manager-handoff questions and
+  explicit `decision_ask` requests with `to: "head"` from bound topics. Select
+  original options only for routine, reversible choices already in scope; record
+  the reason internally and do not send a separate update. Omit `answers` to
+  escalate the same card on its original route when the owner must decide. Give
+  a short user-facing reason without quoting private data or internal discussion.
+  Preserve the original choices and any recommendation. Never resolve execution
+  approvals, change assignment scope through a choice, or open a second question.
+  On HEAD stop, the controller may escalate an existing regular review to the
+  original owner. An explicit HEAD question on a corrective assignment is
+  cancelled privately, not escalated.
+  An eligible owner correction goes through the isolated scope-review procedure.
 - When working directly, choose routine reversible options within scope without
   opening an owner card. For a material owner choice raised by HEAD, check
   `decision_list` for a pending question, then use `decision_ask` in the
@@ -98,7 +107,7 @@ with only the reason or focused clarification.
    approval cleanup. Only an explicit authorized `lane_resume({id, sourceId})`
    reopens eligible input and resumes an existing paused native goal. It doesn't
    create a goal, replay work, lift uncertainty, or change the retained model.
-   Reconnects, new queued work, board posts, and task reports never resume it.
+   Reconnects, new queued work, and reports never resume it.
    An enabled paused goal can retain its Host; don't force release or unload.
 2. After interruption, separate what was queued, executed, persisted, and
    delivered. Reconcile native history, workspace, and authoritative external
@@ -155,15 +164,3 @@ with only the reason or focused clarification.
   and `untrack` to stop notifications. A quiet or unloaded Host is not proof of
   a stall. Report recorded evidence, holds, errors and closure without claiming
   completion from an idle socket or firing a new model turn to check it.
-- **Board:** Use advertised `board_post`, `board_read`, `board_subscribe` only for
-  concise facts, evidence, and edit collisions. Membership is revalidated against
-  actual managed session ID/file and current owner for this state instance, not
-  inherited role environment. Neither unmanaged sessions nor native children
-  have access. All participants can read all instance channels (`general` and
-  `repo:<canonical absolute path>`); don't post secrets or transcripts. Actor is
-  runtime-assigned. Subscriptions replace only your own `channels`. Read with
-  `channel`, `thread`, `after`, `limit`, or `unreadOnly` as needed; only exact
-  returned items become read. Notices are headers at safe native boundaries, not
-  body reads. HEAD sees all lane posts; idle notices don't trigger turns or wake
-  unloaded lanes. No polling, self-wake or read-ACK loop. Posts/mentions don't
-  give a source ID, instruction, approval, or completion evidence.

@@ -176,6 +176,8 @@ const inboundData = (input: Inbound): Inbound => ({
   id: input.id, route: input.route, messageId: input.messageId, text: input.text,
   ...(input.discordOriginalText === undefined ? {} : { discordOriginalText: input.discordOriginalText }),
   ...(input.routingText === undefined ? {} : { routingText: input.routingText }),
+  ...(input.telegramProtectedCommand === undefined ? {} : { telegramProtectedCommand: input.telegramProtectedCommand }),
+  ...(input.telegramOriginalText === undefined ? {} : { telegramOriginalText: input.telegramOriginalText }),
   ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
   ...(input.invocationId === undefined ? {} : { invocationId: input.invocationId }),
   ...(input.pickerSelection === undefined ? {} : { pickerSelection: input.pickerSelection }),
@@ -215,7 +217,15 @@ function inboundIdentity(input: Inbound) {
 /** Verify immutable inbound identity and return updated attachment URLs if refreshed, or null when unchanged. */
 export function reconcileInboundRedelivery(existing: Inbound, incoming: Inbound): Inbound | null {
   if (isDeepStrictEqual(inboundData(existing), inboundData(incoming))) return null;
-  if (!isDeepStrictEqual(inboundIdentity(existing), inboundIdentity(incoming))) {
+  const candidate = inboundIdentity(incoming);
+  // Before the Telegram verdict field existed, unchanged, unmasked prose
+  // had the same receipt. Compare that representation; never update the original.
+  if (existing.route.platform === "telegram" && existing.telegramProtectedCommand === undefined
+    && candidate.telegramProtectedCommand === false && incoming.routingText === incoming.text
+    && (existing.routingText === undefined || existing.routingText === incoming.routingText)) {
+    delete candidate.telegramProtectedCommand;
+  }
+  if (!isDeepStrictEqual(inboundIdentity(existing), candidate)) {
     throw new Error(`Inbound identity conflict: ${incoming.id}`);
   }
   const urls = new Map(incoming.attachments.map(file => [file.id, file.url]));

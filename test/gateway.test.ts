@@ -1121,6 +1121,13 @@ test.each(["discord", "telegram", "slack"] as const)("%s restart authority uses 
   expect(f.store.getMeta(`gateway:restart-source:${source.request.inputId}`)).toBe(source.request.requestId);
 });
 
+test.each([{ telegramProtectedCommand: true }, { routingText: "" }])("Telegram restart authority rejects a formatted example even with a sent reply (%j)", async formatting => {
+  const f = await fixture();
+  const source = restartSource(f, { ...input("formatted-restart"), route: { ...route, platform: "telegram" }, text: "/restart", ...formatting });
+  expect(() => f.store.setRestart(source.record)).toThrow(DeliveryError);
+  expect(f.store.getRestart()).toBeNull();
+});
+
 test("restart receipts atomically retain source identity across store reopening", async () => {
   const f = await fixture();
   const source = restartSource(f);

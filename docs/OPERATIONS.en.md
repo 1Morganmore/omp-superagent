@@ -35,10 +35,10 @@ Only the head can use `lane_models`, `lane_init_presets`, `lane_start`, `lane_se
 `lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`,
 `thread_inspect`, `lane_thread_update`, `messenger_presence`, `lane_watch`, `pr_watch`, `pr_watch_list`,
 `discord_context`, `discord_purpose_list`, `discord_purpose_set`, `discord_purpose_clear`,
-`decision_list`, `decision_inspect`, and `decision_withdraw`.
+`decision_list`, `decision_inspect`, `decision_withdraw`, and `lane_review_decision`.
 `decision_ask` is available to HEAD and root lanes, but not to native children.
-Use `lane_inspect({})` to list lanes. Lanes do not receive management authority, and
-native children receive neither management nor board access. Do not install these extensions
+Use `lane_inspect({})` to list lanes. Only root lanes can use `lane_report`; neither
+lanes nor native children receive management authority. Do not install these extensions
 globally in ordinary OMP. See the [management tool contract](design/execution.md#management-tools)
 for tool arguments and role boundaries.
 
@@ -178,29 +178,31 @@ activates depends on native `magicKeywords.enabled`, `magicKeywords.jevify`, and
 availability; admission alone does not guarantee it. No global settings are changed.
 jevify needs no SUPER skill lookup, additional lane, goal, model change, or workflow artifact.
 
-Lane reports are for the head, not for external delivery. Internal instructions and reports
-are in English; the head replies externally in the user's language.
+Internal instructions and manager-handoff reports are in English. Owner-facing replies
+use the owner's language.
 
-### Using the Shared Information Board
+### Direct Lane Coordination
 
-Only head and lane sessions actually connected and registered in the same instance may use
-the board. Ordinary OMP sessions, other instances, native children, and sessions with only
-copied role environment variables cannot participate. Participants in the same instance can
-read every channel; repository channels are not security boundaries.
+- **Evidence or a wait:** Root lanes use `lane_report` to record selected evidence or an
+  exact wait. Direct-topic observations do not notify HEAD. Changed manager-handoff
+  evidence or wait transitions are queued for HEAD, not sent directly to Messenger.
+  Inspect the observed state when a decision actually depends on it; do not poll.
+- **An in-scope choice that needs HEAD:** Use `decision_ask` with `to: "head"` even in a
+  bound topic, for example to resolve overlapping edit ownership. It immediately queues
+  one durable review of the original native dialog, not an immediate answer. HEAD answers
+  with an original option or escalates the same card to the owner on its original route.
+  Omit `to` for normal routing: bound-topic questions go to the owner, manager-handoff
+  questions to HEAD. An explicit HEAD question on a corrective assignment is
+  cancelled privately, not redirected to the owner.
+- **A conflicting owner correction:** For an eligible standalone original message in
+  a bound topic, the root lane calls `lane_report({status:"scope_review", sourceId})`
+  directly with the original source ID. Only HEAD may send a corrective `lane_message`
+  to that same lane with the verified review ID and exact owner text. Hold the
+  disputed work until a corrective assignment arrives. A decision card is not a
+  substitute for scope review or native approval.
 
-```text
-board_post({text: "Observed fact and relevant evidence", mentions: ["head"]})
-board_read({channel: "general", limit: 20})
-board_subscribe({channels: ["general", "repo:/absolute/repository"]})
-```
-
-These are native tool argument examples, not shell commands. Follow the actual advertised
-schema. Share concise observations, evidence, and conflicts rather than full transcripts
-or secrets. Only the exact posts returned are marked read, and subscriptions belong to
-individual sessions. A header notification is not a read of the body. Posts are not
-instructions, approvals, or evidence of completion. They do not trigger idle model calls
-or start unloaded lanes. See the [shared board contract](design/execution.md#shared-information-board)
-for details on membership, tool fields, and notifications.
+See [direct lane coordination](design/execution.md#direct-lane-coordination) and the
+[scope-review contract](design/execution.md#bound-topic-assignment-scope-review).
 
 ### Choosing a Model for a New Lane
 
@@ -281,9 +283,11 @@ bun install --frozen-lockfile
 ```
 
 Installation does not run OMP. `setup`, `doctor`, and actual Host startup check the selected
-CLI. The root SDK dependencies are the published `@oh-my-pi/pi-coding-agent`,
-`@oh-my-pi/pi-ai`, `@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@oh-my-pi/pi-tui`,
-and `@oh-my-pi/pi-utils`, all pinned to the same baseline. Installation does not start
+CLI. The standalone Bun helpers directly depend on `@oh-my-pi/pi-coding-agent`,
+`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives` and `@oh-my-pi/pi-utils`, pinned to
+the same baseline. The Host provides `pi-ai` to its extensions; it is a direct
+development dependency only. The coding-agent SDK still installs `pi-ai` and `pi-tui`
+transitively. Installation does not start
 the bot or replace an existing OMP executable or global settings.
 
 To avoid changing the system Bun, you can use an isolated local copy. Point the following
@@ -434,7 +438,9 @@ rather than silently deleting them. Registration does not start the model or ope
 messenger connection, and is not a side effect of `setup`, `doctor`, or `start`.
 Commands that take arguments use an optional `text` field. For example, enter `preset high`
 in `/model`'s `text` field and `head` in `/stop`'s `text` field. `/status` also works as
-an ordinary message. In a parent channel with `discord.requireAddressing` enabled, mention
+an ordinary message. If the field is missing, check `preApplyTextOptionDrift` in the
+read-only plan for missing or outdated global options, and `guilds[].shadowing` for a
+guild command hiding the global one. In a parent channel with `discord.requireAddressing` enabled, mention
 this bot or reply to one of its messages just as for any ordinary message.
 
 Commands follow the same owner, allowed channel, thread, and 1:1 DM boundaries. After
@@ -713,7 +719,10 @@ wait so the head can collect it at that boundary. On restart, the system checks 
 original input/request/session/file/generation and the pre-submission cursor before
 reading uncollected records and deduplicating them. Native children cannot use the
 reporting tool. An observation is not verified acceptance or proof the target is still
-alive. It does not create a watch model, timer, automatic reminder, resume, or stop.
+alive. Direct-topic observations do not notify the HEAD model; changed manager-handoff
+evidence or wait transitions are queued for it. Neither creates a watch model, timer,
+or automatic reminder, or resumes or stops work. A tracked decision receipt is not
+evidence of work performed, even when an answer was submitted.
 
 The Gateway adds a receipt reaction after durably accepting an allowed source message.
 It can acknowledge receipt even without a head. Waiting for a reaction API response
@@ -1172,6 +1181,8 @@ the split and the task on one plain-text line, such as `Split this into a new th
 or `Do the login check in a new thread` (also `이건 따로 빼줘: 로그인 점검` or
 `로그인 점검은 새 스레드에서 해줘` in Korean). For work in a different directory, put
 `/new cwd: /actual/work/path` on the first line and the task on the next line.
+Paths with spaces can be written as-is or enclosed in matching quotes, e.g.
+`/new cwd: "/projects/My App"`. The path is literal; no shell expansion is performed.
 If you leave the task unspecified, as in `Split this into a new thread` (`이건 따로 빼줘`), the bot
 asks you to specify the task with `/new` in the same thread and does not create a new thread.
 Edited messages, quotes, and attachments do not count as instructions to create a thread.
@@ -1760,7 +1771,7 @@ read-only. If another writer has the original session open, native policy forks
 it. Resuming once the writer releases the session, and choosing later sessions,
 also follow native policy. This does not attach to the existing managed Host
 process or transfer execution ownership. An ordinary resume does not automatically
-load the manager or board extensions or confer manager or board authority.
+load the managed role extensions or confer management authority.
 History is not a source of new permissions or instructions.
 
 Use `agent: "seance"` and `sourceSession` with `task` for consultation **only if
@@ -1810,16 +1821,21 @@ and callbacks. Answers that arrive before recovery are not treated as stale and
 consumed or acknowledged. Slack processes distinct concurrent selections and modal
 submissions in order for each card and deduplicates only actual redeliveries.
 
-HEAD first reviews questions sent by lanes via `decision_ask`. For a routine
-choice within the delegated scope, HEAD selects one of the original choices and
-returns it to the lane. It records the reason internally without sending a separate
-messenger notification. If the decision materially affects scope, cost, permissions,
-or external commitments, or otherwise requires user judgment, it shows the reason
-for escalation on the original question card. HEAD does not answer execution
-approvals or ordinary native dialogs on the operator’s behalf. The `ask` cards below
-refer to the structured `askDialog` used by `decision_ask`. The Host does not send
-the OMP 19.1 built-in `ask` HTML `form` to a messenger. It cancels it immediately
-without submitting even the selected default.
+HEAD first reviews manager-handoff questions and root-lane questions explicitly
+addressed with `decision_ask({to:"head", questions:[…]})`. Other bound-topic questions
+go to the owner directly. On a corrective assignment, the controller refuses and
+cancels an explicit HEAD question without showing it to the owner. For a routine
+choice within the delegated scope, HEAD uses `lane_review_decision` to return one
+of the original choices to the lane.
+It records the reason internally without sending a separate messenger notification.
+When owner judgment is required, HEAD escalates the same pending dialog with the reason
+on the original question card. If HEAD stops during an existing regular review, the
+controller may escalate that same pending dialog to the original owner. Neither path
+authorizes a scope change, grants native execution approval, or answers ordinary native
+dialogs on the operator's behalf.
+The `ask` cards below refer to the structured `askDialog` used by `decision_ask`.
+The Host does not send the OMP 19.1 built-in `ask` HTML `form` to a messenger.
+It cancels it immediately without submitting even the selected default.
 
 | Platform | Approval and question UI and limits |
 | --- | --- |
@@ -1975,7 +1991,7 @@ its checkout for one resident lane; it does not fetch, switch branches, or disca
 edits. Follow-ups stay on the same worker and native session; disconnecting SSH
 does not stop that Host. A cold reopen is held if the checkout has changed.
 Chat replies and approval cards use the original route; messenger file transfer
-and access to the head's local SQLite board are not provided across SSH.
+is not provided across SSH.
 Remote lanes require the normal stock OMP command without extra head-side flags:
 custom tool/profile/approval flags are never silently removed to run remotely.
 Use a dedicated worker OMP profile without ambient plugins. Worker startup
@@ -2029,7 +2045,7 @@ worker. That is not a stop command for an already running lane.
   procedure. Voice-message status and duration are passed through, but this is not automatic
   transcription. Inputs or edits without meaningful text or supported attachments, such as
   sticker-only Discord messages, are not accepted as new work.
-- Lane repository and board repository channel discovery use a Git process with `GIT_DIR`,
+- Lane repository discovery uses a Git process with `GIT_DIR`,
   `GIT_WORK_TREE`, and other `GIT_*` variables stripped from the launching shell's environment.
   This is not isolation of the entire general tool environment.
 - Allowed input resources differ by platform:
@@ -2152,7 +2168,7 @@ login or same-process TUI/herdr attach. Automatic CLI selection does not enable 
 or external-package opt-ins.
 
 ```sh
-OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-host.test.ts test/native-runtime.test.ts test/native-model-selection.test.ts test/native-board.test.ts test/native-gateway.test.ts
+OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-host.test.ts test/native-runtime.test.ts test/native-model-selection.test.ts test/native-gateway.test.ts
 OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-autonomy.test.ts
 ```
 

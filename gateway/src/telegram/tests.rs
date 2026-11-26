@@ -29,6 +29,7 @@ use crate::{adapter::Hub, store::Store};
 
 use super::Telegram;
 
+mod commands;
 mod contract;
 mod faults;
 mod group;

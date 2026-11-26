@@ -120,8 +120,6 @@ Capabilities to request from HEAD in chat (not CLI subcommands):
   Decisions: ask HEAD to request an owner decision, list pending decisions, inspect one or withdraw it.
   Discord channel context: ask HEAD to inspect channel/thread context or set, list or clear a local purpose
     note. Notes do not edit Discord's channel description or authorize work.
-  Shared board: registered HEAD and lane sessions can post, read and subscribe to informational updates
-    within this instance. Board posts are not commands or approvals.
   Workflows: begin a request with one of: ${WORKFLOW_NAMES.filter(name => name !== "jevify").join(", ")}.
     For batch judging against one rubric, begin with lowercase jevify (not /jevify).
   Operations guide and native tool names: ${join(import.meta.dir, "../docs/OPERATIONS.md")}

@@ -1217,6 +1217,47 @@ describe("explicit outbound result attachments", () => {
     expect(store.output(`result-attachment:${original.id}`)).toBeNull();
   });
 
+  test("a Slack text command authorizes the same decoded path shown to HEAD and its first lane", async () => {
+    const { runtime, config, directory, store, main, hosts } = fixture();
+    config.slack = { botTokenEnv: "TEST_SLACK", appTokenEnv: "TEST_SLACK_APP", ownerId: "UOWNER", teamId: "TTEAM", allowedChannelIds: [] };
+    const dm = route(null, { platform: "slack", accountId: "TTEAM:UBOT", authorityId: "UOWNER", guildId: null, channelId: "DPRIVATE" });
+    const messageId = "1750000000.000001";
+    const rawPath = "reports &amp;amp; QA/R&amp;D.txt";
+    const path = "reports &amp; QA/R&D.txt";
+    const source = { ...headMessage(messageId, dm, `attach: ${rawPath}`), id: `slack:${dm.accountId}:${dm.channelId}:${messageId}:original` };
+    config.headCwd = `${directory}-workspace`;
+    mkdirSync(config.headCwd);
+    try {
+      mkdirSync(join(config.headCwd, "reports &amp; QA"));
+      writeFileSync(join(config.headCwd, path), "Slack result");
+      await runtime.start();
+      await admit(runtime, source);
+      expect(main.prompts[0]?.command.message).toContain(`attach: ${path}`);
+      const intent = { sourceId: source.id, path, sessionId: main.state.sessionId,
+        sessionFile: hostPaths(config, "main").sessionFile, toolCallId: "slack-result" };
+      expect(() => runtime.requestResultAttachment({ ...intent, path: rawPath })).toThrow("exact result file");
+      expect(runtime.requestResultAttachment(intent)).toContain("durably queued");
+
+      const lane = await runtime.startLane({ ...selection, sourceId: source.id, title: "Slack result", kickoff: "Checking the file.", cwd: config.headCwd });
+      await runtime.kick();
+      const worker = hosts.get(lane.socketPath)!;
+      expect(worker.prompts[0]?.command.message).toContain(`attach: ${path}`);
+      expect(worker.prompts[0]?.command.message).not.toContain(rawPath);
+      expect(store.input(source.id)?.text).toBe(source.text);
+      expect(store.input(`handoff:${source.id}:lane`)?.text).toBe(source.text);
+      expect(store.output(`result-attachment:${source.id}`)).toMatchObject({ state: "sent", route: dm,
+        resultAttachment: { payload: { name: "R&D.txt" } } });
+
+      worker.complete("File checked.");
+      await runtime.kick();
+      const instruction = "Keep this literal spelling: &amp;D";
+      await runtime.messageLane(lane.id, instruction, source.id);
+      expect(worker.prompts.at(-1)?.command.message).toContain(instruction);
+    } finally {
+      rmSync(config.headCwd, { recursive: true, force: true });
+    }
+  });
+
   for (const toolName of ["result_attach", "write"] as const) test(`a matched lane ${toolName} execution delivers only to the bound topic`, async () => {
     const { runtime, directory, store, messenger, hosts } = fixture();
     const workspace = `${directory}-workspace`;
@@ -1450,7 +1491,8 @@ test("manual fallback opens one review thread and only a fresh owner action for 
   await runtime.start();
   await admit(runtime, { ...message("299", parent, '/cron pr-add "every 5m" dbc-hbin/project'), discordOriginalText: "/voice confirm" });
   expect(store.input("299")?.state).toBe("cancelled");
-  await admit(runtime, message("300", parent, '/cron pr-add "every 5m" dbc-hbin/project'));
+  const registration = message("300", parent, '/cron\tpr-add  "every 5m"\u00a0dbc-hbin/project');
+  await admit(runtime, { ...registration, discordOriginalText: `<@${parent.accountId}> ${registration.text} <@!${parent.accountId}>` });
   const job = store.output("300:head-control")?.text.match(/[a-f0-9-]{36}/)?.[0];
   if (!job) throw new Error(`Missing enrollment: ${store.output("300:head-control")?.text}`);
   await admit(runtime, message("301", parent, `/cron run ${job}`));
@@ -1461,7 +1503,7 @@ test("manual fallback opens one review thread and only a fresh owner action for 
   expect(main.prompts).toEqual([]);
   await expect(runtime.startLane({ ...selection, sourceId: notice.sourceId, cwd: f.directory, title: "invalid", kickoff: "invalid" }))
     .rejects.toThrow();
-  const review = `/cron pr-review ${job} 12 ${first}`;
+  const review = `/cron  pr-review\t${job}  12\u00a0${first}`;
   await admit(runtime, message("302", route("999"), review));
   await admit(runtime, message("303", parent, `/cron pr-review ${job} 12 ${final}`));
   expect(messenger.threads).toEqual([]);
@@ -1488,15 +1530,16 @@ test("manual fallback opens one review thread and only a fresh owner action for 
   const count = messenger.sent.length;
   host.complete(patch);
   await messenger.whenSent(count + 1);
-  await admit(runtime, message("306", lane.route, `/cron pr-status ${job} 12`));
+  await admit(runtime, message("306", lane.route, `/cron pr-status\u3000${job}  12`));
   const fix = store.output("306:head-control")?.text.match(/\/cron pr-fix .+$/)?.[0];
   if (!fix) throw new Error(`Missing source-bound fix: ${store.output("306:head-control")?.text}`);
   await admit(runtime, message("307", lane.route, `/cron pr-merge ${job} 12 ${first}`));
   await admit(runtime, message("308", route("999"), fix));
   await admit(runtime, message("309", lane.route, fix.replace(/[a-f0-9]{64}$/, "0".repeat(64))));
   expect([writes, merges]).toEqual([0, 0]);
-  await admit(runtime, message("310", lane.route, fix));
-  await admit(runtime, message("310", lane.route, fix));
+  const spacedFix = message("310", lane.route, fix.replaceAll(" ", "  "));
+  await admit(runtime, spacedFix);
+  await admit(runtime, spacedFix);
   expect(writes).toBe(1);
   await admit(runtime, message("311", lane.route, `/cron pr-merge ${job} 12 ${first}`));
   expect(merges).toBe(0);
@@ -1504,7 +1547,7 @@ test("manual fallback opens one review thread and only a fresh owner action for 
   await host.whenPrompts(2);
   expect(host.prompts).toHaveLength(2);
   expect(messenger.threads).toEqual([lane.route]);
-  const merge = `/cron pr-merge ${job} 12 ${final}`;
+  const merge = `/cron pr-merge  ${job}\t12 ${final}`;
   const atProbe = Promise.withResolvers<void>();
   const letThrough = Promise.withResolvers<void>();
   messenger.assertRoute = async () => { atProbe.resolve(); await letThrough.promise; };
@@ -1844,7 +1887,7 @@ test("cron controls scope job management to the original thread and send one HEA
     if (destination.accountId !== authenticatedAccount) throw new Error("Gateway socket disconnected before route verification");
   };
   await runtime.start();
-  const add = applicationCommand("201", origin, '/cron add "every 2h" "Original text"');
+  const add = applicationCommand("201", origin, '/cron   add\t"every  2h" "Original text"');
   await admit(runtime, add);
   const id = store.output(`${add.id}:head-control`)?.text.match(/[0-9a-f-]{36}/)?.[0];
   if (!id) throw new Error("Cron registration did not return a job ID");
@@ -5113,7 +5156,7 @@ describe("topic-owned lane delivery", () => {
   test("a different cwd in a bound Discord thread requires an explicit /new", async () => {
     const { runtime, directory, store, hosts, main, messenger, launched } = fixture();
     const originalRoute = route("44");
-    const nextCwd = join(directory, "other-workspace");
+    const nextCwd = join(directory, "other workspace");
     mkdirSync(nextCwd);
     await runtime.start();
     const opening = message("1741", originalRoute, `cwd: ${directory}\nInspect the invoice parser.`);
@@ -5138,7 +5181,7 @@ describe("topic-owned lane delivery", () => {
     expect(launched.map(host => host.cwd)).toEqual([directory]);
     expect(worker.prompts).toHaveLength(1);
 
-    const split = message("1743", originalRoute, `/new cwd: ${nextCwd}\n${task}`);
+    const split = message("1743", originalRoute, `/new   cwd: "${nextCwd}"\n${task}`);
     await admit(runtime, split);
     await admit(runtime, split);
     await admit(runtime, { ...split, id: `${split.id}:edit`, text: `cwd: ${directory}\nReplace the split request.` });
@@ -5189,6 +5232,29 @@ describe("topic-owned lane delivery", () => {
     expect(launched).toHaveLength(1);
     expect(worker.prompts).toEqual([]);
     expect(main.prompts).toEqual([]);
+  });
+
+  test("a natural-language split preserves a quoted cwd instead of opening its unspaced neighbor", async () => {
+    const { runtime, config, directory, store, messenger, hosts, launched } = fixture();
+    const current = savedLane(store, config, "split-literal-path", route("44"));
+    const neighbor = join(directory, "App");
+    const requested = `${neighbor} `;
+    mkdirSync(neighbor);
+    await runtime.start();
+    const text = `\ncwd: "${requested}"\r\n이건 따로 빼줘: Check formatting.`;
+    await admit(runtime, message("1746", current.route, text));
+    expect(store.input("1746")?.state).toBe("cancelled");
+    expect(store.output("1746:workspace")?.route).toEqual(current.route);
+    expect(messenger.threads).toHaveLength(0);
+
+    mkdirSync(requested);
+    await admit(runtime, message("1747", current.route, text));
+    expect(messenger.threads).toHaveLength(1);
+    const sibling = store.laneForRoute(messenger.threads[0]!)!;
+    expect(sibling.cwd).toBe(requested);
+    expect(launched.map(host => host.cwd)).toContain(requested);
+    expect(hosts.get(sibling.socketPath)?.prompts[0]?.command.message).toContain("Check formatting.");
+    expect(store.laneForRoute(current.route)?.id).toBe(current.id);
   });
 
   test("a detached topic dialog without a saved card stays native-only instead of guessing the lane route", async () => {
@@ -5253,6 +5319,185 @@ describe("topic-owned lane delivery", () => {
     expect(messenger.sent[0]?.replyTo).toEqual(selected ? undefined : { route: original.route, messageId: original.messageId });
     expect(main.prompts).toEqual([]);
   });
+
+  async function topicHeadQuestion(headBusy = false) {
+    const f = fixture();
+    const { runtime, config, store, hosts } = f;
+    const lane = savedLane(store, config, "topic-head-question", route("44"));
+    const original = message("topic-question-source", lane.route, "Inspect the parser and coordinate the test layout.");
+    await runtime.start();
+    if (headBusy) await admit(runtime, headMessage("busy-before-topic-question", route("55")));
+    placeTopicInput(store, lane, original);
+    await runtime.kick();
+    const worker = hosts.get(lane.socketPath);
+    if (!worker) throw new Error("Missing topic question's native lane");
+    const id = decisionId(worker.state.sessionId, "test-layout");
+    const questionId = `${id}:head:0`;
+    const option = { label: "Parser @layout.md", description: "Use the literal ^fixture-layout reference." };
+    const frame = { type: "extension_ui_request", method: "ask", id: "native-layout-question",
+      questions: [{ id: questionId, question: "Which existing fixture should I use?",
+        options: [option, { label: "Alternative ^layout" }] }] };
+    const answers = [{ id: questionId, selectedOptions: [option.label] }];
+    const ask = () => {
+      const request = structuredClone(frame);
+      worker.state.pendingUiRequests = [request];
+      worker.emit(request);
+    };
+    return { ...f, lane, original, worker, id, frame, answers, ask };
+  }
+
+  test.each(["answer", "escalate"])("a topic lane's explicit HEAD question wakes one review and returns the %s to the same dialog", async mode => {
+    const { runtime, main, messenger, lane, original, worker, id, frame, answers, ask } = await topicHeadQuestion();
+    ask();
+    await main.whenPrompts(1); // No new owner message, lane settlement, timer, or manual kick.
+    await messenger.handlers!.reconnect!();
+    const decision = runtime.inspectDecision(id);
+    expect(decision).toMatchObject({ target: lane.id, sourceId: original.id, route: original.route, state: "pending" });
+    expect(main.prompts).toHaveLength(1);
+    const prompt = main.prompts[0]?.command.message;
+    if (typeof prompt !== "string") throw new Error("Missing native review prompt");
+    expect(prompt).not.toContain(original.text);
+    expect(prompt).not.toMatch(/[@^](?:layout|fixture-layout)/);
+    const reviewQuestions = prompt.match(/^Original native questions: (\[.+\])$/m)?.[1];
+    if (!reviewQuestions) throw new Error("Missing serialized native questions");
+    expect(JSON.parse(reviewQuestions)).toEqual(frame.questions);
+    expect(messenger.shown.size).toBe(0);
+    if (mode === "answer") {
+      await runtime.reviewLaneDecision({ id, reason: "Existing local fixture within scope", answers });
+    } else {
+      await runtime.reviewLaneDecision({ id, reason: "Owner selection needed" });
+      expect(worker.responses).toEqual([]);
+      const card = messenger.shown.get(decision.approvalId);
+      expect(card).toMatchObject({ route: original.route });
+      expect(card?.request).toEqual(frame);
+      await messenger.handlers!.answer(decision.approvalId, { answers }, original.route);
+    }
+    expect(worker.responses).toEqual([{ id: frame.id, response: { answers } }]);
+    expect(worker.prompts).toHaveLength(1); // The answer resumes the asking tool, not a second assignment.
+    main.complete("Internal decision review only.");
+    worker.complete("Parser fixture checked.");
+    await messenger.whenSent(1);
+    expect(messenger.sent).toMatchObject([{ sourceId: original.id, route: original.route, text: "Parser fixture checked." }]);
+  });
+
+  test.each(["queued", "active"] as const)("HEAD stop escalates a %s review's original lane dialog exactly once without reconnect", async stage => {
+    const { runtime, store, main, messenger, original, worker, id, frame, answers, ask } =
+      await topicHeadQuestion(stage === "queued");
+    ask();
+    if (stage === "active") await main.whenPrompts(1);
+    await runtime.kick();
+    const decision = runtime.inspectDecision(id);
+    const reviewId = `lane-decision-review:${decision.approvalId}`;
+    expect(store.input(reviewId)?.state).toBe(stage === "queued" ? "pending" : "submitted");
+    const [headPrompt] = main.prompts;
+    expect(main.prompts).toHaveLength(1);
+    expect(messenger.shown.size).toBe(0);
+    const presented = spyOn(messenger, "showApproval");
+    const stop = message("stop-topic-question-review", route("55"), "/stop head");
+
+    await admit(runtime, stop);
+    await waitForOutput(messenger, `${stop.id}:head-control`);
+    await admit(runtime, stop);
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(store.input(reviewId)?.state).toBe("cancelled");
+    expect(main.prompts).toEqual([headPrompt]);
+    expect(main.abortCount).toBe(1);
+    expect(messenger.shown.size).toBe(1);
+    expect(presented).toHaveBeenCalledTimes(1);
+    const card = messenger.shown.get(decision.approvalId);
+    expect(card).toMatchObject({ route: original.route, requestId: frame.id, ownerContext: expect.stringMatching(/\S/) });
+    expect(card?.request).toEqual(frame);
+    expect(worker.state.pendingUiRequests).toEqual([frame]);
+    expect(worker.responses).toEqual([]);
+    await messenger.handlers!.answer(decision.approvalId, { answers }, original.route);
+    expect(worker.responses).toEqual([{ id: frame.id, response: { answers } }]);
+    expect(runtime.inspectDecision(id)).toMatchObject({ state: "answered", response: { answers } });
+  });
+
+  test("a lane question cancelled during HEAD native preflight never starts a HEAD prompt", async () => {
+    const { runtime, store, main, messenger, worker, id, frame, ask } = await topicHeadQuestion();
+    const reading = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    main.beforeCursor = async () => {
+      main.beforeCursor = undefined;
+      reading.resolve();
+      await release.promise;
+    };
+    ask();
+    const draining = runtime.kick();
+    const readingCursor = await Promise.race([reading.promise.then(() => true), draining.then(() => false)]);
+    try {
+      expect(readingCursor).toBe(true);
+      const decision = runtime.inspectDecision(id);
+      expect(store.input(`lane-decision-review:${decision.approvalId}`)?.state).toBe("pending");
+      worker.state.pendingUiRequests = [];
+      worker.emit({ type: "extension_ui_request", method: "cancel", targetId: frame.id });
+      expect(runtime.inspectDecision(id).state).toBe("withdrawn");
+    } finally { release.resolve(); }
+    await draining;
+    await runtime.kick();
+
+    expect(store.input(`lane-decision-review:${runtime.inspectDecision(id).approvalId}`)?.state).toBe("cancelled");
+    expect(main.prompts).toEqual([]);
+    expect(messenger.shown.size).toBe(0);
+    expect(worker.responses).toEqual([]);
+  });
+
+  test.each(["socket reconnect", "controller restart"] as const)(
+    "HEAD's review-only gate survives %s while native HEAD is streaming and clears after settlement", async recovery => {
+      const { runtime, config, directory, hosts, main, lane, worker, id, ask, errors } = await topicHeadQuestion();
+      ask();
+      await main.whenPrompts(1);
+      await runtime.kick();
+      expect(runtime.laneDecisionReviewActive()).toBe(true);
+
+      const headPath = hostPaths(config, "main");
+      const reattached = new HostTransport(headPath.sessionFile, main.state.sessionId);
+      reattached.state = structuredClone(main.state);
+      let controller = runtime;
+      if (recovery === "socket reconnect") {
+        hosts.set(headPath.socketPath, reattached);
+        await main.close();
+      } else {
+        await runtime.stop();
+        const reopened = new Store(join(directory, "coordination.sqlite"));
+        const resident = new HostTransport(lane.sessionFile, worker.state.sessionId);
+        resident.state = structuredClone(worker.state);
+        controller = new Superagent(config, reopened, new MessengerTransport(), join(directory, "extension.ts"),
+          error => errors.push(error), {
+            connect: async path => {
+              if (path === headPath.socketPath) return reattached;
+              if (path === lane.socketPath) return resident;
+              throw new Error("Unexpected native owner during decision review recovery");
+            },
+          });
+        const tracked = fixtures.find(entry => entry.runtime === runtime);
+        if (!tracked) throw new Error("Missing decision review restart fixture");
+        tracked.runtime = controller;
+        await controller.start();
+      }
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await controller.kick();
+      expect(reattached.listeners.size).toBe(1);
+      expect(reattached.state.isStreaming).toBe(true);
+      expect(controller.laneDecisionReviewActive()).toBe(true);
+      // A terminal notification does not alone establish native settlement.
+      reattached.emit({ type: "session_settled" });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(controller.laneDecisionReviewActive()).toBe(true);
+      expect(controller.inspectDecision(id)).toMatchObject({ state: "pending" });
+
+      reattached.state.isStreaming = false;
+      reattached.state.isSettled = true;
+      reattached.emit({ type: "session_settled" });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await controller.kick();
+
+      expect(controller.laneDecisionReviewActive()).toBe(false);
+      expect(reattached.prompts).toEqual([]);
+    },
+  );
 });
 
 describe("bound owner assignment scope review", () => {
@@ -5910,6 +6155,28 @@ describe("bound owner assignment scope review", () => {
     expect(worker.responses).toEqual([{ id: correctiveSelect.id, response: denial }]);
     expect(worker.state.pendingUiRequests).toEqual([]);
     expect(store.approval(card.id)?.state).toBe("answered");
+  });
+
+  test("a corrective assignment's explicit HEAD question is withdrawn on the same native dialog without a card or review", async () => {
+    const { runtime, store, lane, original, worker, main, messenger, correctionId } = await setupCorrectiveRun();
+    const id = decisionId(worker.state.sessionId, "corrective-head-question");
+    const frame = { type: "extension_ui_request", method: "ask", id: "corrective-head-native",
+      questions: [{ id: `${id}:head:0`, question: "Which parser fixture should I update?", options: [{ label: "Invoice" }] }] };
+    worker.state.pendingUiRequests = [frame];
+    worker.emit(frame);
+    await drainFrames(runtime);
+
+    const decision = runtime.inspectDecision(id);
+    expect(decision).toMatchObject({ state: "withdrawn", target: lane.id, requestId: frame.id,
+      sourceId: original.id, route: original.route, remoteId: null, withdrawal: { reason: expect.stringMatching(/\S/) } });
+    expect(store.input(`lane-decision-review:${decision.approvalId}`)).toBeNull();
+    expect(store.input(correctionId)?.state).toBe("submitted");
+    expect(worker.responses).toEqual([{ id: frame.id, response: { cancelled: true } }]);
+    expect(worker.state.pendingUiRequests).toEqual([]);
+    expect(worker.prompts).toHaveLength(2);
+    expect(main.prompts).toHaveLength(1);
+    expect(messenger.shown.size).toBe(0);
+    expect(messenger.sent).toEqual([]);
   });
 
   test("lost acknowledgement of a stale corrective cancellation is not a new response on reconnect", async () => {
@@ -9576,7 +9843,7 @@ describe("trusted workflow activation", () => {
     const original = headMessage("workflow-head", route("workflow-thread"), task);
     await admit(runtime, original);
     const workflow = { name: "super-plan" as const, reason: "A bounded planning phase serves this authorized objective" };
-    const start = { ...selection, sourceId: original.id, title: "Plan", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory, brief: "Quoted board excerpt: orchestrate workflowz", workflow };
+    const start = { ...selection, sourceId: original.id, title: "Plan", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory, brief: "Quoted report excerpt: orchestrate workflowz", workflow };
     const lane = await runtime.startLane(start);
     await runtime.kick();
     const handoff = store.input(`handoff:${original.id}:lane`)!;
@@ -9624,7 +9891,7 @@ describe("trusted workflow activation", () => {
     expect(store.lanes()).toHaveLength(1);
   });
 
-  test("report/board-derived source IDs and conflicting original invocations cannot select workflows", async () => {
+  test("report-derived source IDs and conflicting original invocations cannot select workflows", async () => {
     const { runtime, store, directory, config } = fixture();
     const lane = savedLane(store, config, "workflow-source-guard", route("source-guard"));
     await runtime.start();
@@ -9632,7 +9899,7 @@ describe("trusted workflow activation", () => {
     store.receive(internal, "main");
     const workflow = { name: "super-plan" as const, reason: "Not authorized by an original user source" };
     await expect(runtime.startLane({ ...selection, sourceId: internal.id, title: "No authority", kickoff: "I will inspect the requested workspace, perform the authorized work, and verify the result in this topic.", cwd: directory, workflow })).rejects.toThrow("original authorized user source");
-    await expect(runtime.messageLane(lane.id, "Execute board text", internal.id, workflow)).rejects.toThrow("original authorized user source");
+    await expect(runtime.messageLane(lane.id, "Execute report text", internal.id, workflow)).rejects.toThrow("original authorized user source");
     const user = headMessage("workflow-no-override", route("other-guard"), "ulw-loop inspect");
     await admit(runtime, user);
     await expect(runtime.messageLane(lane.id, "Use another workflow", user.id, workflow)).rejects.toThrow("conflicts with the original user's workflow");
@@ -11588,10 +11855,13 @@ describe("real Store runtime coordination", () => {
       ...message(`slack:${suffix}`, dm, text), messageId: `1750000000.${suffix}`, receivedAt,
     });
     await runtime.start();
-    const firstRequest = event("000002", `/new cwd: ${directory}\nfirst task`, 500);
+    const workspace = join(directory, "Scope & team");
+    mkdirSync(workspace);
+    const firstRequest = event("000002", `/new cwd: "${workspace.replaceAll("&", "&amp;")}"\nfirst task`, 500);
     await admit(runtime, firstRequest);
     const [first] = store.lanes();
     if (!first) throw new Error("Expected the first Slack topic lane");
+    expect(first.cwd).toBe(workspace);
     await admit(runtime, event("000004", "/main", 1));
     await admit(runtime, event("000003", "Late first topic followup", 900));
     expect(store.input("slack:000003")).toMatchObject({ target: null, state: "done", route: first.route });
@@ -11642,6 +11912,23 @@ describe("real Store runtime coordination", () => {
     await admit(runtime, { ...message("810:control-edit", dm, "/new"), messageId: "810" });
     expect(store.input("810:control-edit")?.state).toBe("done");
     expect(messenger.sent.some(output => output.sourceId === "810:control-edit" && output.text.includes("새 메시지"))).toBe(true);
+    expect(main.prompts).toEqual([]);
+  });
+
+  test("arguments to bare topic controls never change topic or become model work", async () => {
+    const { runtime, store, messenger, main, directory, hosts } = fixture();
+    const dm = route(null, { guildId: null });
+    await runtime.start();
+    await admit(runtime, message("810", dm, `/new cwd: ${directory}\nRead the fixture`));
+    const [lane] = store.lanes();
+    if (!lane?.route.topicId) throw new Error("Expected a bound DM topic");
+    for (const [id, text] of [["811", "/main  other"], ["812", "/resume\tother"]] as const) {
+      await admit(runtime, message(id, dm, text));
+      expect(store.input(id)).toMatchObject({ state: "cancelled", route: lane.route });
+      expect(messenger.sent.find(output => output.id === `${id}:control`)?.route).toEqual(lane.route);
+    }
+    expect(store.getMeta(`dm:active:${physicalRouteKey(dm)}`)).toBe(lane.route.topicId);
+    expect(hosts.get(lane.socketPath)?.prompts).toHaveLength(1);
     expect(main.prompts).toEqual([]);
   });
 
@@ -14148,6 +14435,84 @@ describe("real Store runtime coordination", () => {
     await runtime.kick();
     expect(store.input(recovered.id)?.route.topicId).toBeTruthy();
     expect(store.getMeta(`cursor:${physicalRouteKey(dm)}`)).toBe("501");
+  });
+
+  test("Telegram formatted slash examples preserve the active DM topic and enter native prompts only as inert prose", async () => {
+    const { runtime, config, store, main } = fixture();
+    config.telegram = { tokenEnv: "TEST_TELEGRAM_TOKEN", ownerId: "1", allowedChatIds: [] };
+    const dm = route(null, { platform: "telegram", guildId: null, channelId: "1" });
+    const source = (messageId: string, text: string, routingText: string, telegramProtectedCommand: boolean): Inbound => ({
+      ...message(messageId, dm, text), id: `telegram:2:1:${messageId}:original`, routingText, telegramProtectedCommand,
+    });
+    await runtime.start();
+    const open = source("501", "/new", "/new", false);
+    await admit(runtime, open);
+    const active = store.input(open.id)?.route.topicId;
+    if (!active) throw new Error("The unformatted /new did not establish a DM topic");
+    expect(main.prompts).toHaveLength(0);
+    const examples = [
+      source("502", "/main", "", true),
+      source("503", "/head orchestrate @README.md", " orchestrate @README.md", true),
+      source("504", "quoted sample\n/new", "\n/new", true),
+    ];
+    for (const [index, input] of examples.entries()) {
+      await admit(runtime, input);
+      await main.whenPrompts(index + 1);
+      expect(store.input(input.id)).toMatchObject({ text: input.text, workflow: null, route: { ...dm, topicId: active } });
+      expect(store.getMeta(`dm:active:${physicalRouteKey(dm)}`)).toBe(active);
+      const prompt = String(main.prompts[index]?.command.message);
+      expect(prompt.split("\n").at(-1)).toBe("```");
+      expect(prompt).toContain(input.text.replace("@", "\\u0040"));
+      expect(containsMagicKeyword(prompt, "orchestrate")).toBe(false);
+      main.complete("Example reviewed.");
+      await runtime.kick();
+    }
+
+    const authored = source("505", "/head Inspect quoted-arg.txt", "/head ", false);
+    await admit(runtime, authored);
+    await main.whenPrompts(4);
+    expect(String(main.prompts[3]?.command.message)).toEndWith("\n\nInspect quoted-arg.txt");
+    expect(store.getMeta(`dm:active:${physicalRouteKey(dm)}`)).toBe(active);
+  });
+
+  test("a restored Telegram receipt with a masked slash verb cannot activate its stale native workflow", async () => {
+    const { runtime, config, store, main } = fixture();
+    config.telegram = { tokenEnv: "TEST_TELEGRAM_TOKEN", ownerId: "1", allowedChatIds: [] };
+    const dm = route(null, { platform: "telegram", guildId: null, channelId: "1" });
+    const id = "telegram:2:1:501:original";
+    const text = "/head super orchestrate";
+    const input = { ...message("501", dm, text), id, routingText: " super orchestrate" };
+    expect(store.receive(input, "main", { [`user-source:${id}`]: "true" }, {
+      name: "super", sourceId: id, provenance: "user", reason: "Recorded before formatting veto",
+    })).toBe(true);
+    await runtime.start();
+    await main.whenPrompts(1);
+    expect(store.input(id)).toMatchObject({ text, workflow: { name: "super", sourceId: id, provenance: "user" } });
+    const prompt = String(main.prompts[0]?.command.message);
+    expect(prompt.split("\n").at(-1)).toBe("```");
+    expect(prompt).toContain(text);
+    expect(containsMagicKeyword(prompt, "orchestrate")).toBe(false);
+  });
+
+  test("a pending legacy Telegram placement with a masked /new verb does not create a lane on restore", async () => {
+    const { runtime, config, directory, store, main, messenger } = fixture();
+    config.telegram = { tokenEnv: "TEST_TELEGRAM_TOKEN", ownerId: "1", allowedChatIds: [] };
+    const dm = route(null, { platform: "telegram", guildId: null, channelId: "1" });
+    const topicId = "already-recorded-topic";
+    const id = "telegram:2:1:501:original";
+    const text = `/new cwd: ${directory}\nSample work`;
+    const input = { ...message("501", { ...dm, topicId }, text), id, routingText: ` cwd: ${directory}\nSample work` };
+    expect(store.receive(input, null, {
+      [`user-source:${id}`]: "true", [`topic-owner:${id}`]: "lane-legacy",
+      [`topic-creator:${id}`]: "here", [`topic-cwd:${id}`]: directory,
+      [`dm:active:${physicalRouteKey(dm)}`]: topicId,
+    })).toBe(true);
+    await runtime.start();
+    await waitForOutput(messenger, `${id}:held`);
+    expect(store.input(id)).toMatchObject({ text, route: input.route, state: "cancelled" });
+    expect(store.getMeta(`dm:active:${physicalRouteKey(dm)}`)).toBe(topicId);
+    expect(store.lanes()).toEqual([]);
+    expect(main.prompts).toEqual([]);
   });
 
   test("HEAD delegates an ordinary parent request once and its work thread owns the follow-up", async () => {

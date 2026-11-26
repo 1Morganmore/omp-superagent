@@ -2,6 +2,7 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, unl
 import { dirname, join } from "node:path";
 import { Value } from "@sinclair/typebox/value";
 import { HostConnection } from "./host";
+import { NativeJournalFormatError, readNativeSessionId } from "./native-journal";
 import { ownsCheckout, privateWorkerDirectory } from "./worker-checkout";
 import { workerExit, type WorkerIdentity, type WorkerLedger, type WorkerReceipt } from "./worker-ledger";
 import { WorkerRefusal } from "./worker-request";
@@ -54,8 +55,11 @@ export async function readWorkerFiles(paths: WorkerPaths) {
   const session = checkedFile(paths.sessionFile);
   let sessionId: string | null = null;
   if (session) {
-    const { readSessionHeaderId } = await import("@oh-my-pi/pi-coding-agent/session/session-loader");
-    sessionId = await readSessionHeaderId(paths.sessionFile) ?? null;
+    try { sessionId = await readNativeSessionId(paths.sessionFile, session) ?? null; }
+    catch (error) {
+      if (!(error instanceof NativeJournalFormatError)) throw error;
+      // A present but unrecognized journal is not an absent native session.
+    }
     if (!sameFile(session, checkedFile(paths.sessionFile))) throw new WorkerRefusal("Worker journal changed while reading its identity");
   }
   return { socket, exit, session, sessionId };

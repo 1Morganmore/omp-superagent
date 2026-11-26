@@ -568,7 +568,6 @@ test("buildHostArgs keeps explicit persistence, native RPC UI, cwd, extension, a
     "--session", launch.sessionFile, "--cwd", root,
     "-e", path.resolve(import.meta.dir, "..") + path.sep,
     "-e", launch.managedUlwPath!, "-e", launch.extensionPath,
-    "-e", path.resolve(import.meta.dir, "../src/board-extension.ts"),
     "-e", path.resolve(import.meta.dir, "../src/host-extension.ts"),
     "--config", `${launch.socketPath}.config.json`,
   ]);

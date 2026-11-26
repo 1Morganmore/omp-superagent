@@ -24,7 +24,40 @@ const CURSOR_IDLE_MS = 24 * 60 * 60 * 1000;
 const COMMAND_NAMES = new Set<string>(MESSENGER_COMMANDS.map(command => command.name));
 const hiddenEntityTypes = new Set<string>(["blockquote", "expandable_blockquote", "pre", "code"]);
 
-function routingView(original: string, entities: readonly MessageEntity[], suffix: { readonly start: number; readonly end: number }): string {
+type Span = { readonly start: number; readonly end: number };
+type Projection = { readonly text: string; readonly routingText: string };
+export interface TelegramRedelivery {
+  readonly addressedElsewhere: boolean;
+  readonly legacy: Projection | null;
+}
+
+function protectedToken(entities: readonly MessageEntity[], { start, end }: Span): boolean {
+  return entities.some(({ type, offset, length }) => hiddenEntityTypes.has(type) &&
+    Number.isSafeInteger(offset) && offset >= 0 && offset < end &&
+    Number.isSafeInteger(length) && length > Math.max(0, start - offset));
+}
+
+function projection(original: string, entities: readonly MessageEntity[], suffix: Span): Projection {
+  const text = original.slice(0, suffix.start) + original.slice(suffix.end);
+  return { text, routingText: routingView(original, entities, suffix) ?? "" };
+}
+
+function commandSuffix(text: string, entities: readonly MessageEntity[], bot: string | undefined, legacy: boolean): Span | null {
+  // The old adapter only read entity offset zero and did not exclude spans.
+  const start = legacy ? 0 : text.length - text.trimStart().length;
+  const entity = entities.find(value => value.type === "bot_command" && value.offset === start);
+  const end = start + (entity?.length ?? 0);
+  const unchanged = { start: 0, end: 0 };
+  if (!entity || !Number.isSafeInteger(entity.length) || entity.length <= 0 || end > text.length ||
+    (end < text.length && !/\s/u.test(text.charAt(end))) || (!legacy && protectedToken(entities, { start, end }))) return unchanged;
+  const qualified = /^\/([a-z0-9_]{1,32})@([a-z0-9_]+)$/i.exec(text.slice(start, end));
+  const name = qualified?.[1], username = qualified?.[2];
+  if (!name || !username) return unchanged;
+  if (!bot || username.toLowerCase() !== bot.toLowerCase()) return null;
+  return COMMAND_NAMES.has(name) ? { start: start + name.length + 1, end } : unchanged;
+}
+
+function routingView(original: string, entities: readonly MessageEntity[], suffix: Span): string | undefined {
   const afterCommand = (index: number) => index - Math.min(Math.max(index - suffix.start, 0), suffix.end - suffix.start);
   const scalarBoundary = (index: number) => !(/[\uD800-\uDBFF]/.test(original.charAt(index - 1))
     && /[\uDC00-\uDFFF]/.test(original.charAt(index)));
@@ -34,7 +67,7 @@ function routingView(original: string, entities: readonly MessageEntity[], suffi
     if (!hiddenEntityTypes.has(type)) continue;
     const end = offset + length;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length <= 0
-      || end > original.length || !scalarBoundary(offset) || !scalarBoundary(end)) return "";
+      || end > original.length || !scalarBoundary(offset) || !scalarBoundary(end)) return undefined;
     const start = afterCommand(offset), stop = afterCommand(end);
     if (start < stop) spans.push({ start, end: stop });
   }
@@ -83,6 +116,7 @@ export interface TelegramMessengerOptions {
   store: Pick<StorePort, "getMeta" | "setMeta"> & {
     /** The Gateway retains answers while the original native request is pending. */
     hasPendingAnswer?(approvalId: string, route: Route): boolean;
+    telegramAdmittedInput?(input: Inbound, redelivery: TelegramRedelivery): boolean;
   };
   onError?: (error: unknown) => void;
   /** Supported grammY HTTP boundary, also used for authenticated file downloads. */
@@ -232,6 +266,11 @@ export class TelegramMessenger implements Messenger {
 
   /** Sender and physical destination are API identities, never quoted identities. */
   normalize(message: Message): Inbound | null {
+    const normalized = this.ownerInput(message);
+    return normalized && !normalized.addressedElsewhere ? normalized.input : null;
+  }
+
+  private ownerInput(message: Message): (TelegramRedelivery & { input: Inbound }) | null {
     const data = record(message);
     if (!message.from || message.from.is_bot || String(message.from.id) !== this.options.ownerId || message.sender_chat ||
       data.forward_origin || data.forward_from || data.forward_sender_name || data.forward_from_chat || data.is_automatic_forward || data.via_bot || data.business_connection_id) return null;
@@ -256,24 +295,15 @@ export class TelegramMessenger implements Messenger {
     if (message.voice) add(message.voice, `voice-${message.voice.file_unique_id}.ogg`, "audio/ogg", true);
     if (message.video_note) add(message.video_note, `video-note-${message.video_note.file_unique_id}.mp4`, "video/mp4");
     const originalText = message.text ?? message.caption ?? "";
-    let text = originalText;
     const entities = (message.text === undefined ? message.caption_entities : message.entities) ?? [];
-    let commandSuffix = { start: 0, end: 0 };
-    // Telegram offsets/lengths are UTF-16, matching JS slice. Only an actual
-    // leading bot_command entity may address this bot; body mentions are text.
-    const entity = entities.find(value => value.type === "bot_command" && value.offset === 0);
-    if (entity && Number.isSafeInteger(entity.length) && entity.length > 0 && entity.length <= text.length &&
-      (entity.length === text.length || /\s/.test(text[entity.length]!))) {
-      const qualified = /^\/([a-z0-9_]{1,32})@([a-z0-9_]+)$/i.exec(text.slice(0, entity.length));
-      const name = qualified?.[1], username = qualified?.[2];
-      if (name && username) {
-        if (!this.me?.username || username.toLowerCase() !== this.me.username.toLowerCase()) return null;
-        if (COMMAND_NAMES.has(name)) {
-          commandSuffix = { start: name.length + 1, end: entity.length };
-          text = `/${name}${text.slice(entity.length)}`;
-        }
-      }
-    }
+    const currentSuffix = commandSuffix(originalText, entities, this.me?.username, false);
+    const suffix = currentSuffix ?? { start: 0, end: 0 };
+    const text = originalText.slice(0, suffix.start) + originalText.slice(suffix.end);
+    const view = routingView(originalText, entities, suffix);
+    const verb = /^\s*(\/\S+)/u.exec(originalText);
+    const telegramProtectedCommand = verb
+      ? view === undefined || protectedToken(entities, { start: verb[0].length - verb[1]!.length, end: verb[0].length })
+      : view?.trimStart().startsWith("/") === true;
     if (!text && files.length === 0) return null;
     const reply = this.replyContext(message, route);
     // Preserve the existing owner-edit identity when optional context appears
@@ -283,10 +313,13 @@ export class TelegramMessenger implements Messenger {
       const fileIdentity = files.map(({ voice: _voice, durationSeconds: _duration, ...file }) => file);
       revision = `edit:${message.edit_date}:${hash(JSON.stringify([originalText, fileIdentity]))}`;
     }
-    return { id: `telegram:${route.accountId}:${route.channelId}:${message.message_id}:${revision}`, route,
-      messageId: String(message.message_id), text, routingText: routingView(originalText, entities, commandSuffix),
+    const input: Inbound = { id: `telegram:${route.accountId}:${route.channelId}:${message.message_id}:${revision}`, route,
+      messageId: String(message.message_id), text, routingText: view ?? "", telegramProtectedCommand,
+      ...(text === originalText ? {} : { telegramOriginalText: originalText }),
       receivedAt: (message.edit_date ?? message.date) * 1000, attachments: files,
       ...(reply ? { reply } : {}) };
+    const oldSuffix = commandSuffix(originalText, entities, this.me?.username, true);
+    return { input, addressedElsewhere: currentSuffix === null, legacy: oldSuffix ? projection(originalText, entities, oldSuffix) : null };
   }
 
   private replyContext(message: Message, route: Route): ReplyContext | undefined {
@@ -302,8 +335,10 @@ export class TelegramMessenger implements Messenger {
     if (update.callback_query) { await this.callback(update.callback_query); return; }
     const message = update.message ?? update.edited_message;
     if (!message) return;
-    const input = this.normalize(message);
-    if (!input) return;
+    const receipt = this.ownerInput(message);
+    if (!receipt) return;
+    const { input } = receipt;
+    if (this.options.store.telegramAdmittedInput?.(input, receipt) || receipt.addressedElsewhere) return;
     // An exact reply to an active bot card is the only text approval surface.
     const reply = message.reply_to_message;
     const pending = reply && [...this.pending.values()].find(value => value.messageId === String(reply.message_id) &&

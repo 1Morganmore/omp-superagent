@@ -241,15 +241,16 @@ async fn admits_owner_messages_once_and_ignores_others() -> Result<()> {
     fixture.baseline().await?;
     fixture.add(json!({"id":2,"logId":"11","chatId":"777","senderId":"5","text":"not owner","receivedAtMs":1}));
     fixture.add(json!({"id":3,"logId":"12","chatId":"999","senderId":"42","text":"other room","receivedAtMs":1}));
-    fixture.add(owner_row(4, "13", "  상태 알려줘  "));
+    let command = "/head   첫 번째 질문\n두 번째  줄";
+    fixture.add(owner_row(4, "13", &format!("  {command}  ")));
     let event = fixture.next_event().await?;
     assert_eq!(event["kind"], "message");
     assert_eq!(event["input"]["id"], "kakao:900:777:13");
-    assert_eq!(event["input"]["text"], "상태 알려줘");
+    assert_eq!(event["input"]["text"], command);
     assert_eq!(event["input"]["messageId"], "13");
     assert_eq!(event["input"]["route"], route());
     // A replayed bridge row (cursor loss) is the same durable identity, not new work.
-    fixture.add(owner_row(5, "13", "상태 알려줘"));
+    fixture.add(owner_row(5, "13", command));
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(fixture.store.next(None)?.is_none());
     assert_eq!(

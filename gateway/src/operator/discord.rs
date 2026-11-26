@@ -307,6 +307,14 @@ async fn commands(req: &Value, api: &Api) -> Result<Value, &'static str> {
         }));
     }
     let planned = definitions();
+    // Names alone cannot tell an operator why Discord offers no argument field.
+    let text_option_drift: Vec<_> = catalog().iter().filter_map(|command| {
+        let description = command.text?;
+        let options = current.iter().find(|row| row.kind == 1 && row.name == command.name)
+            .and_then(|row| row.fields.get("options")?.as_array());
+        (!options.is_some_and(|items| matches!(items.as_slice(), [item] if exact_text_option(item, description))))
+            .then_some(command.name)
+    }).collect();
     let (status, note) = if !request.apply {
         ("dry-run", "Read-only plan. --apply takes exclusive ownership of this dedicated bot's GLOBAL command list, replacing it with supported Superagent definitions and deleting all other global registrations (including Hermes). Guild registrations are preserved; supported-name guild shadows block apply. No Gateway or native runtime was started.")
     } else if shadowed {
@@ -334,6 +342,7 @@ async fn commands(req: &Value, api: &Api) -> Result<Value, &'static str> {
     };
     Ok(json!({
         "status": status, "applicationId": id, "botId": id, "plannedGlobal": planned,
+        "preApplyTextOptionDrift": text_option_drift,
         "currentGlobal": current.iter().map(|row| summary(row, &api.bot)).collect::<Vec<_>>(),
         "obsoleteGlobal": current.iter().filter(|row| !supported(row)).map(|row| summary(row, &api.bot)).collect::<Vec<_>>(),
         "guilds": guilds, "note": note,

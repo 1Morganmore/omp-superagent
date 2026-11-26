@@ -59,7 +59,8 @@ async fn poll_ack_only_follows_durable_identity_bound_admission() -> Result<()> 
         json!({
             "kind":"message","input":{"id":"telegram:900:-100:10:original","route":route(),
                 "messageId":"10","receivedAt":100000,"text":"/status  keep 😀",
-                "routingText":"/status  keep 😀","attachments":[]}
+                "routingText":"/status  keep 😀","attachments":[],
+                "telegramOriginalText":"/status@ROOM_bot  keep 😀","telegramProtectedCommand":false}
         })
     );
     assert_eq!(

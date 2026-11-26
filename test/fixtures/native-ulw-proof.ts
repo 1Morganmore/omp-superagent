@@ -156,7 +156,7 @@ export async function runNativeUlwProof(options: {
   for (const id of ["301", "302", "303", `report:${firstHandoff}`]) {
     const actual = headEvidence.find(record => record.requestId === id)!;
     assert(actual);
-    assert.equal(actual.policyCount, 0, "Quote/report/board data must not arm the real head policy");
+    assert.equal(actual.policyCount, 0, "Quoted text and lane reports must not arm the real head policy");
     assert.deepEqual(actual.notices, []);
     assert.deepEqual(actual.directives, []);
   }

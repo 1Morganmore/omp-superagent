@@ -10,7 +10,7 @@ async fn group_poll_accepts_authenticated_command_entity_and_never_hydrates_quot
     let mut fixture = Fixture::start_with(&json!({
         "telegram":{"allowedChatIds":["-100"]},
         "groupRooms":[{"platform":"telegram","guildId":"-100","channelId":"-100",
-            "userIds":["42","43"],"mode":"chat","revision":"active","dailyLimit":3}]
+            "userIds":["42","43"],"mode":"chat","revision":"active","dailyLimit":6}]
     })).await?;
     fixture.hub.ready.send_replace(true);
     let (_, poll) = fixture.poll().await?;
@@ -21,7 +21,7 @@ async fn group_poll_accepts_authenticated_command_entity_and_never_hydrates_quot
     });
     let addressed = |id, user, username: &str, text| {
         let command = format!("/ask@{username}");
-        let mut message = message(id, user, &format!("{command} {text}"));
+        let mut message = message(id, user, &format!("{command}\n\t{text}"));
         message["entities"] = json!([{"type":"bot_command","offset":0,"length":command.len()}]);
         message
     };
@@ -35,9 +35,19 @@ async fn group_poll_accepts_authenticated_command_entity_and_never_hydrates_quot
     attachment["sticker"] = json!({"file_id":"file"});
     let mut forwarded = message(5, 43, "!ask forwarded");
     forwarded["forward_origin"] = json!({"type":"hidden_user"});
-    let mut admitted = addressed(10, 43, "ROOM_BOT", "draft in my own words");
+    let argument = "Draft  😀\nKeep @other_bot in my own words.";
+    let mut admitted = addressed(10, 43, "ROOM_BOT", argument);
+    admitted["entities"].as_array_mut().context("Missing command entities")?.push(
+        json!({"type":"code","offset":"/ask@ROOM_BOT\n\t".len(),"length":5}),
+    );
     admitted["reply_to_message"] = message(20, 42, "/restart secret");
     admitted["quote"] = json!({"text":"secret excerpt"});
+    let mut quoted_slash = addressed(13, 43, "ROOM_BOT", "do not run this example");
+    quoted_slash["entities"].as_array_mut().context("Missing command entities")?.push(
+        json!({"type":"blockquote","offset":0,"length":"/ask@ROOM_BOT".len()}),
+    );
+    let mut quoted_bang = message(14, 43, "!ask do not run this example");
+    quoted_bang["entities"] = json!([{"type":"code","offset":0,"length":4}]);
     poll.send(json!([
         {"update_id":1,"message":old},
         {"update_id":2,"message":bot},
@@ -54,20 +64,29 @@ async fn group_poll_accepts_authenticated_command_entity_and_never_hydrates_quot
         {"update_id":13,"callback_query":{"id":"legacy","from":{"id":42,"is_bot":false},
             "data":"legacy","message":admitted}},
         {"update_id":14,"message":addressed(12,44,"ROOM_BOT","valid command from a nonmember")},
+        {"update_id":15,"message":quoted_slash},
+        {"update_id":16,"message":quoted_bang},
+        {"update_id":17,"message":message(15,43,"!ask\t\nPlain request  with whitespace.")},
     ])).expect("Telegram fixture update response");
 
     let (ack, _next_poll) = fixture.poll().await?;
-    assert_eq!(ack["offset"], 15);
-    assert_eq!(fixture.store.pending()?, 1);
+    assert_eq!(ack["offset"], 18);
+    assert_eq!(fixture.store.pending()?, 2);
     let group = fixture.store.next(None)?.context("Group update missing after poll ACK")?;
     assert_eq!(group.event["kind"], "group");
     let record = &group.event["request"];
     assert_eq!(record["route"], route());
     assert_eq!(record["messageId"], "10");
-    assert_eq!(record["text"], "draft in my own words");
+    assert_eq!(record["text"], argument);
     assert_eq!(record["userId"], "43");
     assert_eq!(record.as_object().map(|fields| fields.len()), Some(7));
     fixture.store.receipt(group.sequence, GatewayReceipt::Accepted)?;
+    let plain = fixture.store.next(None)?.context("Plain group update missing after poll ACK")?;
+    let record = &plain.event["request"];
+    assert_eq!(record["route"], route());
+    assert_eq!(record["messageId"], "15");
+    assert_eq!(record["text"], "Plain request  with whitespace.");
+    fixture.store.receipt(plain.sequence, GatewayReceipt::Accepted)?;
     assert!(fixture.hub.effect("showApproval", &[json!({"route":route()})]).await.is_err());
 
     assert_eq!(fixture.hub.send_group(json!({

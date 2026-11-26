@@ -24,7 +24,7 @@ const jobId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu;
 
 export function parsePrModeControl(argument: string): ModeCommand | null {
   if (lineBreak.test(argument)) return null;
-  const match = /^pr-mode[ \t]+(?:(\S+)[ \t]+)?(review|fix|merge)$/u.exec(argument.trim());
+  const match = /^pr-mode\s+(?:(\S+)\s+)?(review|fix|merge)$/u.exec(argument.trim());
   const [, selector, mode] = match ?? [];
   if (mode !== "review" && mode !== "fix" && mode !== "merge") return null;
   if (selector === undefined) return { target: null, mode };
@@ -36,7 +36,7 @@ export function parsePrModeControl(argument: string): ModeCommand | null {
 export function prModeArgument(text: string): string | null {
   if (lineBreak.test(text)) return null;
   const command = text.trim();
-  const slash = /^\/cron[ \t]+(.+)$/u.exec(command)?.[1];
+  const slash = /^\/cron\s+(.+)$/u.exec(command)?.[1];
   if (slash !== undefined) {
     const parsed = parsePrModeControl(slash);
     return parsed?.target ? `pr-mode ${parsed.target} ${parsed.mode}` : null;

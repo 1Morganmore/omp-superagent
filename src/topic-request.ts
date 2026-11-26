@@ -9,7 +9,9 @@ export function topicRequest(text: string) {
   const request = text.replace(/^\s*\/new(?:\s+|$)/, "");
   const header = /^cwd:[ \t]*([^\n]*)(?:\n|$)/i.exec(request.trimStart());
   if (!header) return { text: request, cwd: null };
-  return { text: request.trimStart().slice(header[0].length), cwd: header[1].trim() };
+  const path = header[1].trim();
+  const quoted = path.match(/^(["'])(\/.*)\1$/u);
+  return { text: request.trimStart().slice(header[0].length), cwd: quoted?.[2] ?? path };
 }
 
 /** Parse only the original Discord owner request body. An empty result asks for a task. */

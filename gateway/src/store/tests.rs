@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use super::{GatewayReceipt, Store, answer_digest};
 
+mod recovery;
+
 struct StateDir(PathBuf);
 
 impl StateDir {
@@ -193,6 +195,13 @@ fn restart_authority_retains_exact_source_route_and_historical_receipt() -> Resu
             "UPDATE outputs SET route=? WHERE id=?",
             params![route.to_string(), ack],
         )?;
+        for (field, value) in [("telegramProtectedCommand", json!(true)), ("routingText", json!(""))] {
+            let mut example = input.clone();
+            example[field] = value;
+            head.execute("UPDATE inputs SET data=? WHERE id=?", params![example.to_string(), id])?;
+            assert!(store.set_restart(&record).is_err(), "an example with a sent reply must not authorize restart");
+        }
+        head.execute("UPDATE inputs SET data=? WHERE id=?", params![input.to_string(), id])?;
         store.set_restart(&record)?;
     }
     let mut old = store

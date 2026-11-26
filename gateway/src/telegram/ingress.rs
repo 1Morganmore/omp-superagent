@@ -1,19 +1,18 @@
-use std::ops::Range;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
     adapter::EffectError,
-    commands::accepts_text,
     group::{Candidate, Room},
     picker::PREFIX,
-    store::js_trim,
 };
 
 use super::{
     Core,
-    entities::{Entity, routing_text},
+    entities::{
+        Entity, QualifiedCommand, command_blocked, command_suffix, legacy_suffix, protected_command,
+        routing_text, without_suffix,
+    },
     files::{Attachment, Media, MediaKind},
     model::{Chat, Identity, Policy, Route, SAFE_INTEGER, Sender},
 };
@@ -104,12 +103,17 @@ pub(super) struct Inbound {
     message_id: String,
     text: String,
     routing_text: String,
+    telegram_protected_command: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    telegram_original_text: Option<String>,
     received_at: u64,
     attachments: Vec<Attachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply: Option<Reply>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unresolved_reply: Option<bool>,
+    #[serde(skip)]
+    addressed_elsewhere: bool,
 }
 
 #[derive(Serialize)]
@@ -120,6 +124,16 @@ struct Reply {
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quote: Option<String>,
+}
+
+impl Message {
+    fn content(&self) -> (&str, &[Entity]) {
+        if let Some(text) = self.text.as_deref() {
+            (text, &self.entities)
+        } else {
+            (self.caption.as_deref().unwrap_or_default(), &self.caption_entities)
+        }
+    }
 }
 
 pub(super) fn normalize(policy: &Policy, me: &Identity, message: &Message) -> Option<Inbound> {
@@ -144,18 +158,18 @@ pub(super) fn normalize(policy: &Policy, me: &Identity, message: &Message) -> Op
         return None;
     }
     let route = policy.route(me, &message.chat, message.message_thread_id)?;
-    let original = message
-        .text
-        .as_deref()
-        .or(message.caption.as_deref())
-        .unwrap_or("");
-    let entities = if message.text.is_some() {
-        &message.entities
-    } else {
-        &message.caption_entities
-    };
-    let (text, command_suffix) = command(original, entities, me.username.as_deref())?;
-    let routing_text = routing_text(original, &text, entities, command_suffix).unwrap_or_default();
+    let (original, entities) = message.content();
+    let suffix = command_suffix(
+        QualifiedCommand::leading(original, entities),
+        me.username.as_deref(),
+    );
+    let addressed_elsewhere = suffix.is_none();
+    let suffix = suffix.unwrap_or(0..0);
+    let text = without_suffix(original, &suffix);
+    let telegram_original_text = (!suffix.is_empty()).then(|| original.to_owned());
+    let view = routing_text(original, &text, entities, suffix);
+    let telegram_protected_command = command_blocked(original, entities, view.as_deref());
+    let routing_text = view.unwrap_or_default();
     let photo = message.photo.iter().reduce(|largest, candidate| {
         let area = |media: &Media| u128::from(media.width) * u128::from(media.height);
         if area(candidate) > area(largest) {
@@ -225,56 +239,14 @@ pub(super) fn normalize(policy: &Policy, me: &Identity, message: &Message) -> Op
         message_id: message.message_id.to_string(),
         text,
         routing_text,
+        telegram_protected_command,
+        telegram_original_text,
         received_at,
         attachments,
         reply,
         unresolved_reply,
+        addressed_elsewhere,
     })
-}
-
-// Return the original byte range removed by normalization so entity positions
-// can be validated against the input before being projected onto the result.
-fn command(text: &str, entities: &[Entity], bot: Option<&str>) -> Option<(String, Range<usize>)> {
-    let unchanged = || Some((text.to_owned(), 0..0));
-    let Some(entity) = entities
-        .iter()
-        .find(|entity| entity.kind == "bot_command" && entity.offset == Some(0))
-    else {
-        return unchanged();
-    };
-    // A qualified command is ASCII. The UTF-16 offset is therefore also its
-    // byte offset; if it splits multibyte content it cannot be a command.
-    let Some(head) = entity.length.and_then(|length| text.get(..length)) else {
-        return unchanged();
-    };
-    let rest = &text[head.len()..];
-    let Some((name, username)) = head.strip_prefix('/').and_then(|head| head.split_once('@'))
-    else {
-        return unchanged();
-    };
-    let word = |value: &str| {
-        !value.is_empty()
-            && value
-                .bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
-    };
-    if name.len() > 32
-        || !word(name)
-        || !word(username)
-        || rest
-            .chars()
-            .next()
-            .is_some_and(|ch| !js_trim(&rest[..ch.len_utf8()]).is_empty())
-    {
-        return unchanged();
-    }
-    if !bot.is_some_and(|bot| username.eq_ignore_ascii_case(bot)) {
-        return None;
-    }
-    if accepts_text(name).is_some() {
-        return Some((format!("/{name}{rest}"), (name.len() + 1)..head.len()));
-    }
-    unchanged()
 }
 
 impl Core {
@@ -311,13 +283,32 @@ impl Core {
         let Some(input) = normalize(&self.policy, &me, &message) else {
             return Ok(());
         };
+        // Verify the immutable receipt before a redelivery can write attachment
+        // capabilities or be reinterpreted as a reply to an active card.
+        let (original, entities) = message.content();
+        let legacy = legacy_suffix(original, entities, me.username.as_deref()).map(|suffix| {
+            let text = without_suffix(original, &suffix);
+            let view = routing_text(original, &text, entities, suffix).unwrap_or_default();
+            (text, view)
+        });
+        let event = json!({"kind":"message","input":input});
+        if self.ctx.telegram_admitted_input(
+            &event,
+            input.addressed_elsewhere,
+            legacy.as_ref().map(|(text, view)| (text.as_str(), view.as_str())),
+        )
+            .map_err(|_| super::ledger_error())?
+            || input.addressed_elsewhere
+        {
+            return Ok(());
+        }
         if message.reply_to_message.is_some() && self.handle_reply(&me, &message, &input).await? {
             return Ok(());
         }
         for attachment in &input.attachments {
             attachment.save(self, &input.route)?;
         }
-        self.admit(json!({"kind":"message","input":input}))
+        self.admit(event)
     }
 
     fn group_message(&self, me: &Identity, room: &Room, route: Route, message: &Message) -> Result<(), EffectError> {
@@ -342,17 +333,16 @@ impl Core {
         {
             return Ok(());
         }
-        let qualified_command = message.entities.iter().find_map(|entity| {
-            if entity.kind != "bot_command" || entity.offset != Some(0) {
-                return None;
-            }
-            let head = text.get(..entity.length?)?;
-            let token = head.strip_prefix('/')?;
-            let (name, username) = token.split_once('@')?;
-            (name == room.mode.command() && me.username.as_deref().is_some_and(|own| {
-                username.eq_ignore_ascii_case(own)
-            })).then_some(head)
-        });
+        let name = room.mode.command();
+        if text.starts_with('!') && protected_command(&message.entities, 0..name.len() + 1) {
+            return Ok(());
+        }
+        let qualified_command = QualifiedCommand::leading(text, &message.entities)
+            .filter(|command| {
+                text.starts_with(command.token) && command.name == name
+                    && command.addressed_to(me.username.as_deref())
+            })
+            .map(|command| command.token);
         let Some(sent_ms) = i64::try_from(message.date).ok().and_then(|date| date.checked_mul(1000)) else {
             return Ok(());
         };

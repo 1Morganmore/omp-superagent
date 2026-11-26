@@ -30,9 +30,10 @@ Discord 텍스트로만 받는다.
 `lane_inspect`, `lane_message`, `lane_pause`, `lane_resume`, `lane_close`,
 `thread_inspect`, `lane_thread_update`, `messenger_presence`, `lane_watch`, `pr_watch`, `pr_watch_list`,
 `discord_context`, `discord_purpose_list`, `discord_purpose_set`, `discord_purpose_clear`,
-`decision_list`, `decision_inspect`, `decision_withdraw`를 사용한다.
+`decision_list`, `decision_inspect`, `decision_withdraw`, `lane_review_decision`을 사용한다.
 `decision_ask`는 HEAD와 레인 root에서 사용하며 native 자식에는 제공하지 않는다.
-`lane_inspect({})`가 목록 조회다. 레인에는 관리 권한을, native 자식에는 관리·게시판 권한을 주지 않는다.
+`lane_inspect({})`로 목록을 조회한다. `lane_report`는 레인 root만 사용할 수 있다. 레인과
+native 자식에는 관리 권한을 주지 않는다.
 일반 OMP에 이 확장들을 전역 설치하지 않는다. 도구 인자·역할 경계는
 [설계의 관리 도구 계약](design/execution.md#management-tools)을 따른다.
 
@@ -142,26 +143,30 @@ extension-command capability 조회를 하지 않는다. 레인은 실제 OMP je
 judge 도움말(OMP 19.1에서는 `help://eval/judge`)을 따른다. notice 활성화는 native `magicKeywords.enabled`·`magicKeywords.jevify`와
 eval 가용성에 달리므로 admission만으로 보장하지 않는다. 전역 설정을 바꾸지 않으며 jevify에는
 SUPER 스킬 조회·추가 레인·goal·모델 변경·workflow artifact가 필요하지 않다.
-레인의 보고는 헤드용이며 외부 발송이 아니다. 내부 지시·보고는 영어, 헤드의 외부 답변은
-사용자 언어를 사용한다.
+내부 지시와 헤드가 위임한 작업의 보고는 영어로 작성한다. 운영자에게 보내는 답변은
+운영자의 언어를 사용한다.
 
-### 공유 정보 게시판 사용
+### 헤드와 레인의 직접 조율
 
-같은 instance에 실제 연결·등록된 head/lane만 게시판을 쓴다. 일반 OMP·다른 instance·native
-자식·복사한 role 환경변수만 가진 세션은 참여할 수 없다. 같은 instance의 참여자는 모든
-채널을 읽을 수 있으므로 repo 채널을 보안 격리로 여기지 않는다.
+- **근거 또는 대기 상태:** 레인 root는 `lane_report`로 선택한 근거나 정확한 대기 대상을
+  기록한다. 연결 주제의 직접 작업에서 기록한 관측은 헤드에 알리지 않는다. 헤드가 위임한
+  작업에서 근거나 대기 상태가 바뀌면 헤드 큐에 들어가지만 메신저로 직접 보내지는 않는다.
+  실제 결정에 필요한 경우에만 관측 상태를 조회하며, 반복해서 조회하지 않는다.
+- **현재 범위에서 헤드의 판단이 필요한 선택:** 편집 담당이 겹치는 경우처럼 조율이 필요하면
+  레인에 연결된 주제에서도 `decision_ask`에 `to: "head"`를 지정한다. 같은 native 질문을
+  대상으로 헤드 검토 한 건이 즉시 영속 큐에 들어가지만 바로 답변이 오는 것은 아니다.
+  헤드는 원래 선택지 중 하나로 답하거나 같은 카드를 원래 경로의 운영자에게 넘긴다.
+  `to`를 생략하면 연결 주제의 질문은 운영자에게, 헤드가 위임한 작업의 질문은 헤드에게 간다.
+  정정 지시를 받은 작업에서 명시적으로 헤드에게 보낸 질문은 운영자에게 넘기지 않고
+  내부에서 취소한다.
+- **기존 범위와 충돌하는 운영자 정정:** 연결 주제의 독립된 원본 메시지가 요건을 충족하면
+  레인 root가 원본 source ID로 `lane_report({status:"scope_review", sourceId})`를 직접 호출한다.
+  헤드만 검증된 검토 ID와 운영자 원문 그대로를 사용해 같은 레인에 정정 `lane_message`를 보낼 수
+  있다. 정정 지시가 도착할 때까지 충돌하는 작업은 보류한다. 질문 카드로 범위 검토나 native
+  승인을 대신하지 않는다.
 
-```text
-board_post({text: "Observed fact and relevant evidence", mentions: ["head"]})
-board_read({channel: "general", limit: 20})
-board_subscribe({channels: ["general", "repo:/absolute/repository"]})
-```
-
-이는 셸 명령이 아닌 native 도구 인자 예다. 실제 광고된 스키마를 따른다. 전체 transcript나
-비밀 대신 간결한 관측·근거·충돌을 공유한다. 반환된 정확한 게시물만 읽음 처리하며 구독은
-실제 세션별이다. header 알림과 본문 읽음은 다르다. 게시물은 명령·승인·완료 근거가 아니며
-유휴 모델 호출·unloaded 레인 기동을 만들지 않는다. membership·도구 필드·알림의 정확한
-계약은 [설계의 게시판 절](design/execution.md#shared-information-board)을 따른다.
+[직접 조율](design/execution.md#direct-lane-coordination) 및
+[범위 검토 계약](design/execution.md#bound-topic-assignment-scope-review)을 참고한다.
 
 ### 새 레인의 모델 선택
 
@@ -227,8 +232,10 @@ bun install --frozen-lockfile
 ```
 
 설치 단계에서는 OMP를 실행하지 않는다. `setup`·`doctor`와 실제 Host 시작에서 선택된 CLI를 확인한다.
-루트 SDK 의존성은 배포된 `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-ai`,
-`@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-utils`이며 모두 같은 기준판으로 고정한다. 설치는 봇을 시작하지 않으며
+별도 Bun 프로세스에서 실행하는 도우미는 `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-catalog`,
+`@oh-my-pi/pi-natives`, `@oh-my-pi/pi-utils`에 직접 의존하며 모두 같은 기준판으로 고정한다.
+확장에서 사용하는 `pi-ai`는 Host가 제공하므로 개발 의존성에만 직접 선언한다.
+`pi-ai`와 `pi-tui`는 여전히 coding-agent SDK의 하위 의존성으로 설치된다. 설치는 봇을 시작하지 않으며
 기존 OMP 실행 파일·전역 설정을 교체하지 않는다.
 
 시스템 Bun을 바꾸지 않으려면 선택적으로 격리된 로컬 도구를 사용한다.
@@ -352,7 +359,9 @@ bun --no-env-file src/cli.ts discord-commands --config config.local.json --apply
 별도 guild 명령이 전역 명령을 가리는 경우 몰래 삭제하지 않고 충돌을 알린다.
 등록은 모델·메신저 연결을 시작하지 않으며 setup·doctor·start의 부수 효과로 실행되지 않는다.
 인수가 있는 명령은 선택적인 `text` 필드를 사용한다. 예를 들어 `/model`의 `text`에
-`preset high`, `/stop`의 `text`에 `head`를 넣는다. 일반 메시지로 쓰는 `/status`도 지원하며,
+`preset high`, `/stop`의 `text`에 `head`를 넣는다. 입력란이 안 보이면 읽기 전용 조회의
+`preApplyTextOptionDrift`(누락됐거나 오래된 전역 옵션)와 `guilds[].shadowing`(전역 명령을
+가리는 서버 명령)을 확인한다. 일반 메시지로 쓰는 `/status`도 지원하며,
 `discord.requireAddressing`을 켠 부모 채널에서는 다른 일반 메시지와 마찬가지로 이 봇을
 멘션하거나 이 봇의 메시지에 답장해야 한다.
 
@@ -574,8 +583,11 @@ job/dependency는 명시적인 근거 포함 `resolved`를 사용한다.
 실제 파일/도구 결과를 선택·해시하고 native journal에 기록한다. eval에서는 보고 cell을
 완료한 뒤 긴 대기에 들어가야 해당 경계에서 헤드가 회수할 수 있다. 재시작 시 같은 원본
 input/request/session/file/generation과 제출 전 cursor를 확인해 미회수 기록을 읽고 중복을
-제거한다. native children은 보고 도구를 쓸 수 없다. 관측은 검증된 acceptance나 현재
-대상의 생존 보장이 아니며, 감시 모델·타이머·자동 독촉/재개/종료를 만들지 않는다.
+제거한다. native 자식은 보고 도구를 쓸 수 없다. 관측만으로 요구 사항 충족이나 대상이 아직
+실행 중임을 증명할 수 없다. 연결 주제의 직접 작업에서 기록한 관측은 헤드 모델에 알리지
+않는다. 헤드가 위임한 작업의 근거나 대기 상태 변경만 헤드 큐에 들어간다. 감시 모델,
+타이머, 자동 알림을 만들거나 작업을 재개·종료하지 않는다. 추적된 선택의 응답이 제출됐더라도
+그 응답 기록은 작업을 수행했다는 근거가 아니다.
 
 Gateway가 허용된 원본 메시지를 영속 접수한 뒤 수신 확인 반응을 남긴다. 헤드가 없어도
 접수 표시는 가능하며, 반응 API 응답을 기다리느라 플랫폼 ACK·offset이나 모델 실행·답변을
@@ -966,6 +978,8 @@ HEAD 답변에서 저장한 리비전을 확인한다. 설정은 재시작 후�
 `로그인 점검은 새 스레드에서 해줘`, `Split this into a new thread: Check login`처럼
 분리 의도와 작업을 한 줄 평문으로 명시한다. 다른 디렉터리에서 할 작업이라면
 `/new cwd: /실제/작업/경로`를 첫 줄에, 작업을 다음 줄에 적는다.
+공백이 있는 경로는 그대로 쓰거나 `/new cwd: "/projects/My App"`처럼 짝이 맞는
+따옴표로 감쌀 수 있다. 셸 변수나 `~`는 확장하지 않는다.
 `이건 따로 빼줘`처럼 작업을 특정하지 않으면 같은 스레드에서 `/new`로 작업을 명시해 달라고
 안내하고 새 스레드를 만들지 않는다. 수정 메시지·인용·첨부는 새 스레드 지시가 아니다.
 이 평문 분리 지시는 Discord DM이나 다른 플랫폼에는 적용되지 않는다. Gateway는 LLM 분류나 lane 실행을 하지 않는다.
@@ -1413,8 +1427,9 @@ ID/path 기반 기록 접근도 같은 원본을 사용한다. 별도 history CL
 기록만 확인하려면 native 기록 도구나 원본 경로의 `read`를 사용한다. `/resume`으로 의도적인
 일반 작업 재개도 가능하며 읽기 전용 보장 경로가 아니다. 원본이 다른 writer에 열려 있으면
 native 정책에 따라 fork하며 writer 해제 뒤 재개·후속 세션 선택도 native 정책을 따른다. 이는 기존
-관리 Host의 동일 프로세스 attach나 실행 소유권 인계가 아니다. 일반 재개는 manager/board
-확장을 자동 로드하거나 관리·게시판 권한을 얻지 않는다. 기록 내용은 새로운 권한·지시가 아니다.
+관리 Host의 동일 프로세스 attach나 실행 소유권 인계가 아니다. 일반 재개는 관리형 역할
+확장을 자동으로 로드하지 않으며 관리 권한을 부여하지 않는다. 기록은 새로운 권한이나
+지시가 아니다.
 
 상담용 `task`의 `agent: "seance"`·`sourceSession`은 **실제 호출자가 광고할 때만** 사용한다
 (18.20.2의 기능). 공식 OMP 18.20.3은
@@ -1452,11 +1467,17 @@ head의 native 승인 카드 복구를 먼저 마친 뒤 입력·콜백 처리�
 복구 전에 들어온 답변을 오래된 것으로 소비하거나 ACK하지 않는다. Slack의 서로 다른
 동시 선택·모달 제출은 카드별로 순서대로 처리하고 실제 재전달만 중복 제거한다.
 
-레인이 `decision_ask`로 올린 질문은 먼저 헤드가 검토한다. 위임 범위 안의 일상적 선택이면
-헤드가 대신 고른 원래 선택지를 레인으로 돌려보낸다. 선택 이유는 내부 이력에 남기고 별도
-메신저 알림은 보내지 않는다. 중요한 범위·비용·권한·외부 약속이 걸리거나 사용자 판단이
-필요하면 이관 이유를 원래 질문 카드에 함께 표시한다. 실제 실행 승인과 일반 native dialog는
-헤드가 대신 답하지 않는다. 아래의 `ask` 카드는 `decision_ask`가 쓰는 구조화된
+헤드가 위임한 작업의 질문과 레인 root가 `decision_ask({to:"head", questions:[…]})`로
+명시적으로 보낸 질문은 헤드가 먼저 검토한다. 다른 연결 주제 질문은 운영자에게 직접 간다.
+정정 지시를 받은 작업에서 명시적으로 헤드에게 보낸 질문은 거부하고 운영자에게 표시하지
+않은 채 내부에서 취소한다.
+위임 범위 안의 일상적 선택이면 헤드는 `lane_review_decision`으로 원래 선택지 중 하나를
+골라 레인에 돌려보낸다. 이유는 내부 이력에 남기고 별도 메신저 알림은 보내지 않는다.
+운영자의 판단이 필요하면 대기 중인 같은 질문을 넘기고 원래 카드에 이관 이유를 표시한다.
+정정 지시가 아닌 기존 검토가 남은 상태에서 헤드가 중지되면 컨트롤러가 대기 중인 같은
+질문을 원래 운영자에게 넘길 수 있다.
+이 경로는 범위 변경이나 native 실행 승인을 허가하지 않는다. 일반 native dialog에도 헤드가
+대신 답하지 않는다. 아래의 `ask` 카드는 `decision_ask`가 쓰는 구조화된
 `askDialog`다. OMP 19.1 내장 `ask`의 HTML `form`은 Host가 메신저로 보내지 않고
 즉시 취소한다. 선택한 기본값도 제출하지 않는다.
 
@@ -1580,8 +1601,8 @@ Git 원격 주소로 매칭합니다. 커밋하지 않은 변경과 무시된 �
 깨끗한 커밋을 기준으로 요청하세요. 실행 중인 레인이 해당 checkout을 예약하며
 자동 fetch·브랜치 전환·변경 폐기는 하지 않습니다. 후속 요청은 같은 워커의 같은 세션으로 갑니다.
 SSH가 끊겨도 Host 자체는 종료되지 않습니다. Host가 종료된 뒤 checkout이 달라져 있으면
-재기동은 보류됩니다. 답변과 승인 카드는 원래 대화로 돌아오지만 메신저 첨부파일 전달과
-헤드의 로컬 SQLite 보드 접근은 원격 레인에서 지원하지 않습니다. 헤드의 OMP 실행 명령에
+재기동은 보류됩니다. 답변과 승인 카드는 원래 대화로 돌아오지만 메신저 첨부파일 전달은
+원격 레인에서 지원하지 않습니다. 헤드의 OMP 실행 명령에
 도구·프로필·승인 등의 추가 플래그가 있으면 이를 빼고 원격 실행하지 않고 요청을 거부합니다.
 워커는 자동 로드 플러그인이 없는 전용 OMP 프로필을 사용하세요. `.omp/`, `.env`, Git 필터 등
 실행 설정이 있는 checkout, linked worktree, 서브모듈은 자동으로 수정하거나 로드하지 않고 거부합니다.
@@ -1620,7 +1641,7 @@ SSH가 끊겨도 Host 자체는 종료되지 않습니다. Host가 종료된 뒤
   Discord는 같은 허가된 물리 채널의 참조만 조회하고, Telegram 승인 카드 답장은 기존 절차를
   유지한다. 음성 여부·길이는 전달하지만 자동 전사 기능은 아니다. Discord 스티커 전용 등
   의미 있는 텍스트·지원 첨부가 없는 입력/수정은 새 작업으로 접수하지 않는다.
-- 레인 저장소·게시판 저장소 채널 탐색은 시작 셸의 `GIT_DIR`, `GIT_WORK_TREE` 및 다른
+- 레인 저장소 탐색은 시작 셸의 `GIT_DIR`, `GIT_WORK_TREE` 및 다른
   `GIT_*` 환경을 제거한 Git 프로세스를 사용한다. 일반 도구 환경 전체의 격리와는 다르다.
 - 입력 리소스의 허용 범위는 플랫폼마다 다르다.
   - Discord: `cdn.discordapp.com`·`media.discordapp.net`의 HTTPS
@@ -1721,7 +1742,7 @@ native 시나리오는 기존 opt-in을 명시적으로 켜며 `OMP_TEST_COMMAND
 검증 명령이 아니다. CLI 자동 선택은 native/PTY·외부 패키지 opt-in을 대신 켜지 않는다.
 
 ```sh
-OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-host.test.ts test/native-runtime.test.ts test/native-model-selection.test.ts test/native-board.test.ts test/native-gateway.test.ts
+OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-host.test.ts test/native-runtime.test.ts test/native-model-selection.test.ts test/native-gateway.test.ts
 OMP_SUPERAGENT_NATIVE_TEST=1 bun test test/native-autonomy.test.ts
 ```
 

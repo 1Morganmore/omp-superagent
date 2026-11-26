@@ -36,15 +36,17 @@ export function decisionId(sessionId: string, toolCallId: string): string {
 }
 
 /** Only the managed decision tool's structured questions enter this ledger. */
-export function decisionRequestId(request: Record<string, unknown>): string | null {
+export function decisionRequest(request: Record<string, unknown>): { id: string; toHead: boolean } | null {
   if (request.method !== "ask" || request.secret === true || !Array.isArray(request.questions)) return null;
   const first = request.questions[0] as { id?: unknown } | undefined;
-  const id = typeof first?.id === "string" ? /^(d-[a-f0-9]{24}):0$/.exec(first.id)?.[1] : undefined;
-  if (!id) return null;
+  const match = typeof first?.id === "string" ? /^(d-[a-f0-9]{24})(:head)?:0$/.exec(first.id) : null;
+  if (!match?.[1]) return null;
+  const id = match[1];
+  const prefix = id + (match[2] ?? "");
   const dialog = parseDialog(request);
-  if (dialog.method !== "ask" || dialog.questions.some((question, index) => question.id !== `${id}:${index}`))
+  if (dialog.method !== "ask" || dialog.questions.some((question, index) => question.id !== `${prefix}:${index}`))
     throw new Error("Decision question identity changed");
-  return id;
+  return { id, toHead: !!match[2] };
 }
 
 const metadataKey = "decisions:v1";
@@ -54,7 +56,7 @@ const receipts = (store: StorePort): Record<string, Receipt> => JSON.parse(store
 export function captureDecision(store: StorePort, approval: Approval): void {
   if (!approval.decision) return;
   const { id } = approval.decision;
-  if (decisionRequestId(approval.request) !== id) throw new Error("Decision does not match its native questions");
+  if (decisionRequest(approval.request)?.id !== id) throw new Error("Decision does not match its native questions");
   const records = receipts(store);
   if (records[id]) throw new Error("Decision already has a native request; do not ask it again");
   records[id] = { approvalId: approval.id, createdAt: Date.now() };
@@ -121,7 +123,7 @@ export function acknowledgeDecision(store: StorePort, approval: Approval, sessio
 export function decisionViews(store: StorePort): DecisionView[] {
   return Object.entries(receipts(store)).map(([id, receipt]) => {
     const approval = store.approval(receipt.approvalId);
-    if (!approval?.decision || approval.decision.id !== id || decisionRequestId(approval.request) !== id)
+    if (!approval?.decision || approval.decision.id !== id || decisionRequest(approval.request)?.id !== id)
       throw new Error("Decision ledger is not bound to its original native question");
     const dialog = parseDialog(approval.request);
     if (dialog.method !== "ask") throw new Error("Decision question is unavailable");

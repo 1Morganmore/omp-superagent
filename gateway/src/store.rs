@@ -84,6 +84,7 @@ impl Store {
              delivered_at=NULL,delivery_error='unresolved' WHERE delivery_error='Head rejected admitted event'",
             [],
         )?;
+        ingress::recovery::create(&tx)?;
         tx.commit()?;
         discord_intake::create(&db)?;
         discord_presence::create(&db)?;

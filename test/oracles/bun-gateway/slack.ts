@@ -291,7 +291,8 @@ export class SlackMessenger implements Messenger {
 
   private async receiveCommand(envelope: Envelope): Promise<void> {
     const body = envelope.body;
-    const refuse = async () => envelope.ack({ response_type: "ephemeral", text: "Superagent refused this command: use a configured command as the authorized owner in this app's workspace and an allowed channel or owner DM. Slash commands cannot target threads." });
+    const refuse = async (text = "Superagent refused this command: use a configured command as the authorized owner in this app's workspace and an allowed channel or owner DM. Slash commands cannot target threads.") =>
+      envelope.ack(envelope.accepts_response_payload ? { response_type: "ephemeral", text } : undefined);
     // Real Slack slash commands carry no message/thread identity. Neither the
     // opaque trigger nor a claimed channel name can supply those identities.
     if (body.team_id !== this.options.teamId || body.user_id !== this.options.ownerId || !this.appId
@@ -301,16 +302,20 @@ export class SlackMessenger implements Messenger {
       || !slackId(body.channel_id) || !string(body.trigger_id) || !body.trigger_id.length
       || !string(body.command) || !string(body.text)
       || ["ts", "message_ts", "thread_ts", "thread_id", "message", "container"].some(field => field in body)) { await refuse(); return; }
-    const text = parseSlackCommand(body.command, body.text);
-    if (text === null) { await refuse(); return; }
+    const command = parseSlackCommand(body.command, body.text);
+    if (command.kind === "unregistered") { await refuse(); return; }
     let route: Route | null;
     try { route = await this.incomingRoute(body.channel_id, null); }
     catch { await refuse(); return; }
     if (!route) { await refuse(); return; }
+    if (command.kind === "unexpected-argument") {
+      await refuse(`Superagent refused this command: ${body.command} does not take arguments.`);
+      return;
+    }
     const invocationId = createHash("sha256").update(JSON.stringify([this.appId, this.options.teamId, this.options.ownerId, body.channel_id, body.trigger_id])).digest("hex");
     await this.handlers!.message({
       id: `slack:${this.accountId}:${body.channel_id}:invocation:${invocationId}`,
-      route, messageId: null, invocationId, text, receivedAt: Date.now(), attachments: [],
+      route, messageId: null, invocationId, text: command.text, receivedAt: Date.now(), attachments: [],
     });
     // The receipt admits only. Results always use the ordinary durable outbox;
     // response_url, token, and trigger_id never cross the adapter boundary.

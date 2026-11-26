@@ -23,8 +23,8 @@ the worker launches the stock Host and owns its Unix socket, processes and nativ
 journal. An SSH disconnect is client detach, not cancellation, an exit receipt,
 or authority to reassign work. Open and attachment are separate from sending
 the first input. A pending or ambiguous launch must be reconciled on that
-worker, never retried on another machine. Remote PIDs and session paths are not
-local filesystem or board identities. See [worker enrollment](../OPERATIONS.en.md#add-a-remote-worker).
+worker, never retried on another machine. Remote PIDs and session paths do not
+identify local processes or files. See [worker enrollment](../OPERATIONS.en.md#add-a-remote-worker).
 
 When several workers qualify, placement accounts for both reported free slots
 and head assignments waiting to start. Concurrent admissions reserve their
@@ -69,12 +69,19 @@ handoffs and their internal reports use English. No lane gains messenger
 credentials. Distinguish dispatch acceptance, actual execution, native
 settlement, verified acceptance criteria, and user delivery.
 
-The [`lane_report` tool](../../src/lane-extension.ts) records evidence in the
+### Direct lane coordination
+
+The [`lane_report` tool](../../src/lane-extension.ts) records observations in the
 native journal. It hashes selected files in bounded chunks, verifying their identity
-and metadata before accepting the digest, or hashes successful tool results. Duplicate
+and metadata before accepting the digest, or hashes successful work tool results.
+Tracked decisions and other coordination receipts are not work evidence. Duplicate
 content and repeated waits do not refresh evidence timestamps; ordinary
 commentary is not verification. Resolve only the exact tool/approval/job or
-dependency wait. Lane observation reads request only the entries appended
+dependency wait. Direct-topic observations are inspectable and do not notify HEAD.
+Changed manager-handoff evidence or wait transitions are queued for HEAD as
+nonterminal observations. Queueing does not guarantee a new model turn or a
+messenger message.
+Lane observation reads request only the entries appended
 after the source-bound journal cursor (`get_entries` with `since`). A missing
 cursor fails the observation rather than replaying another request's history.
 When only a starting position is needed, the managed owner waits for its queued
@@ -83,7 +90,24 @@ Already-running owners without that capability keep using their stock response.
 Ownership and outcome checks that need the full journal still read it. The
 runtime exposes observation timestamps and `ownerCurrent`, not a guarantee
 that a reported dependency is still live. Native children cannot use the
-manager, report as the lane, or access the board.
+manager, report as the lane, or request tracked decisions.
+
+A manager handoff returns its final result to HEAD for review. State a blocking
+conflict in that result if no authorized work remains. If HEAD needs to choose
+between in-scope options (for example, which lane owns a shared edit),
+use [`decision_ask({to:"head", questions:[…]})`](messaging.md#approvals-and-owner-decisions)
+even from a bound topic. It immediately queues one durable review of the same
+pending native dialog. Omitting `to` keeps the default: a topic-owned question
+goes directly to its authorized topic; a manager-handoff question goes to HEAD.
+HEAD answers with an original option or escalates the same card on its original
+route via `lane_review_decision`. Do not use a decision to change scope or
+grant native approvals. If a standalone bound-topic owner message explicitly
+supersedes the assignment, use the isolated scope-review procedure below.
+An explicit HEAD-directed question on the resulting corrective assignment is
+cancelled privately, not rerouted to the owner.
+HEAD uses `lane_message` for a specific authorized follow-up; neither an
+observation nor a decision supplies fresh dispatch authority. Do not poll or
+schedule a model just to check for updates.
 
 ### Bound-topic assignment scope review
 
@@ -190,7 +214,15 @@ persists its launch fence immediately before the manifest is sent, so a refusal 
 before then still releases the slot. Discovery and preparation have separate deadlines.
 A descendant holding output open cannot extend those deadlines. The owner invokes short-lived
 SDK helpers for operations that depend on stock semantics, including fitting a withdrawn
-queue and verifying journal persistence after exit. On the private v2 interrupt channel,
+queue. After exit, a separate operation [reads the journal](../../src/native-journal.ts)
+without loading an SDK or the launch profile. Only the first physical line, with
+surrounding whitespace trimmed, may be a title slot. Before the session header
+only JSON whitespace is skipped, not a UTF-8 BOM. Identity lookup stops at the
+header; it does not attest to the body. Exit verification checks the entire
+journal and the owner's expected observations. A BOM before a JSON record is
+invalid regardless of read boundaries; a U+FEFF inside a JSON string is data.
+An incomplete or malformed journal is not proof of a settled exit.
+On the private v2 interrupt channel,
 queue restoration uses the SDK's reassembled-frame byte limit: this is the value of
 [`maxResponseBytes` in OMP 19.0](https://github.com/can1357/oh-my-pi/blob/v19.0.0/packages/coding-agent/src/modes/rpc/rpc-frame.ts#L341-L347)
 and [`maxIntactFrameBytes` in 19.1](https://github.com/can1357/oh-my-pi/blob/v19.1.0/packages/coding-agent/src/modes/rpc/rpc-frame.ts#L341-L347).
@@ -262,8 +294,8 @@ still specifically requires an active, searchable Mnemopi backend on the head.
 original journal and artifact directory in the active profile's native project
 bucket. It does not copy transcripts, transfer a writer lease or wake unloaded
 lanes. Use normal OMP discovery and `/resume`; native rules govern concurrent
-writers and forks. An ordinary resume gets no manager or board authority and
-is not attachment to the running managed Host.
+writers and forks. An ordinary resume does not load managed role extensions or
+attach to the running managed Host.
 
 ### Goal continuity
 
@@ -581,29 +613,3 @@ discarding custom commands or enabling disabled extensions.
   An unloaded Host, an empty socket, and an `agent_end` event are not proof
   that the work stalled or finished. Clear observation requests may route to
   HEAD from a bound thread. Routing text alone changes no subscription.
-
-## Shared information board
-
-The [board extension](../../src/board-extension.ts) checks the canonical
-instance and current native session ID, file, PID and applicable lane generation
-against managed registration for every access or notice. Role environment
-alone is insufficient. Standalone resumes, other instances, stale/unloaded
-Hosts and native children are excluded. A connected paused lane remains a
-participant. The runtime assigns the actor and deduplicates posts by native
-session and tool-call ID.
-
-`board_post`, `board_read`, and `board_subscribe` operate on `general` and
-`repo:<canonical absolute path>` channels. Subscribers are per native session;
-all registered participants can read all channels in the instance, so channels
-are not ACLs. Mark only the exact IDs returned by `board_read`; a reply does
-not mark its parent read. Keep notice cursors separate from read receipts.
-
-Registered head and lane roots receive header-only notices at native context
-boundaries. Lane posts are eligible for head notices; lanes receive notices
-for subscriptions and explicit mentions. An idle head can display an event-driven
-native notice with `triggerTurn: false`; idle lanes wait until their next
-authorized turn. A notice is not a model wake,
-read confirmation, actor impersonation, command, approval or evidence of
-completion. No self-wake, read-ACK loop or unloaded lane activation. Use
-durable lane reports for actual outcomes; the board cannot supply an external
-messenger route.

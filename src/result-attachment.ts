@@ -94,7 +94,7 @@ export function isResultAttachmentSnapshot(value: unknown): value is ResultAttac
   const snapshot = asRecord(value);
   return snapshot !== null && Object.keys(snapshot).length === 5 &&
     typeof snapshot.name === "string" && validPath(snapshot.name) && Buffer.byteLength(snapshot.name) <= 180 &&
-    /^[\p{L}\p{N}\p{M}_. -]+$/u.test(snapshot.name) &&
+    /^[\p{L}\p{N}\p{M}_. &-]+$/u.test(snapshot.name) &&
     typeof snapshot.size === "number" && Number.isSafeInteger(snapshot.size) &&
     snapshot.size > 0 && snapshot.size <= MAX_RESULT_ATTACHMENT_BYTES &&
     typeof snapshot.sha256 === "string" && /^[a-f0-9]{64}$/.test(snapshot.sha256) &&

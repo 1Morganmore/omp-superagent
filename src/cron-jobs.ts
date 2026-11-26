@@ -5,6 +5,7 @@ import { routeKey, type Inbound, type InputRecord, type Route, type StorePort } 
 import { describePrIntake, normalizeIntakeRepository } from "./cron-pr-intake";
 import { describeCronSchedule, nextCronTime, parseCronSchedule, type CronSchedule } from "./cron-schedule";
 import { compareMessageIds } from "./message-order";
+import { matchesWrittenCommand } from "./messenger-commands";
 import { parsePrModeControl, prModeArgument, prModeEffects, type PrIntakeMode } from "./pr-intake-mode";
 
 const jobsKey = "cron:jobs";
@@ -121,14 +122,14 @@ function prModeReceipt(job: CronPrJob, mode: PrIntakeMode): string {
 }
 
 function prAddRequest(tail: string) {
-  const pair = /^"([^"\r\n]+)"[ \t]+([^ \t\r\n]+)$/u.exec(tail);
+  const pair = /^"([^"\r\n]+)"[^\S\r\n\u2028\u2029]+(\S+)$/u.exec(tail);
   if (!pair?.[1] || !pair[2]) return null;
   const repository = normalizeIntakeRepository(pair[2]);
   return repository ? { schedule: pair[1].trim(), repository } : null;
 }
 
 function originalPrAdd(text: string) {
-  const tail = /^\/cron[ \t]+pr-add[ \t]+(.+)$/u.exec(text.trim())?.[1];
+  const tail = /^\/cron[^\S\r\n\u2028\u2029]+pr-add[^\S\r\n\u2028\u2029]+(.+)$/u.exec(text.trim())?.[1];
   return tail ? prAddRequest(tail) : null;
 }
 
@@ -216,10 +217,8 @@ export class CronJobs {
     const stored = this.store.input(input.id);
     // A voice confirmation can have projected draft text in `text`. It is
     // not a physical owner instruction to open a lane or publish to GitHub.
-    const written = stored?.discordOriginalText?.trim().replace(/^<@!?(\d+)>\s*/, (mention, id) =>
-      id === route.accountId ? "" : mention).trim();
     return stored !== null && (stored.state === "pending" || stored.state === "done")
-      && (written === undefined || written === stored.text.trim())
+      && matchesWrittenCommand(stored)
       && routeKey(stored.route) === routeKey(route) && stored.messageId === input.messageId
       && stored.interactionId === input.interactionId && !stored.pickerSelection
       && (stored.messageId === null ? stored.interactionId !== undefined

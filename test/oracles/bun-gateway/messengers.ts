@@ -1,12 +1,13 @@
 import type { Config } from "../../../src/config";
 import { credentialEnvNames, requireMessengerCredentials, voiceApiKeyEnv } from "../../../src/config";
-import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, Inbound, MessageActivity, MessageReference, OutputRecord, Platform, Route, StorePort, ThreadInfo, ThreadUpdate } from "../../../src/contracts";
+import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, Inbound, MessageActivity, MessageReference, OutputRecord, Platform, Route, ThreadInfo, ThreadUpdate } from "../../../src/contracts";
 import type { DownloadMessenger as Messenger } from "../../fixtures/inbound-attachments";
 import { physicalRouteKey } from "../../../src/contracts";
 import { DeliveryError } from "../../../src/delivery";
 import { DiscordMessenger } from "./discord";
 import { SlackMessenger } from "./slack";
 import { TelegramMessenger } from "./telegram";
+import type { GatewayStore } from "./gateway-store";
 
 /** One head; transports retain their own authenticated account and recovery state. */
 export class MessengerHub implements Messenger {
@@ -125,7 +126,7 @@ export class MessengerHub implements Messenger {
   }
 }
 
-export function createMessenger(config: Config, store: Pick<StorePort, "getMeta" | "setMeta">, onError: (error: unknown) => void): MessengerHub {
+export function createMessenger(config: Config, store: Pick<GatewayStore, "getMeta" | "setMeta" | "telegramAdmittedInput">, onError: (error: unknown) => void): MessengerHub {
   requireMessengerCredentials(config);
   const adapters: Partial<Record<Platform, Messenger>> = {};
   if (config.discord) {

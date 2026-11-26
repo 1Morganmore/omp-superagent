@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img" aria-labelledby="architecture-title architecture-desc" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Noto Sans CJK KR', 'Segoe UI', sans-serif">
   <title id="architecture-title">상시 실행 서비스 하나, OMP 헤드 하나, 독립 레인 세션</title>
-  <desc id="architecture-desc">Discord, Telegram, Slack은 상시 실행되는 Gateway 서비스에 연결됩니다. 모든 입력은 OMP 헤드 에이전트 세션으로 전달되며, 헤드는 직접 판단하고 작업하거나 레인 A와 레인 B의 독립 저장소·주제 세션을 제어합니다. 레인 제어는 헤드만 합니다. 레인 결과는 헤드와 Gateway를 거쳐 메신저로 돌아갑니다. 헤드와 레인은 정보 게시판을 공유하며, 점선 연결은 명령 경로가 아닙니다.</desc>
+  <desc id="architecture-desc">Discord, Telegram, Slack의 요청과 답변은 Gateway와 헤드 컨트롤러를 거칩니다. 연결된 주제의 일반 요청과 답변은 헤드 모델을 호출하지 않고 처리합니다. 헤드는 독립 레인 세션에 직접 작업을 맡깁니다. 위임 작업 결과, 헤드에 보낸 질문, 원본 메시지에 연결된 범위 검토 요청은 컨트롤러를 거쳐 헤드에 전달됩니다.</desc>
   <defs>
     <linearGradient id="hero" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#e23cb4"/><stop offset="0.5" stop-color="#9c4ffb"/><stop offset="1" stop-color="#22b8d4"/></linearGradient>
     <marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 10 5 0 10Z" fill="#6f6787"/></marker>
@@ -18,9 +18,6 @@
     <path d="M754 162H714V200H638" fill="none" stroke="#6f6787" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#flow-arrow)"/>
     <path d="M638 234H714V266H754" fill="none" stroke="#8f3ff0" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#control-arrow)"/>
     <path d="M754 306H684V258H638" fill="none" stroke="#6f6787" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#flow-arrow)"/>
-    <path d="M542 274V370" fill="none" stroke="#8b82a3" stroke-width="1.6" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M936 122H948V392H936" fill="none" stroke="#8b82a3" stroke-width="1.6" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M846 338V370" fill="none" stroke="#8b82a3" stroke-width="1.6" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
   <g>
     <rect x="24" y="132" width="160" height="142" rx="14" fill="#ffffff" stroke="#cfc7de" stroke-width="1.5"/>
@@ -39,7 +36,7 @@
     <rect x="446" y="132" width="192" height="142" rx="14" fill="#faf3ff" stroke="url(#hero)" stroke-width="2.5"/>
     <rect x="470" y="129" width="144" height="6" rx="3" fill="url(#hero)"/>
     <text x="542" y="167" font-size="22" font-weight="700" text-anchor="middle" fill="#7a2bd6">OMP 헤드</text>
-    <text x="542" y="195" font-size="16" text-anchor="middle" fill="#5c5470">에이전트 세션</text>
+    <text x="542" y="195" font-size="16" text-anchor="middle" fill="#5c5470">모델 + 컨트롤러</text>
     <text x="542" y="222" font-size="16" text-anchor="middle" fill="#5c5470">판단 · 작업</text>
     <text x="542" y="250" font-size="15" font-weight="600" text-anchor="middle" fill="#7a2bd6">레인 제어는 헤드만</text>
   </g>
@@ -57,13 +54,11 @@
     <text x="845" y="288" font-size="16" text-anchor="middle" fill="#5c5470">독립 세션</text>
     <text x="845" y="315" font-size="16" text-anchor="middle" fill="#5c5470">저장소 / 주제 B</text>
   </g>
-  <text x="249" y="304" font-size="15" fill="#5c5470">헤드를 거쳐 응답</text>
-  <text x="650" y="219" font-size="15" fill="#5c5470">결과</text>
-  <text x="695" y="295" font-size="15" fill="#5c5470">결과</text>
-  <text x="553" y="325" font-size="15" fill="#5c5470">상태 / 맥락</text>
   <g>
-    <rect x="446" y="370" width="490" height="44" rx="12" fill="#f5f1fb" stroke="#8b82a3" stroke-width="1.2" stroke-dasharray="5 5"/>
-    <text x="466" y="398" font-size="18" font-weight="700" fill="#1d1530">공유 게시판</text>
-    <text x="586" y="398" font-size="15" fill="#5c5470">정보 공유 전용 · 제어 아님</text>
+    <path d="M24 360H49" fill="none" stroke="#8f3ff0" stroke-width="2.4" marker-end="url(#control-arrow)"/>
+    <text x="60" y="365" font-size="16" fill="#5c5470">헤드에서 레인으로: lane_start 또는 lane_message</text>
+    <path d="M24 383H49" fill="none" stroke="#6f6787" stroke-width="1.8" marker-end="url(#flow-arrow)"/>
+    <text x="60" y="388" font-size="16" fill="#5c5470">레인에서 헤드로: 위임 작업 결과, 헤드에 보낸 질문, 원본 메시지에 연결된 범위 검토 요청</text>
+    <text x="60" y="411" font-size="16" fill="#5c5470">컨트롤러는 연결된 주제의 일반 요청과 답변을 헤드 모델 호출 없이 처리합니다.</text>
   </g>
 </svg>

@@ -151,12 +151,15 @@ describe("explicit Discord global command registration", () => {
 
   test("dry-run reads bot/application identity, globals, and allowed guilds without mutation", async () => {
     const config = fixture([guildId]);
-    const rest = transport(inspection([command("hermes")], [{ id: guildId, commands: [] }]));
+    const registered = authoritativeCommands().filter(row => row.name !== "compact").map(row =>
+      row.name === "model" ? { ...row, options: [] } : row);
+    const rest = transport(inspection([command("hermes"), ...registered], [{ id: guildId, commands: [] }]));
     const result = await registerDiscordCommands(config, rest);
     expect(result.status).toBe("dry-run");
     expect(result.applicationId).toBe(applicationId);
     expect(result.botId).toBe(applicationId);
     expect<readonly unknown[]>(result.plannedGlobal).toEqual(DISCORD_COMMANDS);
+    expect(result.preApplyTextOptionDrift).toEqual(["model", "compact"]);
     expect(result.obsoleteGlobal).toEqual([{ id: "400000000000000004", type: 1, name: "hermes" }]);
     expect(result.guilds).toEqual([{ guildId, registrations: [], shadowing: [] }]);
     expect(result.note).toContain("deleting all other global registrations");

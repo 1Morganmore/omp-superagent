@@ -23,6 +23,8 @@ use crate::slack::{Config, Slack, api::Api};
 
 #[path = "card_tests.rs"]
 mod cards;
+#[path = "command_tests.rs"]
+mod commands;
 #[path = "group_tests.rs"]
 mod group;
 #[path = "picker_tests.rs"]

@@ -126,6 +126,8 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     if (scoped.length !== active.length) await pi.setActiveTools(scoped);
   });
   pi.on("tool_call", (event, ctx) => {
+    if (runtime?.laneDecisionReviewActive() && (ctx.agent.kind !== "main" || event.toolName !== "lane_review_decision"))
+      return { block: true, reason: "A lane question permits only answering or escalating its original decision" };
     if (runtime?.scopeReviewActive() && (ctx.agent.kind !== "main" || event.toolName !== "lane_message"))
       return { block: true, reason: "This assignment review permits only a direct same-lane correction from its verified owner message" };
     if (event.toolName === "soul_update") {

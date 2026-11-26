@@ -144,8 +144,10 @@ deduplicates the original event and any distinct edit revision. A permanent deni
 may be recorded as rejected; handler, store or transport failures do not turn an
 unresolved event into a denial. Preserve pending order and recover connectivity
 with bounded backoff. A held event does not block the initial approval recovery
-barrier or selected priority owner controls (`/restart`, `/stop`, `/stop head`);
-ordinary intake keeps its order. After the first approval barrier, a head outage
+barrier or selected priority owner controls (`/restart`, `/stop`, `/stop head`).
+During a hold the Gateway selects the barrier first, otherwise the earliest
+eligible control, without reading ordinary message bodies. Ordinary intake
+keeps its order. After the first approval barrier, a head outage
 does not close Gateway admission. Reconnecting does not replay already submitted work.
 
 The head receipt does not wait for a [historical topic search](#topic-routing-and-controls),
@@ -174,7 +176,13 @@ next `getUpdates`. There is no Bot API history fetch; recovery cannot exceed its
 24-hour update retention. Omit the previous offset after 24 hours of inactivity,
 missing/invalid observation time or clock rollback. Stable message and
 callback-query identities, not a presumed globally monotonic update ID, deduplicate
-redeliveries and approval progress.
+redeliveries and approval progress. If command normalization changed between
+admission and redelivery, the Gateway also checks the exact earlier projection
+of that same incoming message. A match keeps the first receipt and lets polling
+advance; a changed payload under the same identity remains a conflict.
+Telegram code, preformatted text and blockquotes can contain command examples:
+a slash verb inside one is literal text, not an owner control. Formatting only
+the arguments does not disable an otherwise valid command.
 
 ### HEAD replies while jobs are running
 
@@ -346,7 +354,8 @@ See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for com
   or `Do the login check in a new thread`. If the operator sends only
   `이건 따로 빼줘` or `Split this into a new thread`, the controller asks them to
   name the task with `/new` instead of creating a topic. Natural split
-  directives apply only to original owner messages in physical Discord work
+  directives preserve an explicit `cwd:` header, including spaces inside path
+  quotes. They apply only to original owner messages in physical Discord work
   threads, not edits, quoted text or attachments. DM and other adapters retain
   their existing topic behavior.
 - `/head <request>` explicitly addresses the shared coordination model (Slack:
@@ -406,6 +415,16 @@ See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for com
 is a separate explicit apply, not a side effect of setup, doctor or start. Command
 intake must not wait for a model; Discord's ephemeral admission reply and Slack's
 Socket Mode acknowledgement are not the actual command result.
+
+Discord application commands take arguments in the registered `text` option.
+For commands with fixed tokens, repeated spaces and tabs are separators, not
+part of an identifier. Prompt bodies and multiline compaction instructions are
+not split into words. Ordinary Slack command arguments decode Slack's three
+mrkdwn entities once; registered slash payloads are already plain text. HEAD,
+its initial lane handoff and exact `attach:` path verification use the same
+decoded arguments. Later `lane_message` instructions are HEAD-authored text,
+not Slack input. Neither interpretation changes the original receipt used for
+redelivery.
 
 `/fast` is an owner control on the shared HEAD, even from a bound topic.
 It opens an argumentless menu showing the current mode (`off`, `on` or `ultra`).
@@ -542,17 +561,31 @@ it does not forward the HTML, submit defaults or wait for a connected head.
 [`decision_ask`](../../src/decision-tool.ts) uses the separate native `askDialog`; it is not a
 parallel approval engine. [Decision records](../../src/decisions.ts) link the
 native tool call, original source and original question/card. `answering` is an
-attempt, not the `answered` state confirmed by native settlement. A topic-owned
-question goes to the authorized topic directly; it does not wake the coordination
-model. An unowned native dialog after reconnect is held if its original topic
-cannot be verified. A manager-delegated lane's question goes to head review first. For a routine reversible
-choice within the assignment, the head returns an original option to the lane
-and records the reason internally, without a separate messenger message. When
-the owner must decide, the original card shows why their decision is needed
-alongside the unchanged questions and choices. Recommendations are not
-preselected. This is not authority to grant tool permission or manufacture user
-consent. Recommendation, silence, normal text, quotes and reports are not
-approval.
+attempt, not the `answered` state confirmed by native settlement. By default,
+a topic-owned question goes directly to the authorized topic without waking
+the HEAD model, and a manager-handoff question goes to HEAD first. A root lane
+can explicitly set `to: "head"` for an in-scope coordination choice even from
+a bound topic. On admission of the valid source, the controller immediately
+queues one durable HEAD review tied to the same pending native lane dialog.
+Queueing is not an answer or a guarantee of when HEAD will reply. An unowned
+native dialog after reconnect is held if its original topic cannot be verified.
+Corrective assignments retain owner-only routing: an explicit `to: "head"`
+question is refused and cancelled privately, not shown to the owner.
+
+The isolated HEAD review permits only `lane_review_decision` for that dialog.
+For a routine reversible choice shown to be within the assignment, HEAD
+returns an original option to the lane and records the reason internally,
+without a separate messenger message. When the owner must decide or the
+supplied evidence cannot establish scope, HEAD escalates that same dialog;
+the original route gets the card with the unchanged questions and choices
+and the reason for escalation. If HEAD stops during an existing regular
+review, the controller may escalate that exact pending dialog to the original
+owner. This fallback does not apply to refused corrective-assignment questions.
+Recommendations are not preselected. This path does not change assignment
+scope, grant tool permission or manufacture user consent. Use the
+[source-bound scope review](execution.md#bound-topic-assignment-scope-review)
+for a conflicting original owner correction. Recommendation, silence, normal
+text, quotes and reports are not approval.
 
 ## Content and delivery
 

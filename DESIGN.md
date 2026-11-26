@@ -18,14 +18,14 @@ or lanes. This is not a multitenant service or an OS sandbox.
 - [Messaging and authority](docs/design/messaging.md): ingress, routing, controls,
   approvals, recovery, delivery, and Discord voice.
 - [Execution and coordination](docs/design/execution.md): lanes, native Host lifecycle,
-  models, workflows, managed integration, monitoring, and the board.
+  models, workflows, managed integration, monitoring, and direct lane coordination.
 - Setup and operations ([English](docs/OPERATIONS.en.md) · [한국어](docs/OPERATIONS.md)): configuration, commands, and recovery procedures.
 - [Versioned release records](docs/releases/): dated evidence and its limits.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="assets/architecture.svg">
-  <img src="assets/architecture.svg" width="100%" alt="One Gateway connects the messengers to the head. The head controls independent lanes and shares an informational board with them.">
+  <img src="assets/architecture.svg" width="100%" alt="One Gateway connects the messengers to the head controller, which routes bound topics directly and coordinates independent lanes.">
 </picture>
 
 [Mermaid source](assets/architecture.mmd)
@@ -39,7 +39,6 @@ or lanes. This is not a multitenant service or an OS sandbox.
 | Head | Its controller owns intake, placement, approvals and delivery. The shared model handles ordinary unbound requests, explicit `/head` work and manager coordination, not ordinary bound-topic prompts or their answers. | [Head extension](src/extension.ts), [runtime](src/runtime.ts), [coordination store](src/store.ts) |
 | Lane | Runs work in its own native session with its own cwd, model and context. Topic answers go through the controller outbox without a shared-model synthesis turn; manager handoffs report to the head. Neither sends directly to a messenger. | [Lane extension](src/lane-extension.ts), [lane reporting](src/lane-report.ts), [role instructions](skills/lane/SKILL.md) |
 | Host | One installed OMP process owns each managed root session. A detached Rust process owns its stdin/stdout and private reconnectable socket; it does not run inference, tools, or supervision policy. | [Host client](src/host.ts), [stdio owner](host-owner/src/main.rs), [SDK helper](src/host-sdk-helper.ts), [native lifecycle extension](src/host-extension.ts) |
-| Board | An informational log in `coordination.sqlite` shared by registered head/lane sessions in the same instance. Not a command, approval, or delivery bus. | [Board](src/board.ts), [board extension](src/board-extension.ts) |
 
 OMP owns transcripts, tool history, goals, child tasks, provider auth, and native
 execution records. Superagent stores the coordination facts needed to recover work:
@@ -47,8 +46,8 @@ intake and receipts, topic bindings, requests and lanes, approvals and delivery
 outcomes. `coordination.sqlite` is shared by Gateway and head with independent
 connections. It is not a second OMP transcript. The private Unix sockets under the
 canonical `stateDir` are instance-owned, not arbitrary URLs or a general RPC proxy.
-Native children get neither the manager nor the board. Managed extensions are not
-installed globally into ordinary OMP.
+Native children cannot manage lanes, report as a root lane, or request tracked
+decisions. Managed extensions are not installed globally into ordinary OMP.
 
 The operator CLI is still Bun, not a second resident Gateway. Command registration
 and confirmed avatar setup invoke a one-shot Rust REST client with credentials
@@ -73,8 +72,8 @@ part of the native build.
 2. `start` requires a valid active managed integration and starts or reuses one
    detached Gateway. A lifetime lock establishes single ownership. The Gateway starts
    or reconnects to the designated head through private local transport; the root
-   head loads the manager and board extensions, a root lane loads the lane and board
-   extensions. The Gateway owns configured messenger secrets and removes their
+   head loads the manager extension and a root lane loads the lane extension.
+   The Gateway owns configured messenger secrets and removes their
    environment variables from the managed Hosts; this is not isolation from the OS user.
    Gateway start/restart and new Host launches enforce the
    [native memory preflight](docs/design/execution.md#native-memory-preflight):

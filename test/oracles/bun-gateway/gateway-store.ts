@@ -1,17 +1,46 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmodSync } from "node:fs";
+import { chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { DiscordPurposeRequest, GatewayRestartRecord, GatewayRestartRequest, Inbound, Route } from "../../../src/contracts";
 import { routeKey } from "../../../src/contracts";
 import { authorizeDiscordPurpose } from "../../../src/discord-context";
 import { DeliveryError } from "../../../src/delivery";
+import { telegramCommandBlocked } from "../../../src/messenger-commands";
 import type { GatewayEvent, GatewayReceipt, QueuedEvent } from "../../../src/gateway-wire";
+import type { TelegramRedelivery } from "./telegram";
+
+interface EventRow {
+  readonly sequence: number;
+  readonly data: string;
+  readonly attempted_at: number | null;
+}
+
+// The native and oracle stores share this durable index on the same database.
+const recoveryRank = readFileSync(
+  new URL("../../../gateway/src/store/ingress/recovery_rank.sql", import.meta.url), "utf8",
+).replaceAll("{whitespace}",
+  "char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279)",
+);
+const nextEvent = `SELECT sequence,data,attempted_at FROM gateway_events WHERE sequence=(
+  SELECT CASE WHEN head.delivery_error='unresolved' THEN COALESCE((
+    SELECT sequence FROM gateway_events INDEXED BY gateway_events_recovery
+    WHERE delivered_at IS NULL AND (${recoveryRank}) IS NOT NULL
+    ORDER BY (${recoveryRank}),sequence LIMIT 1
+  ),head.sequence) ELSE head.sequence END
+  FROM (SELECT sequence,delivery_error FROM gateway_events
+        WHERE delivered_at IS NULL ORDER BY sequence LIMIT 1) AS head
+)`;
+
+function decodeEvent(row: EventRow): QueuedEvent {
+  const event: GatewayEvent = JSON.parse(row.data);
+  return { sequence: row.sequence, event, ...(event.kind === "answer" && row.attempted_at !== null ? { reconciliation: true as const } : {}) };
+}
 
 function identity(event: GatewayEvent): unknown {
   if (event.kind !== "message") return event;
-  const { receivedAt: _, reply: _reply, discordContext: _context, routingText: _routingText, ...input } = event.input;
+  const { receivedAt: _, reply: _reply, unresolvedReply: _unresolved, discordContext: _context, routingText: _routingText, ...input } = event.input;
   return { ...event, input: { ...input, attachments: input.attachments.map(file => {
     let location = file.url;
     try {
@@ -69,6 +98,8 @@ export class GatewayStore {
         // Old generic handler errors were incorrectly treated as completed.
         // Inbox dedupe is safe; old callbacks must reconcile, never blind replay.
         this.db.run("UPDATE gateway_events SET attempted_at=COALESCE(attempted_at,delivered_at,received_at),delivered_at=NULL,delivery_error='unresolved' WHERE delivery_error='Head rejected admitted event'");
+        this.db.run(`CREATE INDEX IF NOT EXISTS gateway_events_recovery ON gateway_events((${recoveryRank}), sequence)
+          WHERE delivered_at IS NULL AND (${recoveryRank}) IS NOT NULL`);
       }).immediate();
       chmodSync(path, 0o600);
       chmodSync(`${path}.gateway-lock`, 0o600);
@@ -113,7 +144,7 @@ export class GatewayStore {
     } | null;
     if (!row || row.target !== "main" || row.state !== "done") throw reject();
     const input = JSON.parse(row.data) as Inbound;
-    if (input.id !== request.inputId || input.text.trim() !== "/restart") throw reject();
+    if (input.id !== request.inputId || input.text.trim() !== "/restart" || telegramCommandBlocked(input)) throw reject();
     const ack = this.db.query("SELECT source_id,route,state,remote_id FROM outputs WHERE id=?").get(request.ackOutputId) as {
       source_id: string; route: string; state: string; remote_id: string | null;
     } | null;
@@ -163,26 +194,31 @@ export class GatewayStore {
     }).immediate();
   }
 
-  next(sequence?: number): QueuedEvent | null {
-    let row = this.db.query<{ sequence: number; data: string; attempted_at: number | null; delivery_error: string | null }, [number | null]>(
-      `SELECT sequence,data,attempted_at,delivery_error FROM gateway_events
-      WHERE delivered_at IS NULL AND (?1 IS NULL OR sequence=?1) ORDER BY sequence LIMIT 1`)
-      .get(sequence ?? null);
-    if (sequence === undefined && row?.delivery_error === "unresolved") {
-      // Quarantine never grants replay authority, but must not trap the owner
-      // outside recovery controls or the native approval-cache startup barrier.
-      // Ordinary intake keeps its original sequence behind the unresolved event.
-      const control = this.db.query<NonNullable<typeof row>, []>(`SELECT sequence,data,attempted_at,delivery_error FROM gateway_events
-        WHERE delivered_at IS NULL AND (
-          (json_extract(data,'$.kind')='reconnect' AND json_extract(data,'$.barrier') IS NOT NULL)
-          OR (json_extract(data,'$.kind')='message' AND trim(json_extract(data,'$.input.text')) IN ('/restart','/stop','/stop head')))
-        ORDER BY CASE WHEN json_extract(data,'$.kind')='reconnect' THEN 0 ELSE 1 END,sequence LIMIT 1`)
-        .get();
-      if (control) row = control;
+  telegramAdmittedInput(input: Inbound, { addressedElsewhere, legacy }: TelegramRedelivery): boolean {
+    if (input.route.platform !== "telegram") throw new Error("Telegram source crossed platform boundary");
+    const row = this.db.query<{ data: string }, [string]>("SELECT data FROM gateway_events WHERE identity=?").get(`message:${input.id}`);
+    if (!row) return false;
+    const old: GatewayEvent = JSON.parse(row.data);
+    if (old.kind !== "message" || old.input.receivedAt !== input.receivedAt) throw new Error("Gateway ingress identity conflict");
+    const recorded = identity(old);
+    const matches = (candidate: Inbound) => isDeepStrictEqual(recorded, identity({ kind: "message", input: candidate }));
+    if (!addressedElsewhere && matches(input)) return true;
+    if (old.input.telegramProtectedCommand === undefined && old.input.telegramOriginalText === undefined) {
+      const { telegramProtectedCommand: _verdict, telegramOriginalText: _raw, ...unmarked } = input;
+      if (!addressedElsewhere && old.input.routingText === input.routingText && matches(unmarked)) return true;
+      if (legacy && (old.input.routingText === undefined || old.input.routingText === legacy.routingText) &&
+          matches({ ...unmarked, ...legacy })) return true;
     }
-    if (!row) return null;
-    const event: GatewayEvent = JSON.parse(row.data);
-    return { sequence: row.sequence, event, ...(event.kind === "answer" && row.attempted_at !== null ? { reconciliation: true as const } : {}) };
+    throw new Error("Gateway ingress identity conflict");
+  }
+
+  next(sequence?: number): QueuedEvent | null {
+    const row = sequence === undefined
+      ? this.db.query<EventRow, []>(nextEvent).get()
+      : this.db.query<EventRow, [number]>(
+        "SELECT sequence,data,attempted_at FROM gateway_events WHERE sequence=? AND delivered_at IS NULL",
+      ).get(sequence);
+    return row ? decodeEvent(row) : null;
   }
   attempt(sequence: number): void {
     this.db.query("UPDATE gateway_events SET attempted_at=COALESCE(attempted_at,?) WHERE sequence=? AND delivered_at IS NULL")

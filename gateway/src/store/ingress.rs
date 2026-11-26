@@ -12,6 +12,8 @@ use crate::{discord::CONFIRMED_VOICE_DRAFT_PREFIX, group::Request as GroupReques
 
 use super::{PHYSICAL_ROUTE_FIELDS, Store, json_equal, now, string};
 
+pub(super) mod recovery;
+
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum GatewayReceipt {
@@ -38,7 +40,6 @@ struct EventRow {
     sequence: i64,
     data: String,
     attempted_at: Option<i64>,
-    delivery_error: Option<String>,
 }
 
 impl EventRow {
@@ -47,7 +48,17 @@ impl EventRow {
             sequence: row.get(0)?,
             data: row.get(1)?,
             attempted_at: row.get(2)?,
-            delivery_error: row.get(3)?,
+        })
+    }
+
+    fn decode(self) -> Result<QueuedEvent> {
+        let event: Value = serde_json::from_str(&self.data)?;
+        let reconciliation =
+            (event["kind"] == "answer" && self.attempted_at.is_some()).then_some(true);
+        Ok(QueuedEvent {
+            sequence: self.sequence,
+            event,
+            reconciliation,
         })
     }
 }
@@ -132,6 +143,61 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// A Telegram poll can be interrupted after admission but before the
+    /// cursor write. Prove the source against its original receipt; never
+    /// rewrite the row or admit the compatibility projection as new work.
+    pub(crate) fn telegram_admitted_input(
+        &self,
+        event: &Value,
+        addressed_elsewhere: bool,
+        legacy: Option<(&str, &str)>,
+    ) -> Result<bool> {
+        let input = &event["input"];
+        let id = string(input, "id")?;
+        let saved = self.db()?.query_row(
+            "SELECT data FROM gateway_events WHERE identity=?",
+            [format!("message:{id}")],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        let Some(saved) = saved else { return Ok(false) };
+        let saved: Value = serde_json::from_str(&saved)?;
+        if saved["kind"] != "message" || saved["input"]["receivedAt"] != input["receivedAt"] {
+            bail!("Gateway ingress identity conflict");
+        }
+        let saved_identity = identity(saved.clone())?;
+        let mut candidate = identity(event.clone())?;
+        if !addressed_elsewhere && json_equal(&saved_identity, &candidate, false) {
+            return Ok(true);
+        }
+        let original = &saved["input"];
+        if original.get("telegramProtectedCommand").is_none()
+            && original.get("telegramOriginalText").is_none()
+        {
+            let input_identity = candidate["input"]
+                .as_object_mut()
+                .context("Invalid Telegram Gateway input")?;
+            input_identity.remove("telegramProtectedCommand");
+            input_identity.remove("telegramOriginalText");
+            let recorded_view = original.get("routingText");
+            // Existing receipts with the newer suffix placement but without
+            // provenance must also match their already-recorded routing view.
+            if !addressed_elsewhere && recorded_view == input.get("routingText")
+                && json_equal(&saved_identity, &candidate, false)
+            {
+                return Ok(true);
+            }
+            if let Some((text, view)) = legacy
+                && recorded_view.is_none_or(|recorded| recorded.as_str() == Some(view))
+            {
+                candidate["input"]["text"] = Value::String(text.to_owned());
+                if json_equal(&saved_identity, &candidate, false) {
+                    return Ok(true);
+                }
+            }
+        }
+        bail!("Gateway ingress identity conflict")
     }
 
     /// Recover the original admitted representation, not a new policy
@@ -228,55 +294,30 @@ impl Store {
     }
 
     pub fn next(&self, sequence: Option<i64>) -> Result<Option<QueuedEvent>> {
-        let db = self.db()?;
-        if sequence.is_none() {
-            let held: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM metadata WHERE key = ? AND
-                    json_extract(value,'$.stage') IN ('stopping','starting','launching'))",
-                [super::HEAD_ROTATION],
-                |row| row.get(0),
-            )?;
-            if held {
-                return Ok(None);
+        let row = {
+            let db = self.db()?;
+            if let Some(sequence) = sequence {
+                db.query_row(
+                    "SELECT sequence,data,attempted_at FROM gateway_events
+                     WHERE sequence=? AND delivered_at IS NULL",
+                    [sequence],
+                    EventRow::read,
+                )
+                .optional()?
+            } else {
+                let held: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM metadata WHERE key = ? AND
+                        json_extract(value,'$.stage') IN ('stopping','starting','launching'))",
+                    [super::HEAD_ROTATION],
+                    |row| row.get(0),
+                )?;
+                if held {
+                    return Ok(None);
+                }
+                recovery::next(&db)?
             }
-        }
-        let mut row = db
-            .query_row(
-                "SELECT sequence,data,attempted_at,delivery_error FROM gateway_events
-             WHERE delivered_at IS NULL AND (?1 IS NULL OR sequence=?1) ORDER BY sequence LIMIT 1",
-                [sequence],
-                EventRow::read,
-            )
-            .optional()?;
-        if sequence.is_none()
-            && row.as_ref().and_then(|row| row.delivery_error.as_deref()) == Some("unresolved")
-        {
-            // Quarantine blocks ordinary intake, not its reconciliation barrier
-            // or source-bound operator recovery controls.
-            let control = db.query_row(
-                "SELECT sequence,data,attempted_at,delivery_error FROM gateway_events
-                 WHERE delivered_at IS NULL AND (
-                   (json_extract(data,'$.kind')='reconnect' AND json_extract(data,'$.barrier') IS NOT NULL)
-                   OR (json_extract(data,'$.kind')='message' AND trim(json_extract(data,'$.input.text')) IN ('/restart','/stop','/stop head')))
-                 ORDER BY CASE WHEN json_extract(data,'$.kind')='reconnect' THEN 0 ELSE 1 END,sequence LIMIT 1",
-                [],
-                EventRow::read,
-            ).optional()?;
-            if control.is_some() {
-                row = control;
-            }
-        }
-        row.map(|row| {
-            let event: Value = serde_json::from_str(&row.data)?;
-            let reconciliation =
-                (event["kind"] == "answer" && row.attempted_at.is_some()).then_some(true);
-            Ok(QueuedEvent {
-                sequence: row.sequence,
-                event,
-                reconciliation,
-            })
-        })
-        .transpose()
+        };
+        row.map(EventRow::decode).transpose()
     }
 
     pub fn attempt(&self, sequence: i64) -> Result<()> {
@@ -358,14 +399,8 @@ impl Store {
     pub(crate) fn pending_barrier(&self) -> Result<Option<String>> {
         Ok(self
             .db()?
-            .query_row(
-                "SELECT json_extract(data,'$.barrier') FROM gateway_events
-             WHERE delivered_at IS NULL AND json_extract(data,'$.kind')='reconnect'
-               AND json_type(data,'$.barrier')='text'
-             ORDER BY sequence LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
+            .prepare_cached(&recovery::PENDING_BARRIER)?
+            .query_row([], |row| row.get(0))
             .optional()?)
     }
 

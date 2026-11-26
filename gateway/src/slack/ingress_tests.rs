@@ -1,4 +1,4 @@
-use super::{control_text, slash_text};
+use super::{SlashTextError, control_text, slash_text};
 
 #[test]
 fn normalizes_only_exact_owner_command_spellings() {
@@ -15,11 +15,17 @@ fn normalizes_only_exact_owner_command_spellings() {
     }
     assert_eq!(
         slash_text("/superagent-model", " exact\nargument \u{feff} ").as_deref(),
-        Some("/model exact\nargument")
+        Ok("/model exact\nargument")
     );
-    assert_eq!(slash_text("/superagent-status", "not accepted"), None);
-    assert_eq!(slash_text("/superagent-fast", "ultra"), None);
-    assert_eq!(slash_text("/status", ""), None);
+    assert_eq!(
+        slash_text("/superagent-status", "not accepted"),
+        Err(SlashTextError::UnexpectedArgument)
+    );
+    assert_eq!(
+        slash_text("/superagent-fast", "ultra"),
+        Err(SlashTextError::UnexpectedArgument)
+    );
+    assert_eq!(slash_text("/status", ""), Err(SlashTextError::Unregistered));
 }
 
 #[test]
@@ -28,14 +34,22 @@ fn slash_ingress_accepts_only_the_registered_names_and_argument_contract() {
         let name = format!("/superagent-{}", command.name);
         assert_eq!(
             slash_text(&name, " \n "),
-            Some(format!("/{}", command.name))
+            Ok(format!("/{}", command.name))
         );
         assert_eq!(
             slash_text(&name, "input"),
-            command.text.map(|_| format!("/{} input", command.name))
+            command.text
+                .map(|_| format!("/{} input", command.name))
+                .ok_or(SlashTextError::UnexpectedArgument)
         );
-        assert_eq!(slash_text(&format!("/{}", command.name), ""), None);
-        assert_eq!(slash_text(&format!("!{}", command.name), ""), None);
+        assert_eq!(
+            slash_text(&format!("/{}", command.name), ""),
+            Err(SlashTextError::Unregistered)
+        );
+        assert_eq!(
+            slash_text(&format!("!{}", command.name), ""),
+            Err(SlashTextError::Unregistered)
+        );
     }
     for name in [
         "/hermes",
@@ -44,7 +58,7 @@ fn slash_ingress_accepts_only_the_registered_names_and_argument_contract() {
         "/SUPERAGENT-help",
         "superagent-help",
     ] {
-        assert_eq!(slash_text(name, ""), None);
+        assert_eq!(slash_text(name, ""), Err(SlashTextError::Unregistered));
     }
     for (name, input, expected) in [
         (
@@ -70,6 +84,6 @@ fn slash_ingress_accepts_only_the_registered_names_and_argument_contract() {
             "/stop actual-lane-id",
         ),
     ] {
-        assert_eq!(slash_text(name, input).as_deref(), Some(expected));
+        assert_eq!(slash_text(name, input).as_deref(), Ok(expected));
     }
 }

@@ -6,7 +6,7 @@ export type CronSchedule =
   | { readonly kind: "calendar"; readonly expression: string; readonly timezone: string };
 
 export function parseCronSchedule(text: string, now: number): CronSchedule | null {
-  const relative = /^(in|every) ([1-9]\d*)([smhd])$/.exec(text);
+  const relative = /^(in|every)[^\S\r\n\u2028\u2029]+([1-9]\d*)([smhd])$/u.exec(text);
   if (relative) {
     const [, mode, amount, unit] = relative;
     const seconds = Number(amount) * (unit === "s" ? 1 : unit === "m" ? 60 : unit === "h" ? 3600 : 86400);
@@ -14,8 +14,8 @@ export function parseCronSchedule(text: string, now: number): CronSchedule | nul
     if (!Number.isFinite(new Date(now + milliseconds).getTime()) || mode === "every" && seconds < 60) return null;
     return mode === "every" ? { kind: "interval", milliseconds } : { kind: "once", at: now + milliseconds };
   }
-  if (text.startsWith("at ")) {
-    const date = text.slice(3);
+  const date = /^at[^\S\r\n\u2028\u2029]+(\S+)$/u.exec(text)?.[1];
+  if (date) {
     if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:Z|[+-]\d{2}:\d{2})$/.test(date)) return null;
     const day = date.slice(0, 10);
     const midnight = new Date(`${day}T00:00:00Z`);

@@ -26,6 +26,7 @@ export interface DiscordCommandRegistrationReport {
   readonly applicationId: string;
   readonly botId: string;
   readonly plannedGlobal: readonly DiscordDefinition[];
+  readonly preApplyTextOptionDrift: readonly string[];
   readonly currentGlobal: readonly RegistrationSummary[];
   readonly obsoleteGlobal: readonly RegistrationSummary[];
   readonly guilds: readonly {

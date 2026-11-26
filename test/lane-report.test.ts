@@ -306,13 +306,14 @@ describe("native lane reporting", () => {
     ] });
   });
 
-  test("report and board results cannot manufacture tool evidence", async () => {
+  test("current coordination receipts and historical journal entries cannot manufacture tool evidence", async () => {
     const f = await fixture("main", "lane", true);
-    for (const name of ["lane_report", "board_post", "board_read", "board_subscribe"]) {
+    const rejected = "not a coordination receipt";
+    for (const name of ["lane_report", "result_attach", "board_post", "board_read", "board_subscribe"]) {
       f.call(name, name);
       f.completed(name, name);
-      await expect(f.execute({ status: "progress", summary: "Chatter",
-        evidence: [{ kind: "tool", toolCallId: name }] })).rejects.toThrow("not report/board chatter");
+      await expect(f.execute({ status: "progress", summary: "Coordination activity",
+        evidence: [{ kind: "tool", toolCallId: name }] })).rejects.toThrow(rejected);
     }
     const wrapped = await f.execute({ status: "waiting", summary: "Review", waiting: { kind: "dependency", target: "review" } });
     const review = await f.execute({ status: "scope_review", sourceId: "original-owner-input" });
@@ -320,12 +321,71 @@ describe("native lane reporting", () => {
       f.call(id, "write");
       f.completed(id, "write", false, output.details);
       await expect(f.execute({ status: "progress", summary: "Wrapped receipt",
-        evidence: [{ kind: "tool", toolCallId: id }] })).rejects.toThrow("not report/board chatter");
+        evidence: [{ kind: "tool", toolCallId: id }] })).rejects.toThrow(rejected);
     }
-    f.call("board-device", "write", { path: "xd://board_read", content: "{}" });
-    f.completed("board-device", "write");
-    await expect(f.execute({ status: "progress", summary: "Forwarded board chatter",
-      evidence: [{ kind: "tool", toolCallId: "board-device" }] })).rejects.toThrow("not report/board chatter");
+    for (const [id, path] of [["report-device", "xd://lane_report"], ["retired-device", "xd://board_read"]]) {
+      f.call(id, "write", { path, content: "{}" });
+      f.completed(id, "write");
+      await expect(f.execute({ status: "progress", summary: "Forwarded coordination activity",
+        evidence: [{ kind: "tool", toolCallId: id }] })).rejects.toThrow(rejected);
+    }
+  });
+
+  test.each([
+    ["cancelled HEAD question", "direct", true, false],
+    ["submitted HEAD question", "direct", true, true],
+    ["submitted ordinary owner question", "direct", false, true],
+    ["cancelled mounted command question", "command", true, false],
+    ["submitted legacy device question", "device", true, true],
+  ] as const)("does not treat a %s as work evidence", async (_label, transport, toHead, submitted) => {
+    const f = await fixture();
+    const decision = f.runner.getRegisteredTool("decision_ask")?.definition;
+    if (!decision) throw new Error("decision_ask is not registered");
+    const id = "decision-call";
+    const args = { ...(toHead ? { to: "head" } : {}), questions: [
+      { question: "Which edit should proceed?", options: [{ label: "Documentation" }] },
+    ] };
+    const ctx = f.runner.createContext();
+    const output = await decision.execute(id, args, undefined, undefined, {
+      ...ctx, ui: { ...ctx.ui, askDialog: async questions => submitted ? {
+        kind: "submit", results: questions.map(({ id, question, options }) => ({
+          id, question, options: options.map(option => option.label), multi: false, selectedOptions: ["Documentation"],
+        })),
+      } : undefined },
+    });
+    const name = transport === "command" ? "bash" : transport === "device" ? "write" : "decision_ask";
+    const receipt = { tool: "decision_ask", mode: "execute", args, inner: output.details };
+    const details = transport === "command" ? { exitCode: 0, toolCommands: [{ ...receipt, exitCode: 0 }] }
+      : transport === "device" ? { xdev: receipt } : output.details;
+    f.call(id, name, transport === "command" ? { command: `decision_ask --json '${JSON.stringify(args)}'` }
+      : transport === "device" ? { path: "xd://decision_ask", content: JSON.stringify(args) } : args);
+    f.session.appendMessage({ role: "toolResult", toolCallId: id, toolName: name,
+      content: output.content, details, isError: false, timestamp: 2 });
+
+    await expect(f.execute({ status: "progress", summary: "Work observed",
+      evidence: [{ kind: "tool", toolCallId: id }] })).rejects.toThrow("not a coordination receipt");
+  });
+
+  test("ordinary shell output and non-coordination dispatches remain tool evidence", async () => {
+    const f = await fixture();
+    const id = "printed-example";
+    const example = 'decision_ask --json {"to":"head"}';
+    f.call(id, "bash", { command: `printf '%s\\n' '${example}'` });
+    f.session.appendMessage({ role: "toolResult", toolCallId: id, toolName: "bash",
+      content: [{ type: "text", text: `${example}\n{"id":"d-${"a".repeat(24)}","status":"cancelled"}` }],
+      details: { exitCode: 0 }, isError: false, timestamp: 2 });
+    const mounted = "mounted-search";
+    const args = { pat: "function $NAME() {}", path: "src" };
+    f.call(mounted, "bash", { command: `ast_grep --json '${JSON.stringify(args)}'` });
+    f.completed(mounted, "bash", false, {
+      exitCode: 0, toolCommands: [{ tool: "ast_grep", mode: "execute", exitCode: 0, args }],
+    });
+
+    const result = await f.execute({ status: "progress", summary: "Checked command output", evidence: [
+      { kind: "tool", toolCallId: id }, { kind: "tool", toolCallId: mounted },
+    ] });
+
+    expect(parseLaneReportResult(result)?.report.evidence.map(ref => ref.ref)).toEqual([id, mounted]);
   });
 
   test("tool and approval waits require current native identities; resolved is only an evidence-backed observation", async () => {

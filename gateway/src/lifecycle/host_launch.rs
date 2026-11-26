@@ -97,7 +97,7 @@ struct Preparation {
 
 struct HeadLaunch {
     package: PathBuf,
-    extensions: [PathBuf; 5],
+    extensions: [PathBuf; 4],
     environment: BTreeMap<OsString, OsString>,
 }
 
@@ -293,7 +293,6 @@ impl HeadLaunch {
             config.root.clone(),
             package.clone(),
             extension,
-            source.join("board-extension.ts"),
             source.join("host-extension.ts"),
         ];
         host_owner_executable(&config.root)?;
