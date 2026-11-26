@@ -37,6 +37,13 @@
 - **Keep chat connected without keeping a model busy.** The Gateway persists intake and manages HEAD's lifecycle. OMP still owns sessions, tools, authentication, and approvals; no core fork is required.
 - **Run lanes locally or on an [enrolled SSH worker](#add-a-remote-worker).** All configured owners are treated as one trusted operator. This is not a multitenant service or an OS sandbox.
 
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+  <img src="assets/architecture.svg" width="100%" alt="Messengers connect to the Gateway. HEAD handles requests and coordinates independent lanes, which report back to HEAD.">
+</picture>
+
 ## Quick start
 
 ### 1. Install

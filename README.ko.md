@@ -36,6 +36,13 @@
 - **메신저 연결과 모델 실행 분리.** Gateway가 요청을 저장하고 헤드의 수명을 관리합니다. 세션·도구·인증·승인은 순정 OMP가 맡습니다.
 - **로컬 또는 [SSH 워커](#원격-워커-추가)에서 레인 실행.** 설정된 모든 소유자는 같은 신뢰된 운영자로 취급합니다. 멀티테넌트 서비스나 OS 샌드박스가 아닙니다.
 
+## 아키텍처
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture.ko-dark.svg">
+  <img src="assets/architecture.ko.svg" width="100%" alt="메신저는 Gateway에 연결됩니다. 헤드는 요청을 처리하고 독립 레인에 작업을 맡기며, 레인은 결과를 헤드에 보고합니다.">
+</picture>
+
 ## 빠른 시작
 
 ### 1. 설치
