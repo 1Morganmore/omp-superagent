@@ -7,15 +7,15 @@ import {
 } from "discord.js";
 import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type DiscordContext, type DiscordPurposeNote, type DiscordPurposeRequest, type Inbound, type MessageActivity, type MessageReference, type OutputRecord, type ReplyContext, type Route, type StorePort, type ThreadInfo, type ThreadUpdate } from "../../../src/contracts.ts";
 import type { DownloadMessenger as Messenger } from "../../fixtures/inbound-attachments";
-import { changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "../../../src/discord-context";
-import { validateDecisionAnswer, validateDecisionResponse } from "../../../src/decisions";
-import { parseDialog, type Dialog } from "../../../src/dialog.ts";
-import { approvalCardToken, DeliveryError } from "../../../src/delivery.ts";
+import { changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "../../../src/messaging/discord-context";
+import { validateDecisionAnswer, validateDecisionResponse } from "../../../src/lane/decisions";
+import { parseDialog, type Dialog } from "../../../src/messaging/dialog.ts";
+import { approvalCardToken, DeliveryError } from "../../../src/messaging/delivery.ts";
 import { parseDiscordCommand } from "./discord-commands.ts";
 import { extractDiscordCards, renderDiscordMarkdown, type DiscordEmbed } from "./discord-markdown.ts";
 import { DiscordVoice } from "./discord-voice";
 import { VOICE_DRAFT_HEADER } from "./discord-voice-draft";
-import type { DiscordVoiceConfig } from "../../../src/config";
+import type { DiscordVoiceConfig } from "../../../src/config/config";
 
 // Reference (not copied): gimso2x/ompbot @ 4d2eb28d0bf66644892dc0fc333580d0eb7e7780,
 // src/discord/{adapter,attachments,channel,transport}.ts (MIT, ompbot contributors).

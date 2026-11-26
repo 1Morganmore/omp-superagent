@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { Store } from "../../src/store";
-import { PrWatcher } from "../../src/pr-watch";
-import { loginSchema, parseWire } from "../../src/pr-github-schema";
-import { changeDiscordPurpose } from "../../src/discord-context";
-import type { Config } from "../../src/config";
+import { Store } from "../../src/storage/store";
+import { PrWatcher } from "../../src/pr/pr-watch";
+import { loginSchema, parseWire } from "../../src/pr/pr-github-schema";
+import { changeDiscordPurpose } from "../../src/messaging/discord-context";
+import type { Config } from "../../src/config/config";
 import type { Route } from "../../src/contracts";
 
 /** Run data validation through OMP's actual extension import graph, not Bun imports alone. */

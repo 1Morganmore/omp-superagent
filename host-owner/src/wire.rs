@@ -638,6 +638,24 @@ mod tests {
     use tokio::io::{BufReader, duplex};
 
     #[tokio::test]
+    async fn stock_rpc_keeps_nested_metadata_as_literal_json() {
+        let mut input = concat!(
+            r#"{"type":"notice","data":{"$serde_json::private::RawValue":"literal producer label"}}"#,
+            "\n",
+        )
+        .as_bytes();
+        assert_eq!(
+            read_frame(&mut input, &mut Decoder::default())
+                .await
+                .unwrap(),
+            Some(json!({
+                "type": "notice",
+                "data": {"$serde_json::private::RawValue": "literal producer label"},
+            })),
+        );
+    }
+
+    #[tokio::test]
     async fn keeps_partial_lines_across_cancellation_and_requires_newline_at_eof() {
         let (input, mut producer) = duplex(64);
         let mut reader = BufReader::with_capacity(4, input);

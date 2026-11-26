@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { HostConnection } from "../../src/host";
+import { HostConnection } from "../../src/omp/host";
 import superagentExtension from "../../src/extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 

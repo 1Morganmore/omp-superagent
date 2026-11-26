@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
-import { loadConfig } from "../../src/config";
+import { loadConfig } from "../../src/config/config";
 import type { Inbound, OutputRecord, Route } from "../../src/contracts";
 import { gatewayFixture, until } from "./native-rust-gateway";
 import { nativeJournalDispatches } from "./native-tool-transport";

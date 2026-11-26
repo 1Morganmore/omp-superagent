@@ -14,7 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { asyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/async-job-views";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { validateToolArguments } from "@oh-my-pi/pi-ai";
-import { laneWaitKey, parseLaneReportResult, type LaneReportEvent } from "../src/lane-report";
+import { laneWaitKey, parseLaneReportResult, type LaneReportEvent } from "../src/lane/lane-report";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {

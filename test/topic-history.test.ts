@@ -7,9 +7,9 @@ import { CURRENT_SESSION_VERSION, type SessionEntry, type SessionHeader, type Se
   from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import type { Inbound, Lane } from "../src/contracts";
-import { findPastTopic, findRoutingTopics, joinedTopicProvenance, pastTopicQuery, readPastTopic, refersToPastTopic, routingExcerpt, routingSubject, transportRoutingProse } from "../src/topic-history";
-import { topicRequest } from "../src/topic-request";
-import { workflowContext } from "../src/workflow";
+import { findPastTopic, findRoutingTopics, joinedTopicProvenance, pastTopicQuery, readPastTopic, refersToPastTopic, routingExcerpt, routingSubject, transportRoutingProse } from "../src/routing/topic-history";
+import { topicRequest } from "../src/routing/topic-request";
+import { workflowContext } from "../src/lane/workflow";
 
 const rootPaths: string[] = [];
 const receivedAt = Date.parse("2026-11-18T12:00:00Z");

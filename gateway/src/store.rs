@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 mod discord_intake;
 pub(crate) mod discord_presence;
+mod hibernation;
 mod ingress;
 mod restart;
 mod rotation;
@@ -21,14 +22,16 @@ mod rotation;
 mod tests;
 
 pub(crate) use discord_intake::DiscordIntake;
-pub(crate) use ingress::{DiscordSourceReceipt, discord_attachment_identity_url};
+pub(crate) use hibernation::HibernationChange;
+pub(crate) use ingress::{DiscordSourceReceipt, discord_attachment_identity_url, history_gap};
 pub use ingress::{GatewayReceipt, QueuedEvent, answer_digest};
 pub(crate) use restart::{AuthorityError, js_trim};
-pub(crate) use rotation::{HEAD_ROTATION, HEAD_SESSION_FILE};
+pub(crate) use rotation::{HEAD_ROTATION, HEAD_SESSION_FILE, LAST_HEAD_ROTATION};
 
 pub struct Store {
     db: Mutex<Connection>,
     state_dir: PathBuf,
+    ingress: tokio::sync::Notify,
     // Independent lifetime lock shared with the old Gateway and native runner.
     // This connection retains its exclusive transaction until it is dropped.
     _lock: Mutex<Connection>,
@@ -93,12 +96,18 @@ impl Store {
         Ok(Self {
             db: Mutex::new(db),
             state_dir,
+            ingress: tokio::sync::Notify::new(),
             _lock: Mutex::new(lock),
         })
     }
 
     pub(crate) fn state_dir(&self) -> &Path {
         &self.state_dir
+    }
+
+    /// Wakes the lifecycle monitor, not the controller's delivery consumer.
+    pub(crate) async fn ingress_changed(&self) {
+        self.ingress.notified().await;
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
@@ -190,6 +199,7 @@ impl Store {
                 }
             })
         } else {
+            hibernation::require_awake(&tx)?;
             tx.execute(
                 "INSERT INTO gateway_effects(id,operation,arguments,state) VALUES (?,?,?,'attempted')",
                 params![id, operation, serde_json::to_string(args)?],

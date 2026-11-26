@@ -3,19 +3,20 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message, Update } from "grammy/types";
 import { TelegramMessenger, telegramDeliveryError } from "./oracles/bun-gateway/telegram.ts";
-import { DeliveryError } from "../src/delivery.ts";
-import { decisionId } from "../src/decisions";
-import { Store } from "../src/store.ts";
+import { DeliveryError } from "../src/messaging/delivery.ts";
+import { decisionId } from "../src/lane/decisions";
+import { Store } from "../src/storage/store.ts";
 import type { Approval, DialogResponse, Inbound, OutputRecord, Route } from "../src/contracts.ts";
-import { type Config, hostPaths } from "../src/config.ts";
-import { createGatewayMessenger } from "../src/gateway-client.ts";
-import { gatewayPaths } from "../src/gateway-protocol.ts";
+import { type Config, hostPaths } from "../src/config/config.ts";
+import { createGatewayMessenger } from "../src/gateway/gateway-client.ts";
+import { gatewayPaths } from "../src/gateway/gateway-protocol.ts";
 import { GatewayServer } from "./oracles/bun-gateway/gateway-server.ts";
-import type { GatewayStatus } from "../src/gateway-wire.ts";
+import type { GatewayStatus } from "../src/gateway/gateway-wire.ts";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store.ts";
-import { Superagent, type RuntimeHost, type RuntimeState } from "../src/runtime.ts";
+import { Superagent } from "../src/runtime/controller.ts";
+import type { RuntimeHost, RuntimeState } from "../src/runtime/native-frames.ts";
 import { MessengerHub } from "./oracles/bun-gateway/messengers.ts";
-import { MESSENGER_COMMANDS } from "../src/messenger-commands.ts";
+import { MESSENGER_COMMANDS } from "../src/messaging/messenger-commands.ts";
 
 // These tests run the real grammY Api serializer/error boundary against an
 // in-process HTTP simulation. They never contact Telegram or activate a bot.

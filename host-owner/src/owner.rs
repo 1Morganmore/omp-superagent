@@ -30,6 +30,7 @@ use tokio::{
 
 use crate::{
     commands,
+    exit_receipt::{ExitVerification, ExitingHost},
     inventory::InventoryConfig,
     projection::EventFanout,
     transport::{Channel, Error, Link, Packet, Pump, REQUEST_TIMEOUT, Result, new_id},
@@ -42,6 +43,7 @@ const INVENTORY_QUERIES: usize = 64;
 const INVENTORY_CONCURRENCY: usize = 8;
 const PEER_LIMIT: usize = 64;
 const OBSERVATION_ERROR: &str = "A durable native observation failed; residency remains held";
+const NATIVE_PROFILE_ENV: &str = "OMP_SUPERAGENT_NATIVE_PROFILE";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +58,9 @@ struct Manifest {
     #[serde(default)]
     empty_tool_selection: bool,
     inventory: Option<Value>,
+    native_profile_binding: Option<Value>,
+    replayable_argv_hash: Option<String>,
+    head_hibernation_session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -202,7 +207,6 @@ pub(crate) struct Helper {
 pub(crate) enum Operation {
     Inventory,
     Fit,
-    Exit,
 }
 
 impl Helper {
@@ -218,11 +222,6 @@ impl Helper {
                 REQUEST_TIMEOUT,
                 "Native restored queue response is unavailable",
             ),
-            Operation::Exit => (
-                "exit",
-                Duration::from_secs(60),
-                "Native exit persistence is unconfirmed; adapter remains fenced",
-            ),
         };
         let unavailable = Error::Unavailable(message);
         let bytes = serde_json::to_vec(input).map_err(|_| unavailable)?;
@@ -232,13 +231,7 @@ impl Helper {
                 .arg(&self.script)
                 .arg(name)
                 .arg(&self.manifest)
-                // The checkout can be removed while a Host is alive. Exit
-                // verification reads only its independent, absolute state paths.
-                .current_dir(if matches!(operation, Operation::Exit) {
-                    self.manifest.parent().ok_or(unavailable)?
-                } else {
-                    &self.cwd
-                })
+                .current_dir(&self.cwd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -917,6 +910,23 @@ pub(crate) async fn run(path: PathBuf) -> anyhow::Result<ExitCode> {
             && manifest.helper_path.is_absolute(),
         "Owner manifest paths must be absolute"
     );
+    if let Some(binding) = &manifest.native_profile_binding {
+        let profile = &binding["profile"];
+        ensure!(
+            profile["version"] == 2
+                && ["agentDir", "dataDir", "sessionsDir"].iter().all(|key| {
+                    profile[*key].as_str().is_some_and(|path| Path::new(path).is_absolute())
+                })
+                && binding["discoveryEntry"].as_str().is_some_and(|path| Path::new(path).is_absolute()),
+            "Owner manifest does not contain a valid native profile binding"
+        );
+    }
+    ensure!(
+        manifest.head_hibernation_session_id.as_ref().is_none_or(|id| {
+            !id.is_empty() && manifest.native_profile_binding.is_some()
+        }),
+        "Cannot wake HEAD without a bound native profile"
+    );
     ensure!(
         !options.pr_review_only
             || manifest.empty_tool_selection
@@ -963,6 +973,7 @@ pub(crate) async fn run(path: PathBuf) -> anyhow::Result<ExitCode> {
         .env("OMP_SUPERAGENT_HOST_SOCKET", &options.socket_path)
         .env("OMP_SUPERAGENT_NATIVE_SOCKET", &manifest.native_socket)
         .env("OMP_SUPERAGENT_HOST_CONFIG", &manifest.config_path)
+        .env(NATIVE_PROFILE_ENV, serde_json::to_string(&manifest.native_profile_binding)?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1024,17 +1035,20 @@ pub(crate) async fn run(path: PathBuf) -> anyhow::Result<ExitCode> {
     owner.state()?.child_exited = true;
     tokio::select! {
         result = &mut connections => result,
-        result = exit(&owner, status, drain) => result,
+        result = exit(&owner, status, drain, &options.socket_path) => result,
     }
 }
 
 async fn activate(owner: &Owner, manifest: &Manifest) -> anyhow::Result<()> {
     let mut command = json!({
         "type": "activate", "toolsExplicitlySelected": manifest.tools_explicitly_selected,
-        "noTools": manifest.no_tools,
+        "noTools": manifest.no_tools, "replayableArgvHash": manifest.replayable_argv_hash,
     });
     if manifest.options.pr_review_only {
         command["emptyToolSelection"] = json!(manifest.empty_tool_selection);
+    }
+    if manifest.head_hibernation_session_id.is_some() {
+        command["waking"] = json!(true);
     }
     let activated = owner
         .control()?
@@ -1114,6 +1128,18 @@ async fn initialize(owner: &Arc<Owner>, manifest: &Manifest) -> anyhow::Result<(
             && identity["sessionFile"].as_str() == Some(&manifest.options.session_file),
         "Native launch identity mismatch"
     );
+    if let Some(binding) = &manifest.native_profile_binding {
+        ensure!(
+            identity["nativeProfile"] == binding["profile"],
+            "Native launch did not confirm the prepared agent, data and discovery roots"
+        );
+    }
+    if let Some(expected) = &manifest.head_hibernation_session_id {
+        ensure!(
+            identity["sessionId"].as_str() == Some(expected.as_str()),
+            "Native launch did not open the hibernated HEAD journal"
+        );
+    }
     if manifest.options.pr_review_only {
         ensure!(
             identity["prReviewPolicy"]["version"] == 1
@@ -1205,25 +1231,11 @@ async fn accept(owner: &Arc<Owner>, listener: &UnixListener) -> anyhow::Result<E
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExitObservation<'a> {
-    pid: u32,
-    owner_pid: u32,
-    session_id: &'a str,
-    instance_key: Option<&'a Value>,
-    worker_attempt: Option<&'a str>,
-    code: Option<i32>,
-    signal: Option<&'static str>,
-    expected_observations: Vec<(&'a str, &'a Value)>,
-    run_ordinal: u64,
-    observation_failure: bool,
-}
-
 async fn exit(
     owner: &Owner,
     status: ExitStatus,
     drain: JoinHandle<bool>,
+    socket_path: &Path,
 ) -> anyhow::Result<ExitCode> {
     // Process exit may arrive ahead of pipe EOF. Consume all remaining frames
     // before sampling the journal expectations.
@@ -1246,29 +1258,24 @@ async fn exit(
         .identity
         .get()
         .context("Native exit identity is unavailable")?;
-    let receipt = owner
-        .helper
-        .call(
-            Operation::Exit,
-            &ExitObservation {
-                pid: owner.native_pid,
-                owner_pid: std::process::id(),
-                session_id: &identity.session_id,
-                instance_key: identity.instance_key.as_ref(),
-                worker_attempt: identity.worker_attempt.as_deref(),
-                code: status.code(),
-                signal: signal(status),
-                expected_observations: observations
-                    .iter()
-                    .map(|(id, frame)| (id.as_str(), frame.as_ref()))
-                    .collect(),
-                run_ordinal,
-                observation_failure,
-            },
-        )
-        .await;
-    if !matches!(receipt, Ok(value) if value["persisted"] == true && value["observationsFlushed"] == true)
-    {
+    // The checkout can disappear while a Host is alive. Exit proof uses
+    // only its captured identity and independent, absolute state paths.
+    let verification = ExitVerification {
+        host: ExitingHost {
+            pid: owner.native_pid,
+            owner_pid: std::process::id(),
+            session_id: identity.session_id.clone(),
+            session_file: identity.session_file.clone(),
+            code: status.code(),
+            worker_attempt: identity.worker_attempt.clone().filter(|attempt| !attempt.is_empty()),
+            signal: signal(status).map(str::to_owned),
+        },
+        instance_key: identity.instance_key.clone(),
+        expected_observations: observations,
+        run_ordinal,
+        observation_failure,
+    };
+    if !matches!(verification.verify_and_publish(socket_path).await, Ok(true)) {
         eprintln!("Native exit persistence is unconfirmed; adapter remains fenced");
         return pending().await;
     }

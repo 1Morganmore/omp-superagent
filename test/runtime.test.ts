@@ -7,33 +7,35 @@ import { basename, delimiter, dirname, join } from "node:path";
 import type { Approval, DialogResponse, GatewayRestartRecord, GatewayRestartRequest, Inbound, Lane, LaneModel, LanePresetSnapshot, ResolvedLanePreset, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "../src/contracts";
 import { physicalRoute, physicalRouteKey, routeKey } from "../src/contracts";
 import { containsMagicKeyword } from "@oh-my-pi/pi-coding-agent/session/magic-keywords";
-import { type Config, hostPaths } from "../src/config";
+import { type Config, hostPaths } from "../src/config/config";
 import { parseDiscordCommand } from "./oracles/bun-gateway/discord-commands";
-import { PR_REVIEW_INPUT_PREFIX, type HostOptions } from "../src/host";
-import { LANE_MODEL_PROMOTION_RECEIPT } from "../src/host-protocol";
-import { DeliveryError } from "../src/delivery";
-import { isResultAttachmentSnapshot, stageResultAttachment } from "../src/result-attachment";
-import { createGatewayMessenger, type GatewayHeadMessenger } from "../src/gateway-client";
-import { gatewayPaths } from "../src/gateway-protocol";
+import { PR_REVIEW_INPUT_PREFIX, type HostOptions } from "../src/omp/host";
+import { LANE_MODEL_PROMOTION_RECEIPT } from "../src/omp/host-protocol";
+import { DeliveryError } from "../src/messaging/delivery";
+import { isResultAttachmentSnapshot, stageResultAttachment } from "../src/messaging/result-attachment";
+import { createGatewayMessenger, type GatewayHeadMessenger } from "../src/gateway/gateway-client";
+import { gatewayPaths } from "../src/gateway/gateway-protocol";
 import { fixtureAttachmentSpool, type AttachmentDownload } from "./fixtures/inbound-attachments";
 import { GatewayServer } from "./oracles/bun-gateway/gateway-server";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
-import { compareMessageIds } from "../src/message-order";
-import { readOmpUsage } from "../src/omp-usage";
-import { Superagent, type RuntimeAdapters, type RuntimeHost, type RuntimeState } from "../src/runtime";
-import { applySoulUpdate } from "../src/soul";
-import { Store } from "../src/store";
-import type { LaneReport } from "../src/lane-report";
+import { compareMessageIds } from "../src/routing/message-order";
+import { readOmpUsage } from "../src/omp/omp-usage";
+import { Superagent, type RuntimeAdapters } from "../src/runtime/controller";
+import type { RuntimeHost, RuntimeState } from "../src/runtime/native-frames";
+import { applySoulUpdate } from "../src/omp/soul";
+import { Store } from "../src/storage/store";
+import type { LaneReport } from "../src/lane/lane-report";
 import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "../src/contracts";
-import { headRecoveryEvidence } from "../src/head-recovery";
-import { decisionId } from "../src/decisions";
-import { CronJobs } from "../src/cron-jobs";
-import { CronPrIntake } from "../src/cron-pr-intake";
-import { prReviewApis } from "../src/pr-intake-review";
-import { PrWatcher } from "../src/pr-watch";
-import type { PrSnapshot } from "../src/pr-github";
-import { remoteLanePaths } from "../src/worker-wire";
-import type { RemotePlacement, WorkerLaneRef, WorkerRegistration } from "../src/worker-wire";
+import { headRecoveryEvidence } from "../src/runtime/head-recovery";
+import { HEAD_ROTATION_KEY, type HeadRotation, type RotationNative } from "../src/runtime/head-rotation";
+import { decisionId } from "../src/lane/decisions";
+import { CronJobs } from "../src/cron/cron-jobs";
+import { CronPrIntake } from "../src/cron/cron-pr-intake";
+import { prReviewApis } from "../src/pr/pr-intake-review";
+import { PrWatcher } from "../src/pr/pr-watch";
+import type { PrSnapshot } from "../src/pr/pr-github";
+import { remoteLanePaths } from "../src/worker/worker-wire";
+import type { RemotePlacement, WorkerLaneRef, WorkerRegistration } from "../src/worker/worker-wire";
 
 test("a delayed durable receipt cannot cancel a later native run", () => {
   const owner = { sessionId: "native-session", sessionFile: "/private/session.jsonl", requestId: "original", cursor: null };
@@ -516,6 +518,70 @@ function fixture(maxHosts = 3, downloadAttachment?: AttachmentDownload, adapters
   });
   fixtures.push({ runtime, directory });
   return { runtime, config, directory, store, messenger, main, hosts, launched, errors, launchBehavior, nativePresets, persistedPresets, presetPersistence };
+}
+
+async function gatewayHistoryFixture(alreadyReady: boolean) {
+  const f = fixture();
+  const { config, directory, store, messenger, main, errors } = f;
+  config.slack = { botTokenEnv: "TEST_SLACK", appTokenEnv: "TEST_SLACK_APP", ownerId: "UOWNER", teamId: "TTEAM", allowedChannelIds: [] };
+  const dm = route(null, { platform: "slack", accountId: "TTEAM:UBOT", authorityId: "UOWNER", guildId: null, channelId: "DPRIVATE" });
+  const actual = (suffix: string): Inbound & MessageReference => ({
+    ...message(`slack-history:${suffix}`, dm, "/status"), messageId: `1750000000.${suffix}`,
+  });
+  const previous = actual("000100");
+  store.receive(previous, "main", { [`user-source:${previous.id}`]: "true" });
+  store.settle(previous.id, "done");
+  store.setMeta("messenger:routes", JSON.stringify([dm]));
+  store.setMeta(`cursor:${physicalRouteKey(dm)}`, previous.messageId);
+
+  mkdirSync(join(config.stateDir, "run"), { recursive: true, mode: 0o700 });
+  const gatewayStore = new GatewayStore(config.stateDir);
+  const server = new GatewayServer({ socketPath: gatewayPaths(config).socketPath, store: gatewayStore, messenger,
+    authorizeHead: async pid => { if (pid !== process.pid) throw new DeliveryError("Foreign head", "rejected"); },
+    status: () => ({ gateway: { pid: process.pid, ready: true, admissionReady: server.ready, pendingEvents: gatewayStore.pending(), stopping: false },
+      head: { pid: process.pid, ready: server.headReady, connected: server.connected, socketPath: hostPaths(config, "main").socketPath, error: null } }),
+    stop: async () => {}, onError: error => errors.push(error),
+  });
+  const client = (): GatewayHeadMessenger => {
+    const savedToken = process.env.OMP_SUPERAGENT_GATEWAY_TOKEN;
+    process.env.OMP_SUPERAGENT_GATEWAY_TOKEN = gatewayStore.token();
+    try { return createGatewayMessenger(config); }
+    finally {
+      if (savedToken === undefined) delete process.env.OMP_SUPERAGENT_GATEWAY_TOKEN;
+      else process.env.OMP_SUPERAGENT_GATEWAY_TOKEN = savedToken;
+    }
+  };
+  const startingRuntime = new Superagent(config, store, client(), join(directory, "extension.ts"),
+    error => errors.push(error), { connect: async () => main });
+  let runtime = startingRuntime;
+  const tracked = fixtures.find(entry => entry.runtime === f.runtime);
+  if (!tracked) throw new Error("Missing runtime history fixture");
+  tracked.runtime = runtime;
+  await server.listen();
+  await messenger.start({ message: async input => server.admitMessage(input), answer: async () => {} });
+  if (alreadyReady) {
+    const initial = client();
+    await initial.start({ message: async () => {}, answer: async () => {} });
+    await server.initialReady.promise;
+    await initial.stop();
+  }
+  return { runtime: startingRuntime, store, messenger, server, gatewayStore, errors, dm, actual, previous,
+    replaceHead: async () => {
+      await runtime.stop();
+      const reopened = new Store(join(directory, "coordination.sqlite"));
+      const host = new HostTransport(hostPaths(config, "main").sessionFile, "session-main");
+      runtime = new Superagent(config, reopened, client(), join(directory, "extension.ts"),
+        error => errors.push(error), { connect: async () => host });
+      tracked.runtime = runtime;
+      await runtime.start();
+      return reopened;
+    },
+    close: async () => {
+      await runtime.stop();
+      await server.close();
+      gatewayStore.close();
+    },
+  };
 }
 
 describe("shared reply voice", () => {
@@ -14251,6 +14317,44 @@ describe("real Store runtime coordination", () => {
     expect(store.input(missed.id)?.text).toBe(missed.text);
   });
 
+  test("reconnect sweeps authorized routes learned during an in-flight startup catchup", async () => {
+    const { runtime, store, messenger } = fixture();
+    const first = route("10");
+    const additional = route("11");
+    store.setMeta("messenger:routes", JSON.stringify([first]));
+    store.setMeta(`cursor:${physicalRouteKey(first)}`, "160");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const missed = message("181", additional, "/status");
+    const fetch = messenger.fetchAfter.bind(messenger);
+    messenger.backlog.set(routeKey(additional), [missed]);
+    messenger.fetchAfter = async (destination, cursor) => {
+      const history = await fetch(destination, cursor);
+      if (messenger.fetched.length === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return history;
+    };
+    const startup = runtime.start();
+    try {
+      await Promise.race([entered.promise, startup]);
+      const handlers = messenger.handlers;
+      if (!handlers?.reconnect) throw new Error("Missing reconnect handler");
+      await handlers.message(message("180", additional, "/status"));
+      const reconnect = handlers.reconnect();
+      release.resolve();
+      await reconnect;
+      expect(messenger.fetched).toEqual([
+        { route: first, cursor: "160" }, { route: first, cursor: "160" }, { route: additional, cursor: "180" },
+      ]);
+      expect(store.input(missed.id)).toMatchObject({ route: additional, messageId: "181" });
+    } finally {
+      release.resolve();
+      await startup;
+    }
+  });
+
   test("a live Discord connection recovers pinned history without another reconnect", async () => {
     const { runtime, store, messenger, errors } = fixture();
     const parent = route(null);
@@ -14413,6 +14517,232 @@ describe("real Store runtime coordination", () => {
     expect(store.input("history:000007")).toBeNull();
     expect(store.getMeta(`cursor:${physicalRouteKey(dm)}`)).toBe("1750000000.000005");
     expect(errors).toHaveLength(2);
+  });
+
+  test.each([["same Gateway", true], ["fresh Gateway", false]] as const)(
+    "Slack Gateway history preserves the queued slash boundary at startup on the %s", async (_scenario, alreadyReady) => {
+      const f = await gatewayHistoryFixture(alreadyReady);
+      const open = slackCommand("startup-boundary", f.dm, "/new");
+      const missed = f.actual("000101");
+      const live = f.actual("000102");
+      f.messenger.backlog.set(routeKey(f.dm), [missed, live]);
+      try {
+        if (alreadyReady) f.gatewayStore.admit({ kind: "reconnect" });
+        f.server.admitMessage(open);
+        f.server.admitMessage(live);
+        const delivered = f.messenger.whenSent(alreadyReady ? 2 : 3);
+        await f.runtime.start();
+        await delivered;
+        const topicId = f.store.input(open.id)?.route.topicId;
+        expect(topicId).toBeTruthy();
+        expect(f.store.input(live.id)?.route).toEqual({ ...f.dm, topicId });
+        expect(f.messenger.fetched).toEqual(alreadyReady ? [] : [{ route: f.dm, cursor: f.previous.messageId }]);
+        if (alreadyReady) expect(f.store.input(missed.id)).toBeNull();
+        else expect(f.store.input(missed.id)).toMatchObject({ messageId: missed.messageId, state: "done" });
+        expect(f.errors).toEqual([]);
+      } finally { await f.close(); }
+    },
+  );
+
+  test("Slack Gateway history scans a second reconnect from its pinned cursor before ACK and preserves later live order", async () => {
+    const f = await gatewayHistoryFixture(true);
+    const firstScan = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const secondScan = Promise.withResolvers<void>();
+    const releaseSecond = Promise.withResolvers<void>();
+    const missed = f.actual("000102");
+    const advanced = f.actual("000103");
+    const live = f.actual("000104");
+    const open = slackCommand("after-second-gap", f.dm, "/new");
+    const fetch = f.messenger.fetchAfter.bind(f.messenger);
+    f.messenger.fetchAfter = async (destination, cursor) => {
+      await fetch(destination, cursor);
+      if (f.messenger.fetched.length === 1) {
+        firstScan.resolve();
+        await releaseFirst.promise;
+        return [advanced];
+      }
+      secondScan.resolve();
+      await releaseSecond.promise;
+      return [missed, advanced, live].filter(input => compareMessageIds("slack", input.messageId, cursor) === 1);
+    };
+    const gap = { kind: "reconnect", historyRecovery: true } as const;
+    try {
+      await f.runtime.start();
+      const delivered = f.messenger.whenSent(4);
+      f.gatewayStore.admit(gap);
+      f.server.deliver();
+      await firstScan.promise;
+
+      expect(f.gatewayStore.admit(gap)).toBe(true);
+      f.server.admitMessage(open);
+      f.server.admitMessage(live);
+      releaseFirst.resolve();
+      await secondScan.promise;
+      expect(f.gatewayStore.next()?.event).toEqual(gap);
+      expect(f.store.input(missed.id)).toBeNull();
+      releaseSecond.resolve();
+      await delivered;
+
+      expect(f.messenger.fetched).toEqual([
+        { route: f.dm, cursor: f.previous.messageId }, { route: f.dm, cursor: f.previous.messageId },
+      ]);
+      expect(f.store.input(missed.id)).toMatchObject({ messageId: missed.messageId, state: "done" });
+      const topicId = f.store.input(open.id)?.route.topicId;
+      expect(topicId).toBeTruthy();
+      expect(f.store.input(live.id)?.route).toEqual({ ...f.dm, topicId });
+      expect(f.messenger.sent.map(output => output.sourceId).sort()).toEqual([missed.id, advanced.id, live.id, open.id].sort());
+      expect(f.errors).toEqual([]);
+    } finally {
+      releaseFirst.resolve();
+      releaseSecond.resolve();
+      await f.close();
+    }
+  });
+
+  test("Slack gap A cannot recover a history-only message from gap B ahead of the intervening slash command", async () => {
+    const f = await gatewayHistoryFixture(true);
+    const early = f.actual("000101");
+    const open = slackCommand("between-gaps", f.dm, "/new");
+    const late = f.actual("000103");
+    const live = f.actual("000105");
+    try {
+      f.gatewayStore.admit({ kind: "reconnect", historyRecovery: true, historyPlatform: "slack",
+        historyBeforeUs: 1_750_000_000_000_102 });
+      f.server.admitMessage(open);
+      f.gatewayStore.admit({ kind: "reconnect", historyRecovery: true, historyPlatform: "slack",
+        historyBeforeUs: 1_750_000_000_000_104 });
+      f.server.admitMessage(live);
+      // Both offline messages are visible to the Web API when HEAD attaches.
+      f.messenger.backlog.set(routeKey(f.dm), [late, early, live]);
+      const delivered = f.messenger.whenSent(4);
+      await f.runtime.start();
+      await delivered;
+      const topicId = f.store.input(open.id)?.route.topicId;
+      expect(topicId).toBeTruthy();
+      expect(f.store.input(early.id)?.route).toEqual(f.dm);
+      expect(f.store.input(late.id)?.route).toEqual({ ...f.dm, topicId });
+      expect(f.store.input(live.id)?.route).toEqual({ ...f.dm, topicId });
+      expect(f.errors).toEqual([]);
+    } finally { await f.close(); }
+  });
+
+  test("a Slack history edit waits for the pending original and inherits its topic across a later slash", async () => {
+    const f = await gatewayHistoryFixture(true);
+    const firstTopic = slackCommand("before-original", f.dm, "/new");
+    const nextTopic = slackCommand("after-original", f.dm, "/new");
+    const original = f.actual("000101");
+    const revision = { ...original, id: `slack:${f.dm.accountId}:${f.dm.channelId}:${original.messageId}:edit:1750000000.000102:changed`,
+      text: "edited status request", receivedAt: 1_750_000_000_000.102 };
+    const admitted = Promise.withResolvers<void>();
+    const originalReceipt = f.gatewayStore.receipt.bind(f.gatewayStore);
+    const receipt = spyOn(f.gatewayStore, "receipt").mockImplementation((sequence, outcome) => {
+      const event = f.gatewayStore.next(sequence)?.event;
+      originalReceipt(sequence, outcome);
+      if (event?.kind === "message" && event.input.id === revision.id && outcome === "accepted") admitted.resolve();
+    });
+    try {
+      f.gatewayStore.admit({ kind: "reconnect", historyRecovery: true, historyPlatform: "slack",
+        historyBeforeUs: 1_750_000_000_000_103 });
+      f.server.admitMessage(firstTopic);
+      f.server.admitMessage(original);
+      f.server.admitMessage(nextTopic);
+      f.messenger.backlog.set(routeKey(f.dm), [revision]);
+      await f.runtime.start();
+      await admitted.promise;
+      const topicId = f.store.input(firstTopic.id)?.route.topicId;
+      expect(topicId).toBeTruthy();
+      expect(f.store.input(nextTopic.id)?.route.topicId).not.toBe(topicId);
+      expect(f.store.input(original.id)?.route).toEqual({ ...f.dm, topicId });
+      expect(f.store.input(revision.id)).toMatchObject({ route: { ...f.dm, topicId }, text: revision.text });
+      expect(f.errors).toEqual([]);
+    } finally {
+      receipt.mockRestore();
+      await f.close();
+    }
+  });
+
+  test.each(["discord", "slack"] as const)(
+    "same-Gateway HEAD replacement resumes only the failed %s history route before newer intake",
+    async platform => {
+      const f = await gatewayHistoryFixture(true);
+      const healthy = platform === "discord" ? route("10") : f.dm;
+      const interrupted = platform === "discord" ? route("11") : { ...f.dm, channelId: "DOTHER" };
+      const prior = platform === "discord" ? "100" : f.previous.messageId;
+      const found = platform === "discord" ? message("101", healthy, "/status") : f.actual("000101");
+      const missed = platform === "discord" ? message("102", interrupted, "/status")
+        : { ...f.actual("000102"), route: interrupted };
+      const newer = platform === "discord" ? message("103", interrupted, "/status")
+        : { ...f.actual("000103"), route: interrupted };
+      f.store.setMeta("messenger:routes", JSON.stringify(platform === "discord" ? [healthy, interrupted, f.dm] : [healthy, interrupted]));
+      for (const route of [healthy, interrupted]) f.store.setMeta(`cursor:${physicalRouteKey(route)}`, prior);
+      f.messenger.backlog.set(routeKey(healthy), [found]);
+      f.messenger.backlog.set(routeKey(interrupted), new DeliveryError("History was unavailable", "rejected", 60_000));
+      const held = Promise.withResolvers<void>();
+      const originalReceipt = f.gatewayStore.receipt.bind(f.gatewayStore);
+      const receipt = spyOn(f.gatewayStore, "receipt").mockImplementation((sequence, outcome) => {
+        originalReceipt(sequence, outcome);
+        if (outcome === "unresolved") held.resolve();
+      });
+      try {
+        f.gatewayStore.admit({ kind: "reconnect", historyRecovery: true, historyPlatform: platform });
+        f.server.admitMessage(newer);
+        await f.runtime.start();
+        await held.promise;
+        await f.messenger.whenSent(1);
+        expect(f.store.input(newer.id)).toBeNull();
+        expect(f.gatewayStore.unresolved()).toBe(1);
+
+        f.messenger.backlog.set(routeKey(interrupted), [missed, newer]);
+        const delivered = f.messenger.whenSent(3);
+        const reopened = await f.replaceHead();
+        await delivered;
+        expect(reopened.input(missed.id)?.route).toEqual(interrupted);
+        expect(f.messenger.fetched).toEqual([
+          { route: healthy, cursor: prior }, { route: interrupted, cursor: prior }, { route: interrupted, cursor: prior },
+        ]);
+        expect(f.messenger.attempted.map(output => output.sourceId)).toEqual([found.id, missed.id, newer.id]);
+        expect(f.errors).toEqual([expect.objectContaining({ message: "History was unavailable" })]);
+      } finally {
+        receipt.mockRestore();
+        await f.close();
+      }
+    },
+  );
+
+  test("replacement HEAD finishes the same Slack gap when the first history RPC is still in flight", async () => {
+    const f = await gatewayHistoryFixture(true);
+    const entered = Promise.withResolvers<void>();
+    const oldResponse = Promise.withResolvers<Inbound[]>();
+    const missed = f.actual("000101");
+    const later = f.actual("000102");
+    const originalFetch = f.messenger.fetchAfter.bind(f.messenger);
+    f.messenger.fetchAfter = async (route, cursor) => {
+      const history = await originalFetch(route, cursor);
+      if (f.messenger.fetched.length === 1) {
+        entered.resolve();
+        return oldResponse.promise;
+      }
+      return history;
+    };
+    try {
+      f.gatewayStore.admit({ kind: "reconnect", historyRecovery: true, historyPlatform: "slack" });
+      f.server.admitMessage(later);
+      f.messenger.backlog.set(routeKey(f.dm), [missed, later]);
+      await f.runtime.start();
+      await entered.promise;
+      const delivered = f.messenger.whenSent(2);
+      const reopened = await f.replaceHead();
+      await delivered;
+      oldResponse.resolve([missed, later]);
+      expect(reopened.input(missed.id)?.route).toEqual(f.dm);
+      expect(f.messenger.fetched).toEqual(Array.from({ length: 2 }, () => ({ route: f.dm, cursor: f.previous.messageId })));
+      expect(f.messenger.attempted.map(output => output.sourceId)).toEqual([missed.id, later.id]);
+      expect(f.errors).toEqual([]);
+    } finally {
+      oldResponse.resolve([]);
+      await f.close();
+    }
   });
 
   test("Telegram no-history recovery remains adapter-owned without advancing stored cursors", async () => {
@@ -15384,7 +15714,8 @@ describe("deferred historical topic routing", () => {
     await runtime.routingSettled();
     await runtime.kick();
     expect(searches).toEqual([historicalRequest]);
-    expect(store.getMeta("intake:deferred-routing")).toBe("[]");
+    expect(store.deferredRouting.has(first.id)).toBe(false);
+    expect(store.deferredRouting.has(second.id)).toBe(false);
     expect(store.input(`handoff:${first.id}:${current.id}`)).toMatchObject({ target: current.id, state: "submitted" });
     // The follow-up reaches the lane only after the request routed first.
     expect(worker.prompts.map(turn => turn.command.message)).toEqual([
@@ -15404,7 +15735,7 @@ describe("deferred historical topic routing", () => {
     await stopping;
 
     const reopened = new Store(join(directory, "coordination.sqlite"));
-    expect(JSON.parse(reopened.getMeta("intake:deferred-routing") ?? "[]")).toEqual([first]);
+    expect(reopened.deferredRouting.input(first.id)).toEqual(first);
     expect(reopened.input(first.id)).toBeNull();
     const head = new HostTransport(hostPaths(config, "main").sessionFile, "session-main");
     const worker = new HostTransport(current.sessionFile, "session-current");
@@ -15416,7 +15747,7 @@ describe("deferred historical topic routing", () => {
     await restarted.start();
     await restarted.routingSettled();
     await restarted.kick();
-    expect(reopened.getMeta("intake:deferred-routing")).toBe("[]");
+    expect(reopened.deferredRouting.has(first.id)).toBe(false);
     expect(reopened.input(`handoff:${first.id}:${current.id}`)).toMatchObject({ target: current.id, state: "submitted" });
     expect(worker.prompts.map(turn => turn.command.message)).toEqual([expect.stringContaining(first.text)]);
   });
@@ -15469,7 +15800,7 @@ describe("deferred historical topic routing", () => {
     await runtime.receive(failing);
     await runtime.routingSettled();
     expect(store.input(failing.id)).toBeNull();
-    expect(JSON.parse(store.getMeta("intake:deferred-routing") ?? "[]")).toHaveLength(1);
+    expect(store.deferredRouting.idsBefore("unqueued")).toEqual([failing.id]);
 
     // /stop head in the same conversation is not trapped behind the failing first admission.
     await runtime.receive(message("741", destination, "/stop head"));
@@ -15481,7 +15812,7 @@ describe("deferred historical topic routing", () => {
     await Bun.sleep(30);
     expect(store.output("742:restart-ack")?.state).toBe("sent");
     expect(requests).toHaveLength(1);
-    expect(JSON.parse(store.getMeta("intake:deferred-routing") ?? "[]").map((item: Inbound) => item.id)).toEqual([failing.id]);
+    expect(store.deferredRouting.idsBefore("unqueued")).toEqual([failing.id]);
   });
 
   test("deferred routing shares immutable-payload conflict detection and signed URL refresh reconciliation", async () => {
@@ -15497,8 +15828,7 @@ describe("deferred historical topic routing", () => {
     await expect(runtime.receive({ ...first, text: "mutated payload" })).rejects.toThrow("Inbound identity conflict");
     await runtime.receive({ ...first, attachments: [{ ...attachment, url: refreshedUrl }] });
 
-    const queued = JSON.parse(store.getMeta("intake:deferred-routing") ?? "[]") as Inbound[];
-    expect(queued[0]?.attachments[0]?.url).toBe(refreshedUrl);
+    expect(store.deferredRouting.input(first.id)?.attachments[0]?.url).toBe(refreshedUrl);
 
     search.resolve();
     await runtime.routingSettled();
@@ -15562,7 +15892,7 @@ describe("deferred historical topic routing", () => {
     await runtime.receive(ordinary1);
     await runtime.receive(bareStop);
     await runtime.receive(ordinary2);
-    expect(JSON.parse(store.getMeta("intake:deferred-routing") ?? "[]").map((item: Inbound) => item.id))
+    expect(store.deferredRouting.idsBefore("unqueued"))
       .toEqual(["770", "771", "772", "773"]);
     expect(store.input(bareStop.id)).toBeNull();
 
@@ -15575,7 +15905,7 @@ describe("deferred historical topic routing", () => {
     expect(store.input(first.id)).toBeNull();
     expect(store.input(ordinary1.id)).toBeNull();
     expect(store.input(ordinary2.id)).toBeNull();
-    expect(JSON.parse(store.getMeta("intake:deferred-routing") ?? "[]").map((item: Inbound) => item.id))
+    expect(store.deferredRouting.idsBefore("unqueued"))
       .toEqual(["770", "771", "773"]);
   });
 
@@ -15667,7 +15997,8 @@ describe("deferred historical topic routing", () => {
       return receive(input, target, metadata, workflow);
     };
     // A previous runtime can leave the explicit stop in the deferred FIFO.
-    store.setMeta("intake:deferred-routing", JSON.stringify([first, stop]));
+    store.deferredRouting.enqueue(first);
+    store.deferredRouting.enqueue(stop);
     try {
       await runtime.start();
       // The history read remains blocked; a queued exact stop still gets priority.
@@ -15748,7 +16079,7 @@ describe("deferred historical topic routing", () => {
     expect(store.firstAdmittedMessage(destination, "780")).toBeNull();
     expect(store.getMeta("head:restart-fence")).toBeFalsy();
     expect(store.getMeta("head:stop-boundary")).toBeNull();
-    expect(JSON.parse(store.getMeta("intake:deferred-routing") ?? "[]").map((item: Inbound) => item.id))
+    expect(store.deferredRouting.idsBefore("unqueued"))
       .toEqual([original.id, restartEdit.id, stopHeadEdit.id, stopLaneEdit.id]);
 
     search.resolve();
@@ -16615,6 +16946,148 @@ describe("ordinary placement in owner parents without native threads", () => {
   });
 });
 
+
+describe("HEAD hibernation attestation", () => {
+  const nativeSleepState = (main: HostTransport): RotationNative => ({
+    hostPid: process.pid, sessionId: main.state.sessionId, sessionFile: main.state.sessionFile!, nativeRun: 0,
+    contextPercent: null, hibernation: { version: 2, agentDir: dirname(main.state.sessionFile!),
+      dataDir: join(dirname(main.state.sessionFile!), "data"), sessionsDir: join(dirname(main.state.sessionFile!), "data/sessions") },
+    selection: { provider: "fixture", modelId: "capable", reasoning: false,
+      thinkingLevel: main.state.thinkingLevel ?? null, configuredThinkingLevel: main.state.configuredThinkingLevel ?? null,
+      modelSettings: main.state.modelSettings! },
+  });
+
+  test("an earlier hibernation receipt cannot suppress ordinary HEAD startup preset synchronization", async () => {
+    let presetsReady = false;
+    const inspectPresets: RuntimeAdapters["inspectPresets"] = async () => {
+      if (!presetsReady) throw new Error("Ordinary startup must first synchronize the native presets");
+      return {
+        settings: main.state.modelSettings!,
+        configuredDefault: { available: true, resolvedDefault: executionModel },
+        availableModels: [executionModel, otherModel],
+        presets: [...nativePresets].map(([name, value]) => ({
+          name, status: "valid", globalEntry: true, available: true, resolvedDefault: value.model,
+        })),
+        bootstrap: { missing: [], blocked: [] },
+      };
+    };
+    const { main, nativePresets, runtime, store } = fixture(3, undefined, {
+      inspectPresets,
+      syncPresetRoles: async canWrite => { if (canWrite()) presetsReady = true; },
+    });
+    const { selection, sessionFile, sessionId } = nativeSleepState(main);
+    const oldWake: HeadRotation = {
+      id: crypto.randomUUID(), mode: "hibernate", stage: "complete", sessionFile,
+      original: { pid: process.pid + 1, sessionFile, sessionId },
+      attestation: { generation: 0, nativeRun: 0, idleMs: 1000, contextPercent: null, selection, residents: [] },
+      stopBoundary: null, replacementSessionId: sessionId, replacementOwnerPid: process.ppid + 1,
+    };
+    store.setMeta(HEAD_ROTATION_KEY, JSON.stringify(oldWake));
+
+    await runtime.start();
+
+    expect(JSON.parse(store.getMeta("head:preset-bootstrap") ?? "null")).toMatchObject({ sessionId, state: "complete" });
+  });
+
+  test("status leaves the configured idle clock intact but a verified HEAD effort change resets it", async () => {
+    const clock = spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      const { config, runtime, main, store } = fixture();
+      Object.assign(config, { headIdleMs: 100 });
+      await runtime.start();
+      await runtime.kick();
+      clock.mockReturnValue(1099);
+      expect(await runtime.attestHeadRotation(nativeSleepState(main), "hibernate")).toBeNull();
+      await admit(runtime, message("sleep-status", route(), "/status"));
+      expect(store.output("sleep-status:head-control")?.state).toBe("sent");
+
+      clock.mockReturnValue(1100);
+      const { hibernation, ...legacyState } = nativeSleepState(main);
+      expect(await runtime.attestHeadRotation(legacyState, "hibernate")).toBeNull();
+      expect(await runtime.attestHeadRotation(nativeSleepState(main), "hibernate"))
+        .toMatchObject({ idleMs: 100, contextPercent: null, residents: [], hibernation });
+
+      await admit(runtime, message("sleep-effort", route(), "/effort minimal"));
+      expect(main.state.thinkingLevel).toBe("minimal");
+      expect(await runtime.attestHeadRotation(nativeSleepState(main), "hibernate")).toBeNull();
+      Object.assign(config, { headIdleMs: 0 });
+      clock.mockReturnValue(1100 + 31 * 60 * 1000);
+      expect(await runtime.attestHeadRotation(nativeSleepState(main), "hibernate")).toBeNull();
+    } finally { clock.mockRestore(); }
+  });
+
+  test("guarded sleep rejects an occupied lane, deferred routing, or an unresolved independent delivery", async () => {
+    const clock = spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      const { config, runtime, main, store } = fixture();
+      const lane = savedLane(store, config, "unloaded-sleep-lane", route("19211"));
+      await runtime.start();
+      await runtime.kick();
+      clock.mockReturnValue(1000 + 31 * 60 * 1000);
+      const state = nativeSleepState(main);
+      const attestation = await runtime.attestHeadRotation(state, "hibernate");
+      if (!attestation) throw new Error("Fully unloaded lanes must not prevent sleep");
+      const plan: HeadRotation = {
+        id: crypto.randomUUID(), mode: "hibernate", stage: "stopping", sessionFile: state.sessionFile,
+        original: { pid: process.pid, sessionFile: state.sessionFile, sessionId: state.sessionId },
+        stopBoundary: null, attestation, replacementSessionId: null,
+      };
+      store.setMeta(HEAD_ROTATION_KEY, JSON.stringify(plan));
+      expect(runtime.guardHeadRotation(plan.id, state, "hibernate")).toBe(true);
+      expect(runtime.guardHeadRotation(plan.id, { ...state, contextPercent: 50 })).toBe(false);
+      expect(runtime.guardHeadRotation(plan.id, { ...state, nativeRun: 1 }, "hibernate")).toBe(false);
+      if (!state.hibernation) throw new Error("Expected native profile proof");
+      for (const root of ["agentDir", "dataDir", "sessionsDir"] as const) {
+        expect(runtime.guardHeadRotation(plan.id, {
+          ...state, hibernation: { ...state.hibernation, [root]: join(dirname(state.sessionFile), `different-${root}`) },
+        }, "hibernate")).toBe(false);
+      }
+
+      writeFileSync(lane.socketPath, "ownership not verified");
+      expect(runtime.guardHeadRotation(plan.id, state, "hibernate")).toBe(false);
+      rmSync(lane.socketPath);
+      const deferred = message("sleep-deferred", route("19212"));
+      store.deferredRouting.enqueue(deferred);
+      expect(runtime.guardHeadRotation(plan.id, state, "hibernate")).toBe(false);
+      store.deferredRouting.remove(deferred.id);
+      expect(runtime.guardHeadRotation(plan.id, state, "hibernate")).toBe(true);
+
+      const source = message("sleep-lane-output", lane.route);
+      store.receive(source, lane.id);
+      store.settle(source.id, "done");
+      const id = `${source.id}:answer`;
+      store.queueOutput({ id, sourceId: source.id, route: source.route, text: "Only its pending delivery should hold sleep." });
+      expect(store.claimOutput(id)).toBe(true);
+      store.finishOutput(id, "uncertain");
+      expect(runtime.guardHeadRotation(plan.id, state, "hibernate")).toBe(false);
+      store.finishOutput(id, "sent", "19214");
+      expect(runtime.guardHeadRotation(plan.id, state, "hibernate")).toBe(true);
+    } finally { clock.mockRestore(); }
+  });
+
+  test("a future cron registration keeps otherwise idle HEAD resident", async () => {
+    const clock = spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      const { config, runtime, main, store } = fixture();
+      Object.assign(config, { headIdleMs: 100 });
+      await runtime.start();
+      const source = message("19213", route(null), '/cron add "every 2h" Check CI');
+      await admit(runtime, source);
+      expect(store.input(source.id)?.state).toBe("done");
+      const receipt = store.output(`${source.id}:head-control`);
+      expect(receipt?.state).toBe("sent");
+      const jobId = receipt?.text.match(/[0-9a-f-]{36}/)?.[0];
+      if (!jobId) throw new Error("Cron registration did not return a job ID");
+      clock.mockReturnValue(1100);
+      expect(await runtime.attestHeadRotation(nativeSleepState(main), "hibernate")).toBeNull();
+
+      await admit(runtime, message("19215", source.route, `/cron pause ${jobId}`));
+      clock.mockReturnValue(1200);
+      expect(await runtime.attestHeadRotation(nativeSleepState(main), "hibernate"))
+        .toMatchObject({ idleMs: 100, residents: [] });
+    } finally { clock.mockRestore(); }
+  });
+});
 
 describe("preset role watcher and HEAD rotation threshold", () => {
   test("syncPresetRoles uses debounced fs.watch without polling when healthy", async () => {

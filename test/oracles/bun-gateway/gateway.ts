@@ -8,20 +8,20 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RpcCommandError } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { credentialEnvNames, hostPaths, loadConfig, privateDirectory, requireMessengerCredentials, type Config } from "../../../src/config";
+import { credentialEnvNames, hostPaths, loadConfig, privateDirectory, requireMessengerCredentials, type Config } from "../../../src/config/config";
 import type { GatewayRestartRecord, GatewayRestartRequest, LanePresetSnapshot } from "../../../src/contracts";
 import type { DownloadMessenger as Messenger } from "../../fixtures/inbound-attachments";
-import { DeliveryError } from "../../../src/delivery";
-import { gatewayCall, gatewayPaths, gatewayStatus } from "../../../src/gateway-protocol";
-import type { GatewayStatus } from "../../../src/gateway-wire";
+import { DeliveryError } from "../../../src/messaging/delivery";
+import { gatewayCall, gatewayPaths, gatewayStatus } from "../../../src/gateway/gateway-protocol";
+import type { GatewayStatus } from "../../../src/gateway/gateway-wire";
 import { GatewayServer } from "./gateway-server";
 import { GatewayStore } from "./gateway-store";
 import { readRestartConfig, readRestartPlan, restartCompatible, restartConfigHash, validateRestartPlan,
   type RestartPlan } from "./gateway-restart";
-import { connect, HostConnection, startHost } from "../../../src/host";
+import { connect, HostConnection, startHost } from "../../../src/omp/host";
 import { createMessenger } from "./messengers";
 import { activeManagedUlw, managedUlwStatus, readUlwManifest, updateManagedUlw, validateManagedUlwPackage,
-  type ManagedUlwStatus } from "../../../src/managed-ulw";
+  type ManagedUlwStatus } from "../../../src/omp/managed-super";
 
 export interface GatewayOptions {
   messenger?: Messenger;

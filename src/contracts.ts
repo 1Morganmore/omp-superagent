@@ -1,14 +1,15 @@
 import type { ModelPreset as NativeModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-settings";
-import type { LaneEvidence, LaneReport, LaneWaitTarget } from "./lane-report";
-import type { CronUpdate } from "./cron-jobs";
-import type { ReviewRound } from "./pr-intake-review";
-import type { GroupReply, GroupRequest } from "./group-policy";
-import type { StagedResultAttachment } from "./result-attachment";
-import type { RemotePlacement } from "./worker-wire";
-import type { OmpResetAccount } from "./omp-usage";
+import type { LaneEvidence, LaneReport, LaneWaitTarget } from "./lane/lane-report";
+import type { CronUpdate } from "./cron/cron-jobs";
+import type { ReviewRound } from "./pr/pr-intake-review";
+import type { GroupReply, GroupRequest } from "./group/group-policy";
+import type { StagedResultAttachment } from "./messaging/result-attachment";
+import type { RemotePlacement } from "./worker/worker-wire";
+import type { OmpResetAccount } from "./omp/omp-usage";
 
 /** Coordination records only. OMP owns transcripts and execution state. */
 export type Platform = "discord" | "telegram" | "slack" | "kakao";
+export type HistoryPlatform = Extract<Platform, "discord" | "slack">;
 
 export interface Route {
   platform: Platform;
@@ -40,8 +41,22 @@ export function physicalRouteKey(route: Route): string {
   return routeKey(physicalRoute(route));
 }
 
-/** Store meta key: owner inputs acknowledged to Gateway whose topic routing is still pending, in delivery order. */
-export const DEFERRED_ROUTING_META = "intake:deferred-routing";
+/** Deferred intake shares order across threads and logical topics of a channel or DM. */
+export function routingConversation(route: Route): string {
+  return routeKey({ ...physicalRoute(route), threadId: null });
+}
+
+/** Syntax only: these candidates still require current receipt and route authority. */
+export function deferredRecoveryCandidate(text: string) {
+  const match = /^\/(restart|stop)(?:\s+(\S+))?$/u.exec(text.trim());
+  if (!match) return null;
+  const [, name, argument] = match;
+  if (name === "restart") return argument ? null : { kind: "restart" } as const;
+  if (!argument) return { kind: "bare-stop" } as const;
+  if (argument === "head") return { kind: "head-stop" } as const;
+  return { kind: "lane-stop", laneId: argument } as const;
+}
+
 /** Internal HEAD review ID prefix; authority lives in the current store binding. */
 export const SCOPE_REVIEW_PREFIX = "scope-review:";
 
@@ -383,7 +398,25 @@ export interface HeadRecoveryEffect {
   state: string;
 }
 
+/** Ordered HEAD receipts for owner inputs still waiting for topic routing. */
+export interface DeferredRoutingPort {
+  enqueue(input: Inbound): void;
+  /** Verify an existing deferred receipt and refresh eligible attachment URLs without changing order. */
+  reconcile(input: Inbound): boolean;
+  input(id: string): Inbound | null;
+  has(id: string): boolean;
+  head(conversation: string): string | null;
+  conversations(): readonly string[];
+  priority(conversation: string, includeBare: boolean): Iterable<Inbound>;
+  earlierLaneStops(lane: Pick<Lane, "id" | "route">, beforeId: string): Iterable<Inbound>;
+  hasEarlierMessage(input: Pick<Inbound, "id" | "route">, messageId: string): boolean;
+  /** IDs before this queued receipt, or all currently queued IDs for fresh direct admission. */
+  idsBefore(id: string): readonly string[];
+  remove(id: string): void;
+}
+
 export interface StorePort {
+  readonly deferredRouting: DeferredRoutingPort;
   /** Typed, noninteractive work on the confirmed bot offer; never valid for ordinary owner intake. */
   receivePrWork(input: Inbound, target: string | null, round: ReviewRound): boolean;
   receive(input: Inbound, target: string | null, metadata?: Readonly<Record<string, string>>, workflow?: WorkflowActivation | null): boolean;
@@ -422,6 +455,8 @@ export interface StorePort {
   hasHeadRecoveryInput(): boolean;
   /** No automatic head replacement while an original HEAD delivery is unresolved. */
   hasUnresolvedHeadDelivery(): boolean;
+  /** Any queued or held coordination work makes hibernating the controller unsafe. */
+  hasHeadSleepWork(): boolean;
   kickoffHold(target: string): KickoffHold | null;
   /** The first authorized revision on the physical route, even after settlement. */
   firstAdmittedMessage(route: Route, messageId: string): InputRecord | null;
@@ -486,6 +521,7 @@ export interface StorePort {
   recoverDeliveries(): void;
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
+  completeHistoryBoundary(key: string, cursor: string, sequence: string | null): void;
   close(): void;
 }
 
@@ -553,6 +589,8 @@ export interface InboundAttachmentReceipt {
 }
 
 export interface Messenger {
+  /** Startup history, when needed, is ordered by the authenticated transport. */
+  readonly managesStartupHistory?: true;
   start(handlers: {
     /** Authenticate first; do not consume inbound events until native approvals are reconciled. */
     ready?: Promise<void>;
@@ -561,7 +599,10 @@ export interface Messenger {
     answer(approvalId: string, response: DialogResponse, route: Route): Promise<void>;
     /** Reconcile a previously attempted answer before retrying its native effect. */
     reconcileAnswer?(approvalId: string, route: Route): Promise<"retry" | "accepted" | "rejected" | "unresolved">;
-    reconnect?(): Promise<void>;
+    /** Pin existing cursors before a fresh Gateway opens ordered intake. */
+    reserveStartupHistory?(): void;
+    /** A sequence identifies an ordered Gateway gap; false reconciles approvals only. */
+    reconnect?(history?: number | false, platform?: HistoryPlatform): Promise<void>;
     /** Owned Gateway lifecycle outcome; never a user instruction or model turn. */
     restart?(notice: GatewayRestartNotice): Promise<void>;
   }): Promise<void>;
@@ -582,8 +623,8 @@ export interface Messenger {
   inspectDiscordContext?(route: Route): Promise<DiscordContext>;
   discordPurpose?(request: DiscordPurposeRequest): Promise<readonly DiscordPurposeNote[]>;
   messengerPresence?(request: MessengerPresenceRequest): Promise<DiscordPresenceStatus>;
-  /** null explicitly means no history API; intake recovery belongs to the adapter. */
-  fetchAfter(route: Route, messageId: string): Promise<Inbound[] | null>;
+  /** null means adapter-owned recovery. An ordered read uses the Gateway's saved gap cutoff. */
+  fetchAfter(route: Route, messageId: string, historySequence?: number): Promise<Inbound[] | null>;
   /** Validate the source before fetching; receipt only a complete, private batch. */
   openAttachment(batch: InboundAttachmentBatch, signal: AbortSignal): Promise<InboundAttachmentReceipt>;
   stop(): Promise<void>;

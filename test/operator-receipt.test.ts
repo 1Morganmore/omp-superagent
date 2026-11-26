@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { invokeOperator, OperatorStartError, runOperator } from "../src/operator";
+import { invokeOperator, OperatorStartError, runOperator } from "../src/operator/operator";
 import { waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { operatorExample } from "./fixtures/operator";
 
@@ -67,7 +67,7 @@ test.each(["SIGTERM", "SIGKILL"] as const)(
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("No operator fixture address");
     const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `
-      import { invokeOperator } from ${JSON.stringify(fileURLToPath(new URL("../src/operator.ts", import.meta.url)))};
+      import { invokeOperator } from ${JSON.stringify(fileURLToPath(new URL("../src/operator/operator.ts", import.meta.url)))};
       await invokeOperator(${JSON.stringify([example, String(address.port), "telegram-commands"])},
         { apply: true, ownerId: "42", allowedChatIds: ["-100"] }, ${JSON.stringify(credentials)});
     `], { stdin: "ignore", stdout: "ignore", stderr: "inherit" });

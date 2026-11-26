@@ -220,7 +220,7 @@ impl Inner {
         cancelled: &mut oneshot::Receiver<()>,
     ) -> anyhow::Result<()> {
         let (ack_tx, mut acks) = mpsc::channel::<AckRequest>(QUEUE_CAPACITY);
-        let mut dispatch = Dispatchers::new(self.clone(), identity.clone(), reconnect);
+        let mut dispatch = Dispatchers::new(self.clone(), identity.clone(), reconnect)?;
         let result = self
             .socket_loop(
                 socket,

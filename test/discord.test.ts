@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { ApplicationCommandOptionType, Attachment as DiscordAttachment, AttachmentBuilder, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, PermissionFlagsBits, type Client, type Message, type MessageCreateOptions } from "discord.js";
 import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "./oracles/bun-gateway/discord.ts";
 import { VOICE_DRAFT_HEADER } from "./oracles/bun-gateway/discord-voice-draft";
-import { DeliveryError } from "../src/delivery.ts";
-import { parseDialog } from "../src/dialog.ts";
-import { Store } from "../src/store";
+import { DeliveryError } from "../src/messaging/delivery.ts";
+import { parseDialog } from "../src/messaging/dialog.ts";
+import { Store } from "../src/storage/store";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
-import { decisionId, decisionViews } from "../src/decisions";
+import { decisionId, decisionViews } from "../src/lane/decisions";
 import { type Approval, type Attachment, type DialogResponse, type Inbound, type OutputRecord, type Route } from "../src/contracts.ts";
 
 const owner = "owner";

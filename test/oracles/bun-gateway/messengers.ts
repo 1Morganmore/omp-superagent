@@ -1,9 +1,9 @@
-import type { Config } from "../../../src/config";
-import { credentialEnvNames, requireMessengerCredentials, voiceApiKeyEnv } from "../../../src/config";
+import type { Config } from "../../../src/config/config";
+import { credentialEnvNames, requireMessengerCredentials, voiceApiKeyEnv } from "../../../src/config/config";
 import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, Inbound, MessageActivity, MessageReference, OutputRecord, Platform, Route, ThreadInfo, ThreadUpdate } from "../../../src/contracts";
 import type { DownloadMessenger as Messenger } from "../../fixtures/inbound-attachments";
 import { physicalRouteKey } from "../../../src/contracts";
-import { DeliveryError } from "../../../src/delivery";
+import { DeliveryError } from "../../../src/messaging/delivery";
 import { DiscordMessenger } from "./discord";
 import { SlackMessenger } from "./slack";
 import { TelegramMessenger } from "./telegram";

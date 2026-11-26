@@ -2,9 +2,9 @@ import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { workerLaunchProfile } from "../src/worker-profile";
-import { WorkerRefusal } from "../src/worker-request";
-import type { WorkerPolicy } from "../src/worker-wire";
+import { workerLaunchProfile } from "../src/worker/worker-profile";
+import { WorkerRefusal } from "../src/worker/worker-request";
+import type { WorkerPolicy } from "../src/worker/worker-wire";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });

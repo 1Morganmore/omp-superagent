@@ -8,8 +8,8 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { requireHostOwner } from "../../src/host-owner-path";
-import { HostChannel, type Response } from "../../src/host-protocol";
+import { requireHostOwner } from "../../src/omp/host-owner-path";
+import { HostChannel, type Response } from "../../src/omp/host-protocol";
 
 const bun = process.execPath;
 const [, , target, ...args] = process.argv;
@@ -27,7 +27,9 @@ if (target === "original") {
 }
 assert.ok(mode === "clean" || mode === "child-nonzero", "unknown fixture mode");
 const root = await mkdtemp(join(await realpath(tmpdir()), "ora-"));
-const helperPath = join(import.meta.dir, "../../src/host-sdk-helper.ts");
+// The Rust owner must publish exit proof even with no SDK helper at all.
+const helperPath = target === "rust" ? join(root, "unused-sdk-helper.ts")
+  : join(import.meta.dir, "../../src/host-sdk-helper.ts");
 const home = join(root, "home");
 const agent = join(root, "agent");
 const socketPath = join(root, "h.sock");
@@ -41,7 +43,7 @@ const header = { type: "session", version: 3, id: sessionId, timestamp: "2024-01
 const env = {
   PATH: "/usr/bin:/bin", HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agent, TMPDIR: root,
   FIXTURE_ROOT: root, FIXTURE_SESSION: sessionFile, FIXTURE_MODE: mode,
-  OMP_SUPERAGENT_MANAGED_ULW_PATH: join(import.meta.dir, "../fixtures/managed-ulw"),
+  OMP_SUPERAGENT_MANAGED_ULW_PATH: join(import.meta.dir, "../fixtures/managed-super"),
   OMP_SUPERAGENT_BUN: bun, FIXTURE_STOCK_PEER: join(import.meta.dir, "stock-peer.ts"),
 };
 const privateFile = { mode: 0o600, flag: "wx" };
@@ -159,7 +161,9 @@ try {
     sha256: createHash("sha256").update(contents.unicode).digest("hex"),
   } };
   const shutdown = await second.call("shutdown_host");
-  const exitCode = await owner.exited;
+  const ownerExitDeadline = Promise.withResolvers<never>();
+  const ownerExpiry = setTimeout(() => ownerExitDeadline.reject(new Error("owner did not exit after shutdown")), 5_000);
+  const exitCode = await Promise.race([owner.exited, ownerExitDeadline.promise]).finally(() => clearTimeout(ownerExpiry));
   await second.peer.exited;
   const receipt = record(JSON.parse(await readFile(`${socketPath}.exit.json`, "utf8")));
   assert.equal(receipt.pid, nativePid, "receipt must reference the child that supplied native state");

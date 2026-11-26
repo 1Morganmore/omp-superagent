@@ -17,7 +17,7 @@ use super::{
     config::same_path,
     fs::{self, EXIT_TIMEOUT, Endpoint, WAIT_SLICE, alive, socket_stat},
     rpc_wire::frame,
-    rotation::Attestation,
+    rotation::{Attestation, Mode},
 };
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
@@ -67,6 +67,7 @@ struct HostState {
 
 pub(super) struct Probe {
     stream: BufReader<UnixStream>,
+    hibernation_attested: bool,
     pub head: Head,
     pub state: Value,
 }
@@ -135,6 +136,7 @@ impl Probe {
             );
             Ok(Self {
                 stream,
+                hibernation_attested: false,
                 state,
                 head: Head {
                     pid: identity.host_pid,
@@ -168,25 +170,47 @@ impl Probe {
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
-        self.shutdown_with(Value::Null).await
+        self.shutdown_with(Value::Null, false).await
     }
 
-    pub async fn shutdown_rotation(&mut self, id: &str) -> Result<()> {
-        self.shutdown_with(json!({ "headRotation": id })).await
+    pub async fn shutdown_unpublished_wake(&mut self) -> Result<()> {
+        self.shutdown_with(Value::Null, true).await
     }
 
-    pub async fn rotation_attestation(&mut self) -> Result<Option<Attestation>> {
+    pub async fn shutdown_rotation(&mut self, id: &str, mode: Mode) -> Result<()> {
+        let mut body = json!({ "headRotation": id });
+        if mode == Mode::Hibernate {
+            ensure!(std::mem::take(&mut self.hibernation_attested),
+                "HEAD hibernation shutdown requires a fresh native profile attestation");
+            body["mode"] = json!(mode);
+        }
+        self.shutdown_with(body, mode == Mode::Hibernate).await
+    }
+
+    pub async fn rotation_attestation(&mut self, mode: Mode) -> Result<Option<Attestation>> {
+        self.hibernation_attested = false;
+        let body = if mode == Mode::Hibernate { json!({"mode": mode}) } else { Value::Null };
         let response = timeout(
             RPC_TIMEOUT,
-            request(&mut self.stream, "get_head_rotation", Value::Null),
+            request(&mut self.stream, "get_head_rotation", body),
         ).await.context("HEAD rotation attestation timed out")??;
         if response["success"] != true {
             return Ok(None);
         }
-        Ok(Option::<Attestation>::deserialize(&response["data"])?)
+        let attestation = Option::<Attestation>::deserialize(&response["data"])?;
+        if mode == Mode::Hibernate {
+            // An older Host may ignore mode and return an ordinary rotation
+            // receipt. Accept only a positive sleep proof bound to this Host.
+            self.hibernation_attested = attestation.as_ref()
+                .is_some_and(|proof| proof.matches_hibernation_profile(&self.state));
+            if !self.hibernation_attested {
+                return Ok(None);
+            }
+        }
+        Ok(attestation)
     }
 
-    async fn shutdown_with(&mut self, body: Value) -> Result<()> {
+    async fn shutdown_with(&mut self, body: Value, strict: bool) -> Result<()> {
         let response = timeout(
             RPC_TIMEOUT,
             request(&mut self.stream, "shutdown_host", body),
@@ -194,6 +218,8 @@ impl Probe {
         .await
         .context("Owned shutdown request outcome is unresolved")??;
         if response["success"] == false {
+            ensure!(!strict || response["code"] == "session_busy" || response["error"] == "session_busy",
+                "Owned shutdown request outcome is unresolved");
             return Err(ShutdownRefused(
                 response["error"]
                     .as_str()
@@ -201,6 +227,13 @@ impl Probe {
                     .to_owned(),
             )
             .into());
+        }
+        if strict {
+            let receipt = &response["data"];
+            ensure!(receipt["shutdown"] == true
+                && receipt["sessionId"].as_str() == Some(self.head.session_id.as_str())
+                && receipt["sessionFile"].as_str().is_some_and(|file| Path::new(file) == self.head.session_file.as_path()),
+                "Owned shutdown receipt did not identify the requested HEAD");
         }
         Ok(())
     }
@@ -273,4 +306,76 @@ pub(super) async fn confirmed_exit(path: &Path, head: &Head) -> Result<()> {
         "Native head exit and durable persistence were not confirmed; Gateway supervision remains stopped"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncBufReadExt;
+
+    #[tokio::test]
+    async fn only_hibernation_proof_matching_the_owned_profile_can_send_sleep_shutdown() {
+        let session_file = "/fixture/session.jsonl";
+        let profile = json!({"version": 2, "agentDir": "/fixture/profile",
+            "dataDir": "/fixture/native-data", "sessionsDir": "/fixture/native-data/sessions"});
+        for (proof, accepted) in [
+            (None, false), // An older peer returns a successful ordinary rotation receipt.
+            (Some(json!({"version": 2, "agentDir": "/fixture/profile"})), false),
+            (Some(json!({"version": 1, "agentDir": "/fixture/profile"})), false),
+            (Some(json!({"version": 2, "agentDir": "/fixture/profile",
+                "dataDir": "/fixture/other-data", "sessionsDir": "/fixture/other-data/sessions"})), false),
+            (Some(profile.clone()), true),
+        ] {
+            let (client, peer) = UnixStream::pair().unwrap();
+            let mut probe = Probe {
+                stream: BufReader::new(client),
+                hibernation_attested: false,
+                head: Head {
+                    pid: 100, owner_pid: 101, session_id: "head".into(),
+                    session_file: session_file.into(), dev: 1, ino: 1, loaded_superkit_path: None,
+                },
+                state: json!({"nativeProfile": profile}),
+            };
+            let mut receipt = json!({
+                "generation": 1, "nativeRun": 2, "idleMs": 1_800_000,
+                "contextPercent": 80, "residents": [],
+                "selection": {"provider": "owner", "modelId": "main", "reasoning": false, "modelSettings": {}},
+            });
+            if let Some(proof) = proof {
+                receipt["hibernation"] = proof;
+            }
+            let peer = tokio::spawn(async move {
+                let mut peer = BufReader::new(peer);
+                let request = frame(&mut peer).await.unwrap();
+                assert_eq!(request["type"], "get_head_rotation");
+                let mut response = serde_json::to_vec(&json!({
+                    "id": request["id"], "type": "response", "command": "get_head_rotation", "success": true, "data": receipt,
+                })).unwrap();
+                response.push(b'\n');
+                peer.write_all(&response).await.unwrap();
+
+                let mut line = String::new();
+                if peer.read_line(&mut line).await.unwrap() == 0 {
+                    return false;
+                }
+                let shutdown: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(shutdown["mode"], "hibernate");
+                assert_eq!(shutdown["type"], "shutdown_host");
+                let mut response = serde_json::to_vec(&json!({
+                    "id": shutdown["id"], "type": "response", "command": "shutdown_host", "success": true,
+                    "data": {"shutdown": true, "sessionId": "head", "sessionFile": session_file},
+                })).unwrap();
+                response.push(b'\n');
+                peer.write_all(&response).await.unwrap();
+                true
+            });
+
+            let attestation = probe.rotation_attestation(Mode::Hibernate).await.unwrap();
+            let shutdown = probe.shutdown_rotation("attempt", Mode::Hibernate).await;
+            drop(probe);
+            assert_eq!(attestation.is_some(), accepted);
+            assert_eq!(shutdown.is_ok(), accepted);
+            assert_eq!(peer.await.unwrap(), accepted);
+        }
+    }
 }

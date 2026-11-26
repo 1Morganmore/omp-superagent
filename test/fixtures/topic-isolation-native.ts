@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
-import { HostConnection } from "../../src/host";
+import { HostConnection } from "../../src/omp/host";
 import type { Head } from "./native-rust-gateway";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 

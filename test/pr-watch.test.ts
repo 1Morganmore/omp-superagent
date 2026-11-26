@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "../src/config";
+import type { Config } from "../src/config/config";
 import type { Inbound } from "../src/contracts";
-import type { PrSnapshot } from "../src/pr-github";
-import { PrWatcher } from "../src/pr-watch";
-import { Store } from "../src/store";
+import type { PrSnapshot } from "../src/pr/pr-github";
+import { PrWatcher } from "../src/pr/pr-watch";
+import { Store } from "../src/storage/store";
 
 const fixtures: Array<{ store: Store | null; directory: string }> = [];
 afterEach(() => {
@@ -58,13 +58,13 @@ function fixture(intervalSeconds: number | null = 1, settleSource = true) {
 test("baseline is quiet and new reviews and CI reruns are durable original-route HEAD observations", async () => {
   const f = fixture();
   f.observed.snapshot = { ...base, feedback: [feedback("old")], ci: { outcome: "passed", key: "first-pass", skipped: 0 } };
-  await f.watcher.poll(1000, f.signal);
+  expect(await f.watcher.poll(1000, f.signal)).toBe(false);
   expect(f.store.inputs("main")).toHaveLength(0);
   expect(f.watcher.list(f.request)[0]?.baseline?.ci).toBe("passed");
   f.observed.snapshot = { ...base, feedback: [feedback("old"), feedback("new"), feedback("own", "owner")],
     failures: [{ key: "check:1:run1", name: "tests", conclusion: "failure", url: "https://github.com/example/project/actions/runs/1" }],
     ci: { outcome: "failed" } };
-  await f.watcher.poll(2000, f.signal);
+  expect(await f.watcher.poll(2000, f.signal)).toBe(true);
   const [event] = f.store.inputs("main");
   expect(event?.route).toEqual(f.input.route);
   expect(event?.messageId).toBe("123");

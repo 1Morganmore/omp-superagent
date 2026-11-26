@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -12,7 +12,9 @@ use crate::{discord::CONFIRMED_VOICE_DRAFT_PREFIX, group::Request as GroupReques
 
 use super::{PHYSICAL_ROUTE_FIELDS, Store, json_equal, now, string};
 
+mod history;
 pub(super) mod recovery;
+pub(crate) use history::history_gap;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +65,15 @@ impl EventRow {
     }
 }
 
+pub(in crate::store) fn record_history_sequence(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES ('gateway:history-sequence',?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [tx.last_insert_rowid().to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     pub fn admit(&self, event: &Value) -> Result<bool> {
         self.admit_event(event, None)
@@ -89,7 +100,8 @@ impl Store {
         let serialized = serde_json::to_string(event)?;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if kind == "reconnect" {
+        let history_recovery = kind == "reconnect" && event["historyRecovery"] == true;
+        if kind == "reconnect" && !history_recovery {
             let duplicate: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM gateway_events WHERE delivered_at IS NULL AND data=?)",
                 [&serialized],
@@ -141,7 +153,13 @@ impl Store {
             "INSERT INTO gateway_events(identity,data,received_at) VALUES (?,?,?)",
             params![key, serialized, received_at],
         )?;
+        if history_recovery {
+            record_history_sequence(&tx)?;
+        }
         tx.commit()?;
+        if kind != "reconnect" || history_recovery {
+            self.ingress.notify_one();
+        }
         Ok(true)
     }
 
@@ -307,7 +325,7 @@ impl Store {
             } else {
                 let held: bool = db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM metadata WHERE key = ? AND
-                        json_extract(value,'$.stage') IN ('stopping','starting','launching'))",
+                        json_extract(value,'$.stage') IN ('stopping','sleeping','starting','launching'))",
                     [super::HEAD_ROTATION],
                     |row| row.get(0),
                 )?;
@@ -318,6 +336,15 @@ impl Store {
             }
         };
         row.map(EventRow::decode).transpose()
+    }
+
+    pub(crate) fn reconciliation_event(&self, barrier: &str) -> Result<QueuedEvent> {
+        self.db()?.query_row(
+            "SELECT sequence,data,attempted_at FROM gateway_events WHERE delivered_at IS NULL
+             AND identity LIKE 'reconnect:%' AND json_extract(data,'$.barrier')=?",
+            [barrier],
+            EventRow::read,
+        )?.decode()
     }
 
     pub fn attempt(&self, sequence: i64) -> Result<()> {
@@ -396,6 +423,19 @@ impl Store {
         )?)
     }
 
+    pub(crate) fn has_wake_input(&self) -> Result<bool> {
+        // Controller attach, a replayed Discord connection, and Telegram's
+        // adapter-owned cursor are not demand. A history gap is: the owner
+        // may have written while disconnected and never send another message.
+        Ok(self.db()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM gateway_events
+                WHERE delivered_at IS NULL
+                  AND (identity NOT LIKE 'reconnect:%' OR json_extract(data,'$.historyRecovery') = 1))",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn pending_barrier(&self) -> Result<Option<String>> {
         Ok(self
             .db()?
@@ -454,6 +494,10 @@ fn identity(mut event: Value) -> Result<Value> {
     }
     if event["kind"] != "message" {
         return Ok(event);
+    }
+    // Ledger-only ordering does not change a redelivered platform revision.
+    if let Some(fields) = event.as_object_mut() {
+        fields.remove("historyDeferred");
     }
     let input = event
         .get_mut("input")

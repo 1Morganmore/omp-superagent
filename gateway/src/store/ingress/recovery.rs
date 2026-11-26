@@ -30,6 +30,7 @@ pub(in crate::store) static NEXT: LazyLock<String> = LazyLock::new(|| {
            SELECT CASE WHEN head.delivery_error='unresolved' THEN COALESCE((
              SELECT sequence FROM gateway_events INDEXED BY gateway_events_recovery
              WHERE delivered_at IS NULL AND ({rank}) IS NOT NULL
+               AND json_extract(data,'$.historyDeferred') IS NOT 1
              ORDER BY ({rank}),sequence LIMIT 1
            ),head.sequence) ELSE head.sequence END
            FROM (SELECT sequence,delivery_error FROM gateway_events

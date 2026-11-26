@@ -151,7 +151,10 @@ async fn dispatch(hub: &Arc<Hub>, finish: OnFinish, request: Request) -> WireRes
     let id = authenticate(hub, &parts.headers)?;
     if endpoint == "/attach" && method == Method::POST {
         let data = read_json(body).await?;
-        hub.attach(id, object(&data)?).await?;
+        let ready = hub.attach(id, object(&data)?).await?;
+        if data["startupHistory"] == true {
+            return Ok(Json(json!({"ok": true, "value": {"admissionReady": ready}})).into_response());
+        }
         return Ok(ok());
     }
     let (revision, pid) = {
@@ -184,7 +187,10 @@ async fn dispatch(hub: &Arc<Hub>, finish: OnFinish, request: Request) -> WireRes
         return Err(rejected("Invalid Gateway request"));
     };
     match endpoint {
-        "/ready" => hub.mark_ready(revision)?,
+        "/ready" => {
+            hub.service.controller_ready(pid, revision).await?;
+            hub.mark_ready(revision)?;
+        }
         "/receipt" => hub.receipt(revision, &data)?,
         "/detach" => hub.detach(revision)?,
         "/route" | "/history/route" => {

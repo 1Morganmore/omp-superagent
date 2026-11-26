@@ -7,7 +7,7 @@
 The [native Gateway](../../gateway/src/main.rs) owns credentials, the
 [adapter hub](../../gateway/src/adapter.rs), remote connections and authenticated
 messenger effects. At least one adapter is required; all configured adapters run
-together. The [head runtime](../../src/runtime.ts) owns conversation routing and
+together. The [head runtime](../../src/runtime/controller.ts) owns conversation routing and
 approval handling. It uses the Gateway's typed local Messenger interface, not
 platform SDKs, arbitrary URLs or a generic RPC tunnel.
 
@@ -48,8 +48,19 @@ The Gateway records pending owner-message candidates before advancing the
 Discord WebSocket sequence. Until it verifies the sender and route, it keeps
 only lookup coordinates and revision evidence, not message or attachment
 content. A reply lookup can be retried; it must not substitute a newer edit
-or replay a voice command. The head pins a failed Discord history scan to its
-original cursor so that later live messages cannot hide the missed interval.
+or replay a voice command.
+
+Waking HEAD on the same connected Gateway drains the durable inbox in order;
+it does not start a baseline history sweep. On a fresh Gateway, HEAD pins
+known authorized cursors before intake. The startup history request goes behind
+existing ingress, subject to the initial approval barrier. Each Discord or Slack
+transport gap carries its own exclusive history cutoff, even if HEAD processes
+it much later. A failed read keeps that gap in its inbox position and retries
+only the unfinished pinned routes, including after HEAD replacement. A live
+receipt keeps its original place relative to slash commands. A distinct history
+revision of that pending message stays in the durable inbox after the original,
+where it can inherit the original physical route and logical topic. Already
+admitted inputs and their external effects are not executed again.
 
 ### Account presence
 
@@ -101,7 +112,7 @@ be sent to the configured group model. Do not authorize a private repository
 or provider that should not see this data.
 
 Stock OMP can expand inline file references even with no tools enabled. The
-[restricted runner](../../src/group-runner.ts) therefore sends group input as
+[restricted runner](../../src/group/group-runner.ts) therefore sends group input as
 JSON-quoted data with file-reference characters escaped. A fresh private
 profile and scratch cwd exclude owner settings and session context; worktree
 access goes only through the dedicated file tools. Group chat uses native
@@ -152,7 +163,7 @@ does not close Gateway admission. Reconnecting does not replay already submitted
 
 The head receipt does not wait for a [historical topic search](#topic-routing-and-controls),
 which may read large native journals. An input that needs one is appended to a
-durable deferred-routing queue in the coordination store (`intake:deferred-routing`),
+durable deferred-routing queue in the coordination store (one ordered row per input),
 receipted, and then searched and admitted in the background. Until it is admitted,
 later ordinary inputs of the same physical channel or DM (including its threads
 and logical topics) queue behind it; other conversations are not held. A
@@ -169,7 +180,9 @@ it; other lanes' work is independent. A pending queued
 choice fences the automatic history choice like an unreceipted Gateway event. A
 failed admission stays first in its conversation and is retried with bounded
 backoff; a permanent denial is dropped. The queue survives a restart and resumes
-in order once intake is ready.
+in order once intake is ready. On first opening an older store, HEAD migrates the
+previous `intake:deferred-routing` array in order and removes it in the same
+transaction. Do not downgrade a migrated instance with deferred inputs pending.
 
 Telegram persists its per-bot offset after admission and acknowledges it with the
 next `getUpdates`. There is no Bot API history fetch; recovery cannot exceed its
@@ -212,7 +225,7 @@ receipts are sent.
 ### Uncertain submissions
 
 Do not replay an ambiguous native prompt, approval response or external mutation.
-[HEAD recovery](../../src/head-recovery.ts) can run a separate, evidence-bound
+[HEAD recovery](../../src/runtime/head-recovery.ts) can run a separate, evidence-bound
 reconciliation turn in the existing head under a native tool gate. The model may
 propose `release` or `hold` through `head_recovery`; code rechecks the exact
 request/session/file/generation, native `rpc_prompt_result` and run boundaries,
@@ -411,7 +424,7 @@ See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for com
 | Telegram | Ordinary slash messages and owner-scoped menus keep real message IDs. Normalize only actual bot-command entities addressed to this bot; ignore commands addressed to other bots. Native topics require eligible forum supergroups or topic-enabled private chat; group topic creation needs the granted capability. |
 | Slack | Ordinary `!...` messages and registered `/superagent-*` commands use Socket Mode. Slash commands have no message `ts`: deduplicate with a token-free scoped invocation fingerprint; anchor topic boundaries to the last durably admitted real owner message and use admission order on the same anchor. Do not persist trigger/response tokens or invent a timestamp. Use real root messages for threads, never nested threads. |
 
-[Command definitions](../../src/messenger-commands.ts) are shared. Menu registration
+[Command definitions](../../src/messaging/messenger-commands.ts) are shared. Menu registration
 is a separate explicit apply, not a side effect of setup, doctor or start. Command
 intake must not wait for a model; Discord's ephemeral admission reply and Slack's
 Socket Mode acknowledgement are not the actual command result.
@@ -513,7 +526,7 @@ defers reconciliation and rechecks current state before the next write;
 an ambiguous write is not retried.
 
 `/help`, `/status`, `/context` and `/usage` are code-handled reads with no model turn.
-[`/usage`](../../src/omp-usage.ts) invokes the configured executable and
+[`/usage`](../../src/omp/omp-usage.ts) invokes the configured executable and
 profile with `usage --json --redact`, so OMP discovers built-in and extension-provided
 usage sources. Both usage and reset preserve explicit `--no-extensions`,
 `--extension`, `--hook` and `--config` inputs from the configured launch command.
@@ -558,8 +571,8 @@ the native request and direct the operator to the appropriate local UI.
 OMP 19.1 sends a built-in `ask` as one HTML `form`. The stdio owner cancels
 that exact request because the messenger adapters do not render arbitrary HTML;
 it does not forward the HTML, submit defaults or wait for a connected head.
-[`decision_ask`](../../src/decision-tool.ts) uses the separate native `askDialog`; it is not a
-parallel approval engine. [Decision records](../../src/decisions.ts) link the
+[`decision_ask`](../../src/lane/decision-tool.ts) uses the separate native `askDialog`; it is not a
+parallel approval engine. [Decision records](../../src/lane/decisions.ts) link the
 native tool call, original source and original question/card. `answering` is an
 attempt, not the `answered` state confirmed by native settlement. By default,
 a topic-owned question goes directly to the authorized topic without waking
@@ -596,7 +609,7 @@ text, quotes and reports are not approval.
   message. Do not retry an ambiguous send or attachment upload.
 - Quoted/replied content and Discord channel context are observations, not
   commands. Snapshot a reference at first admission; a later edit or deletion
-  does not change that snapshot. [Discord purpose notes](../../src/discord-context.ts)
+  does not change that snapshot. [Discord purpose notes](../../src/messaging/discord-context.ts)
   are local scoped context tied to a real owner input, not channel mutations
   or authority to choose a repository or dispatch work.
 - Resolve Telegram and Slack file references through original authorized
@@ -642,7 +655,7 @@ text, quotes and reports are not approval.
   column labels and each row's values on separate lines. This leaves links,
   emphasis and inline code available to Discord's Markdown renderer and lets
   prose wrap naturally. Existing code blocks and stored output are unchanged.
-  [Delivery classification](../../src/delivery.ts) distinguishes
+  [Delivery classification](../../src/messaging/delivery.ts) distinguishes
   definite rejection from uncertainty across the IPC boundary.
 - Receipt/working reactions are best-effort decorations bound to the real
   source message. They neither delay nor prove admission, execution or delivery.

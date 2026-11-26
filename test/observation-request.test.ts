@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isObservationRequest } from "../src/observation-request";
+import { isObservationRequest } from "../src/runtime/observation-request";
 
 describe("bound-topic observation routing", () => {
   test.each(["온라인 표시 꺼 줘", "이 레인 감시를 중지해 줘", "감시 목록 보여줘", "이번 작업이 끝나면 여기로 알려 주세요.",

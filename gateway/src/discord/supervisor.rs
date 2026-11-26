@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::oneshot,
     task::JoinHandle,
     time,
 };
@@ -11,7 +11,7 @@ use tokio_tungstenite::connect_async;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::State;
-use super::dispatch::{Dispatcher, ordered_intake};
+use super::dispatch::{Dispatcher, intake_queue};
 use super::login::Login;
 use super::socket::{End, Link, Session, jitter};
 
@@ -39,14 +39,14 @@ impl Task {
             let (ready, admission) = oneshot::channel();
             // Owner markers point at committed rows. Only live effects still
             // require the volatile queue; the socket never waits for REST.
-            let (incoming, receiver) = mpsc::channel(1024);
+            let (incoming, ordered) = intake_queue();
             let intake_state = Arc::clone(&state);
             let intake_cancel = child.clone();
             let intake = tokio::spawn(async move {
                 tokio::select! {
                     biased;
                     () = intake_cancel.cancelled() => (),
-                    () = ordered_intake(intake_state, receiver, ready, backlog) => (),
+                    () = ordered.run(&intake_state, ready, backlog) => (),
                 }
             });
             let dispatcher = Dispatcher::new(state, incoming, interactions.clone(), child.clone());

@@ -1,12 +1,13 @@
 // Short-lived SDK operations. The Rust owner, not this process, owns native stdin and the reconnectable socket.
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { chmod, rename, writeFile } from "node:fs/promises";
+import { chmod, lstat, rename, writeFile } from "node:fs/promises";
 import type { RpcAbortAndRestoreQueueResult } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import type { HostOptions } from "./host";
-import type { Frame } from "./host-protocol";
-import type { RotationSelection } from "./head-rotation";
-import type { ManagedUlwLaunchInput } from "./managed-ulw";
+import type { HostOptions } from "./omp/host";
+import type { RotationSelection } from "./runtime/head-rotation";
+import type { ManagedUlwLaunchComposition, ManagedUlwLaunchInput } from "./omp/managed-super";
+import type { NativeProfile, NativeProfileBinding } from "./omp/native-sessions";
+import { launchArgvHash, stockReplayRefusal } from "./omp/stock-head-launch";
 
 type Manifest = {
   readonly options: Omit<HostOptions, "env">;
@@ -14,52 +15,19 @@ type Manifest = {
   readonly configPath: string;
   readonly processBackend: "broker" | "daemon";
   readonly headRotationSelection?: RotationSelection;
-};
-type Exit = {
-  readonly pid: number; readonly ownerPid: number; readonly code: number | null; readonly signal: string | null;
-  readonly sessionId: string; readonly instanceKey?: string | null; readonly runOrdinal: number;
-  readonly workerAttempt?: string | null;
-  readonly observationFailure: boolean; readonly expectedObservations: readonly [string, Frame][];
+  readonly headHibernationSessionId?: string;
+  readonly expectedNativeProfile?: NativeProfile;
 };
 
-async function verifyExit({ options }: Manifest, exit: Exit) {
-  const { scanNativeJournal } = await import("./native-journal");
-  const expected = new Map(exit.expectedObservations);
-  const starts = new Set<number>();
-  let duplicate = false;
-  const session = await scanNativeJournal(options.sessionFile, entry => {
-    if (entry.type !== "custom" || !entry.data || typeof entry.data !== "object") return;
-    const data = entry.data as Readonly<Frame>;
-    if (data.instanceKey !== (exit.instanceKey ?? undefined)) return;
-    if (entry.customType === "rpc_prompt_result" && typeof entry.id === "string" && expected.has(entry.id) &&
-        isDeepStrictEqual(data.frame, expected.get(entry.id))) expected.delete(entry.id);
-    if (entry.customType === "rpc_agent_start" && data.hostPid === exit.pid && typeof data.runOrdinal === "number" &&
-        Number.isSafeInteger(data.runOrdinal) && data.runOrdinal >= 1 && data.runOrdinal <= exit.runOrdinal) {
-      duplicate ||= starts.has(data.runOrdinal);
-      starts.add(data.runOrdinal);
-    }
-  });
-  const persisted = session !== undefined && session === exit.sessionId;
-  const observationsFlushed = persisted && !exit.observationFailure && !expected.size && !duplicate && starts.size === exit.runOrdinal;
-  const { pid, ownerPid, sessionId, code, signal } = exit;
-  const receipt = `${options.socketPath}.exit.json`;
-  const temporary = `${receipt}.${crypto.randomUUID()}`;
-  await writeFile(temporary, JSON.stringify({ pid, ownerPid, sessionId, sessionFile: options.sessionFile, code,
-    ...(exit.workerAttempt ? { workerAttempt: exit.workerAttempt } : {}),
-    signal, persisted, observationsFlushed }), { mode: 0o600, flag: "wx" });
-  await rename(temporary, receipt);
-  if (!persisted || !observationsFlushed) throw new Error("Native exit persistence is unconfirmed");
-  return { persisted, observationsFlushed };
-}
-
-async function run(operation: string | undefined, manifest: Manifest, input: unknown, profileResolved = false) {
+async function run(operation: string | undefined, manifest: Manifest, input: unknown, nativeProfile?: NativeProfile) {
   const { options } = manifest;
   const { extractProfileFlags } = await import("@oh-my-pi/pi-coding-agent/cli/profile-bootstrap");
-  const bootstrap = extractProfileFlags([...options.command.slice(1), ...manifest.args]);
+  const launchArgs = [...options.command.slice(1), ...manifest.args];
+  const bootstrap = extractProfileFlags(launchArgs);
   // Native discovery already selected the profile and applied dotenv.
   // Rebootstrapping now would re-select from the mutated environment or
   // clear its effective agent directory before publishing the session.
-  if (!profileResolved) {
+  if (!nativeProfile) {
     const { setProfile, resolveProfileEnv } = await import("@oh-my-pi/pi-utils/dirs");
     setProfile(bootstrap.profile ?? resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
   }
@@ -71,6 +39,16 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
       if ("error" in argv) throw new Error(argv.error);
       const parsed = parseArgs(argv.argv.slice(1));
       const emptyToolSelection = parsed.tools?.length === 0;
+      const parkedSession = manifest.headHibernationSessionId;
+      const { matchesNativeProfile, publishNativeSession, sdkNativeProfilePaths } = await import("./omp/native-sessions");
+      const requireNativeProfile = () => {
+        const expected = manifest.expectedNativeProfile;
+        if ((nativeProfile && !matchesNativeProfile(sdkNativeProfilePaths(), nativeProfile))
+          || (expected !== undefined && !isDeepStrictEqual(nativeProfile, expected))
+          || (parkedSession !== undefined && expected === undefined))
+          throw new Error("Native profile changed before journal preparation or publication");
+      };
+      requireNativeProfile();
       if (options.prReviewOnly) {
         if (parsed.noTools === true || !emptyToolSelection || !parsed.noExtensions ||
             !parsed.noSkills || !parsed.noRules || !parsed.noContextFiles || !parsed.noLsp ||
@@ -82,7 +60,7 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
         const { cfgDisabledProviders } = await import("@oh-my-pi/pi-coding-agent/config/model-settings");
         const { getAllCapabilitiesInfo } = await import("@oh-my-pi/pi-coding-agent/discovery");
         const { getAllPluginToolPaths } = await import("@oh-my-pi/pi-coding-agent/extensibility/plugins/loader");
-        const { PR_REVIEW_GITHUB_ENV } = await import("./host-protocol");
+        const { PR_REVIEW_GITHUB_ENV } = await import("./omp/host-protocol");
         if (PR_REVIEW_GITHUB_ENV.some(name => process.env[name]))
           throw new Error("Static PR review cannot load GitHub credentials from the native profile");
         const native = await Settings.loadReadOnly({ cwd: options.cwd, agentDir: getAgentDir() });
@@ -101,9 +79,15 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
         await writeFile(staging, JSON.stringify({ ...overlay, disabledProviders: [...disabled] }), { mode: 0o600, flag: "wx" });
         await rename(staging, manifest.configPath);
       }
-      const { lstat, stat } = await import("node:fs/promises");
+      const { stat } = await import("node:fs/promises");
       const expectedWorkerSession = process.env.OMP_SUPERAGENT_WORKER_EXPECTED_SESSION;
-      const missing = await (expectedWorkerSession === undefined && !options.prReviewOnly ? stat : lstat)(options.sessionFile).then(async info => {
+      const inspect = expectedWorkerSession !== undefined || parkedSession !== undefined || options.prReviewOnly ? lstat : stat;
+      const missing = await inspect(options.sessionFile).then(async info => {
+        if (parkedSession !== undefined) {
+          const { readNativeSessionId } = await import("./omp/native-journal");
+          if (!info.isFile() || !parkedSession || await readNativeSessionId(options.sessionFile, info) !== parkedSession)
+            throw new Error("HEAD journal no longer matches the hibernated session");
+        }
         if (expectedWorkerSession !== undefined) {
           const { readSessionHeaderId } = await import("@oh-my-pi/pi-coding-agent/session/session-loader");
           if (!info.isFile() || !expectedWorkerSession || await readSessionHeaderId(options.sessionFile) !== expectedWorkerSession)
@@ -123,10 +107,12 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
         return false;
       }, error => {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+        if (parkedSession !== undefined) throw new Error("Cannot recreate a missing hibernated HEAD session");
         if (expectedWorkerSession) throw new Error("Worker cannot recreate a missing reserved session");
         return true;
       });
       if (missing) {
+        requireNativeProfile();
         const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
         const session = SessionManager.create(options.cwd, dirname(options.sessionFile));
         try {
@@ -135,7 +121,7 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
             session.appendCustomEntry("superagent_pr_review_policy", { version: 1, cwd: options.cwd });
           const selection = manifest.headRotationSelection;
           if (selection) {
-            session.appendModelChange(`${selection.provider}/${selection.modelId}`);
+            session.appendModelChange(selection.modelIdentity ?? `${selection.provider}/${selection.modelId}`);
             session.appendThinkingLevelChange(selection.thinkingLevel ?? undefined, selection.configuredThinkingLevel ?? undefined);
           }
           await session.ensureOnDisk();
@@ -143,20 +129,28 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
         } finally { await session.close(); }
         if (options.prReviewOnly) await chmod(options.sessionFile, 0o600);
       }
+      let nativeProfileBinding: NativeProfileBinding | undefined;
       if (!options.prReviewOnly) {
-        const { publishNativeSession } = await import("./native-sessions");
-        await publishNativeSession(options.sessionFile, options.cwd);
+        requireNativeProfile();
+        const discoveryEntry = await publishNativeSession(options.sessionFile, options.cwd, parkedSession, nativeProfile);
+        if (nativeProfile) {
+          if (!discoveryEntry) throw new Error("Prepared native session could not be found in discovery");
+          nativeProfileBinding = { profile: nativeProfile, discoveryEntry };
+        }
       }
-      const { hostInventoryManifest } = await import("./host-inventory-manifest");
+      const { hostInventoryManifest } = await import("./omp/host-inventory-manifest");
       return { toolsExplicitlySelected: parsed.tools !== undefined, noTools: parsed.noTools === true,
+        nativeProfileBinding,
+        replayableArgvHash: argv.argv[0] === "launch" && !stockReplayRefusal(parsed, options.sessionFile)
+          ? launchArgvHash(launchArgs) : undefined,
         ...(options.prReviewOnly ? { emptyToolSelection } : {}),
         inventory: await hostInventoryManifest(manifest.processBackend, options.cwd) };
     }
     case "inventory": {
       const { projectDir, serviceName } = input as { projectDir?: string; serviceName?: string };
       const list = manifest.processBackend === "broker"
-        ? (await import("./host-broker-services")).brokerServiceInventory(options.cwd)
-        : (await import("./host-services")).listServiceUnits;
+        ? (await import("./omp/host-broker-services")).brokerServiceInventory(options.cwd)
+        : (await import("./omp/host-services")).listServiceUnits;
       return { units: await list(projectDir ?? undefined, serviceName ?? undefined) };
     }
     case "fit": {
@@ -192,11 +186,11 @@ async function launch() {
   const newline = buffered.indexOf("\n");
   const input: ManagedUlwLaunchInput | null = JSON.parse(buffered.slice(0, newline));
   let rest = buffered.slice(newline + 1);
-  let composition;
+  let composition: ManagedUlwLaunchComposition;
   if (input === null) {
     composition = { extensionPaths: [], noExtensions: true, memoryWriteDir: null };
   } else {
-    const { managedUlwLaunchComposition } = await import("./managed-ulw");
+    const { managedUlwLaunchComposition } = await import("./omp/managed-super");
     try { composition = await managedUlwLaunchComposition(input); }
     catch (error) {
       // Discovery refusals name the launch argument or package the operator must change.
@@ -210,19 +204,25 @@ async function launch() {
   rest += decoder.decode();
   if (!rest) return;
   const manifest: Manifest = JSON.parse(rest);
-  process.stdout.write(JSON.stringify(await run("prepare", manifest, manifest, input !== null && !input.worker)));
+  if (input?.expectedNativeProfile && !isDeepStrictEqual(composition.nativeProfile, input.expectedNativeProfile))
+    throw new Error("Native HEAD profile differs from the sleeping checkpoint");
+  process.stdout.write(JSON.stringify(await run("prepare", manifest, manifest, composition.nativeProfile)));
 }
 
 const [, , operation, path] = process.argv;
 try {
   if (operation === "launch") await launch();
+  else if (operation === "head-resume-command") {
+    const { headResumeCommand } = await import("./omp/head-resume");
+    const result = await headResumeCommand(await Bun.stdin.json());
+    process.stdout.write(`\nMANAGED_HEAD_RESUME ${JSON.stringify(result)}\n`);
+  }
   else if (operation === "prepare") throw new Error("Session preparation follows launch discovery");
-  else {
+  else if (operation === "inventory" || operation === "fit") {
     const input = await Bun.stdin.json();
     const manifest: Manifest = await Bun.file(path!).json();
-    const result = operation === "exit" ? await verifyExit(manifest, input as Exit) : await run(operation, manifest, input);
-    process.stdout.write(JSON.stringify(result));
-  }
+    process.stdout.write(JSON.stringify(await run(operation, manifest, input)));
+  } else throw new Error("Unknown Host SDK operation");
 } catch {
   // SDK errors may contain native frames, authorization data or prompt content.
   console.error("Host SDK operation failed");

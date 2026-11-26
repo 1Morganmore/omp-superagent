@@ -2,15 +2,15 @@ use anyhow::{Context, Result, ensure};
 use std::process;
 use uuid::Uuid;
 
-use crate::{adapter::EffectError, store::HEAD_ROTATION};
+use crate::{adapter::EffectError, store::{HEAD_ROTATION, HibernationChange}};
 
 use super::{
-    Lifecycle, Phase,
+    Lifecycle, Phase, State,
     fs::{alive, remove_dead_socket},
     host_launch::PreparedHost,
     host_rpc::{Head, PROBE_TIMEOUT, Probe, ShutdownRefused, confirmed_exit},
     restart_record::{self, ACTIVE, FENCE, Fence, HEAD, Plan, Record, STOP, Stage},
-    rotation::{self, Stage as RotationStage},
+    rotation::{self, Mode, Rotation, Stage as RotationStage},
 };
 
 impl Lifecycle {
@@ -20,26 +20,50 @@ impl Lifecycle {
         Probe::open(&config.head_socket, &session_file, PROBE_TIMEOUT).await
     }
 
-    pub(super) async fn authorize(&self, pid: u32) -> Result<()> {
-        // The fresh runtime must start after the replacement's exact stock
-        // selection and identity have been published, never during launch.
-        let _rotating = if self.rotation()?.is_some_and(|plan| plan.stage == RotationStage::Launching) {
+    pub(super) async fn authorize(&self, pid: u32, ready_stream: Option<u64>) -> Result<()> {
+        let supervision = if self.rotation()?.is_some_and(|plan|
+            plan.stage == RotationStage::Launching || plan.stopped_hibernation())
+        {
             Some(self.0.supervision.lock().await)
         } else {
             None
         };
-        let actual = self.probe().await?.head;
+        let probe = self.probe().await?;
+        let actual = &probe.head;
+        ensure!(actual.pid == pid, EffectError::rejected("Gateway client is not the supervised native head"));
         ensure!(actual.loaded_superkit_path.is_some(),
             EffectError::rejected("Native head has not verified its omp-superkit extension; restart the Host"));
-        let state = self.state()?;
-        let rotation = self.rotation()?;
+        let mut state = self.state()?;
+        let mut rotation = self.rotation()?;
+        // Only the reserved native process can open a controller stream. That
+        // stream must reach /ready before the durable inbox is released.
+        if supervision.is_some() && let Some(plan) = rotation.as_mut().filter(|plan|
+            plan.mode == Mode::Hibernate && plan.stage == RotationStage::Launching)
+        {
+            self.verify_replacement(plan, actual, &probe.state)?;
+            ensure!(state.phase == Phase::Running && !*self.0.closing.borrow()
+                && state.head.is_none() && plan.wake_stop.is_none()
+                && plan.config_hash == self.0.config.source_hash
+                && self.0.store.get_meta(STOP)? == plan.stop_boundary,
+                EffectError::rejected("HEAD wake is not owned by this Gateway"));
+            if let Some(revision) = ready_stream {
+                self.ensure_wake_publishable(&state, plan)?;
+                let hub = self.0.controller.get().and_then(std::sync::Weak::upgrade)
+                    .context("Wake controller is unavailable")?;
+                hub.with_ready_stream(revision, pid, || self.publish_launch(&mut state, plan, actual))?;
+            }
+            return Ok(());
+        }
         let rotating = rotation.as_ref().is_some_and(|plan| plan.stage == RotationStage::Launching);
+        ensure!(!rotation.as_ref().is_some_and(|plan| plan.mode == Mode::Hibernate
+            && (plan.stage.active() || plan.stopped_hibernation() || state.phase == Phase::OperatorStopping)),
+            EffectError::rejected("HEAD hibernation or stop is in progress"));
         let owns = match &state.head {
             Some(known) => actual.same(known),
             None => !rotating && state.launching_owner == Some(actual.owner_pid),
         };
         ensure!(
-            actual.pid == pid && owns && !rotation.as_ref().is_some_and(|plan|
+            owns && !rotation.as_ref().is_some_and(|plan|
                 state.phase == Phase::OperatorStopping
                     && plan.replacement_session_id.as_deref() == Some(actual.session_id.as_str())
                     && plan.replacement_owner_pid == Some(actual.owner_pid)),
@@ -48,15 +72,53 @@ impl Lifecycle {
         Ok(())
     }
 
-    pub(super) async fn ensure_head(&self, restart_request: Option<&str>) -> Result<()> {
+    fn publish_launch(&self, state: &mut State, plan: &mut Rotation, head: &Head) -> Result<()> {
+        self.publish_rotation(plan, head)?;
+        state.head = Some(head.clone());
+        state.head_error = None;
+        if plan.mode == Mode::Hibernate {
+            state.next_hibernation_probe = None;
+        }
+        Ok(())
+    }
+
+    fn identify_launch(&self, state: &mut State, plan: &mut Rotation, probe: &Probe) -> Result<()> {
+        self.ensure_wake_publishable(state, plan)?;
+        self.verify_replacement(plan, &probe.head, &probe.state)?;
+        if plan.mode == Mode::Hibernate {
+            state.head_error = Some("Waiting for the verified HEAD controller to connect and become ready");
+            return Ok(());
+        }
+        self.publish_launch(state, plan, &probe.head)
+    }
+
+    pub(super) async fn ensure_head(&self, restart_request: Option<&str>, startup: bool) -> Result<()> {
         let _supervising = self.0.supervision.lock().await;
         let mut rotation = self.rotation()?;
         if rotation.as_ref().is_some_and(|plan| plan.stage == RotationStage::Stopping) {
             return Ok(());
         }
-        if let Some(plan) = rotation.as_ref().filter(|plan| matches!(plan.stage, RotationStage::Starting | RotationStage::Launching)) {
-            ensure!(self.0.config.config_hash()? == plan.config_hash,
-                "Gateway configuration changed before replacement HEAD startup");
+        if let Some(plan) = rotation.as_ref() {
+            match (plan.mode, plan.stage) {
+                (Mode::Hibernate, RotationStage::Sleeping) => {
+                    if !startup && !self.0.store.has_wake_input()? {
+                        return Ok(());
+                    }
+                    self.validate_hibernation_wake(plan)?;
+                }
+                (Mode::Hibernate, RotationStage::Launching) => {
+                    ensure!(plan.replacement_owner_pid.is_some() && plan.wake_stop.is_none(),
+                        "HEAD wake launch ownership remains held");
+                }
+                (Mode::Rotate, RotationStage::Starting | RotationStage::Launching) => {
+                    ensure!(self.0.config.config_hash()? == plan.config_hash,
+                        "Gateway configuration changed before replacement HEAD startup");
+                }
+                (Mode::Hibernate, RotationStage::Starting | RotationStage::Stopping
+                    | RotationStage::Complete | RotationStage::Refused)
+                | (Mode::Rotate, RotationStage::Sleeping | RotationStage::Stopping
+                    | RotationStage::Complete | RotationStage::Refused) => {}
+            }
         }
         let head = {
             let state = self.state()?;
@@ -66,12 +128,31 @@ impl Lifecycle {
             state.head.clone()
         };
         if let Some(plan) = rotation.as_mut().filter(|plan| plan.stage == RotationStage::Launching) {
+            if plan.mode == Mode::Hibernate {
+                // The reserved controller initiates /attach and /ready itself.
+                // A supervisor tick can neither complete it nor justify a
+                // second launch. Stop still probes the exact recorded owner.
+                self.state()?.head_error = Some("Waiting for the reserved HEAD controller to become ready");
+                return Ok(());
+            }
             let probe = self.probe().await.context("Replacement HEAD launch ownership remains held")?;
             let mut state = self.state()?;
-            self.publish_rotation(plan, &probe.head, &probe.state)?;
-            state.head = Some(probe.head);
-            state.head_error = None;
-            return Ok(());
+            return self.identify_launch(&mut state, plan, &probe);
+        }
+        let waking = rotation.as_ref().is_some_and(|plan| plan.stage == RotationStage::Sleeping);
+        let stopped_hibernation = rotation.as_ref().is_some_and(Rotation::stopped_hibernation);
+        let start_fence = if stopped_hibernation {
+            ensure!(restart_request.is_none(), "A restart successor cannot adopt an operator-stopped HEAD");
+            if !startup {
+                return Ok(());
+            }
+            Some(self.0.store.get_meta(STOP)?.context("Missing operator stop fence")?)
+        } else {
+            None
+        };
+        if waking || stopped_hibernation {
+            ensure!(head.is_none() && self.0.store.get_meta(HEAD)?.as_deref() == Some("null"),
+                "Parked HEAD ownership changed");
         }
         if let Some(known) = &head
             && alive(known.pid)?
@@ -110,7 +191,9 @@ impl Lifecycle {
         .await?;
         {
             let mut state = self.state()?;
-            self.0.store.set_meta(HEAD, "null")?;
+            if !waking && !stopped_hibernation {
+                self.0.store.set_meta(HEAD, "null")?;
+            }
             state.head = None;
             if state.phase != Phase::Running || *self.0.closing.borrow() {
                 return Ok(());
@@ -121,10 +204,17 @@ impl Lifecycle {
             .ulw
             .get()
             .context("Gateway lifecycle has not been prepared")?;
-        let replacement = rotation.as_mut().filter(|plan| plan.stage == RotationStage::Starting);
-        let prepared = PreparedHost::prepare(config, &self.0.store, ulw, replacement.as_deref()).await?;
+        let mut launch_plan = rotation.as_mut().filter(|plan|
+            matches!(plan.stage, RotationStage::Starting | RotationStage::Sleeping) || plan.stopped_hibernation());
+        let (replacement, stopped) = if stopped_hibernation {
+            (None, launch_plan.as_deref())
+        } else {
+            (launch_plan.as_deref(), None)
+        };
+        let prepared = PreparedHost::prepare(
+            config, &self.0.store, ulw, replacement, stopped,
+        ).await?;
         let session_file = rotation::session_file(config, &self.0.store)?;
-        let mut replacement = replacement;
         let mut owner = {
             let mut state = self.state()?;
             if state.phase != Phase::Running || *self.0.closing.borrow() {
@@ -133,21 +223,61 @@ impl Lifecycle {
             if let Some(plan) = &restart_plan {
                 restart_record::validate_config(config, plan)?;
             }
-            if let Some(plan) = &mut replacement {
-                plan.stage = RotationStage::Launching;
-                plan.replacement_session_id = Some(prepared.expected_session_id().context("Fresh HEAD session ID missing")?.to_owned());
-                self.0.store.set_meta(HEAD_ROTATION, &serde_json::to_string(plan)?)?;
+            if let Some(fence) = &start_fence {
+                // Use the new Gateway's config, never the retired wake
+                // profile or a newer on-disk config the daemon did not load.
+                ensure!(config.matches_config_hash(&config.source_hash)
+                    && self.0.store.get_meta(STOP)?.as_ref() == Some(fence),
+                    "Gateway configuration or operator stop fence changed before explicit HEAD startup");
             }
-            let owner = prepared.spawn(
-                config,
-                restart_plan.as_ref().map(|plan| plan.config_hash.as_str()),
-            )?;
+            let checkpoint = if let Some(plan) = launch_plan.as_deref_mut() {
+                if plan.mode == Mode::Hibernate && !stopped_hibernation {
+                    self.validate_hibernation_wake(plan)?;
+                }
+                plan.stage = RotationStage::Launching;
+                plan.replacement_session_id = Some(prepared.expected_session_id().context("Prepared HEAD session ID missing")?.to_owned());
+                if plan.mode == Mode::Hibernate {
+                    Some(self.reserve_hibernation_wake(plan, start_fence.as_deref())?)
+                } else {
+                    self.0.store.set_meta(HEAD_ROTATION, &serde_json::to_string(plan)?)?;
+                    None
+                }
+            } else {
+                None
+            };
+            let config_hash = if waking || stopped_hibernation {
+                Some(config.source_hash.as_str())
+            } else {
+                restart_plan.as_ref().map(|plan| plan.config_hash.as_str())
+            };
+            let owner = match prepared.spawn(&config.cwd, config_hash) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    if let Some((checkpoint, plan)) = checkpoint.zip(launch_plan.as_deref()) {
+                        self.0.store
+                            .commit_hibernation(
+                                &plan.recorded,
+                                &checkpoint,
+                                HibernationChange::ReleaseUnspawnedWake,
+                            )
+                            .with_context(|| {
+                                format!("{error:#}; could not restore HEAD hibernation checkpoint")
+                            })?;
+                    }
+                    return Err(error);
+                }
+            };
             state.launching_owner = Some(owner.pid);
             owner
         };
-        if let Some(plan) = &mut replacement {
+        if let Some(plan) = &mut launch_plan {
             plan.replacement_owner_pid = Some(owner.pid);
-            if let Err(error) = self.0.store.set_meta(HEAD_ROTATION, &serde_json::to_string(plan)?) {
+            let saved = if plan.mode == Mode::Hibernate {
+                self.save_hibernation(plan, HibernationChange::RecordOwner)
+            } else {
+                self.0.store.set_meta(HEAD_ROTATION, &serde_json::to_string(plan)?)
+            };
+            if let Err(error) = saved {
                 owner.reap(); // Rotation never signals a process, including a failed launch.
                 return Err(error);
             }
@@ -160,19 +290,18 @@ impl Lifecycle {
                 owner.reap();
                 let mut state = self.state()?;
                 state.launching_owner = None;
-                if let Some(plan) = replacement {
-                    self.publish_rotation(plan, &probe.head, &probe.state)?;
-                    state.head = Some(probe.head);
+                if let Some(plan) = launch_plan {
+                    self.identify_launch(&mut state, plan, &probe)?;
                 } else {
                     state.head = Some(probe.head);
                     self.0.store.set_meta(HEAD, &serde_json::to_string(&state.head)?)?;
+                    state.head_error = None;
                 }
-                state.head_error = None;
                 Ok(())
             }
             Err(error) => {
                 self.state()?.launching_owner = None;
-                if replacement.is_some() {
+                if launch_plan.is_some() {
                     owner.reap();
                 } else if owner.abandon().await.is_err() {
                     eprintln!("Failed HEAD startup owner could not be disposed");
@@ -216,6 +345,8 @@ impl Lifecycle {
             if state.stop_generation == generation && state.phase == Phase::OperatorStopping {
                 state.phase = if restart_record::active_record(&self.0.store)?
                     .is_some_and(|record| record.state == Stage::Uncertain)
+                    || self.rotation()?.is_some_and(|plan|
+                        plan.mode == Mode::Hibernate && plan.stage == RotationStage::Launching)
                 {
                     Phase::Held
                 } else {
@@ -256,6 +387,9 @@ impl Lifecycle {
             state.head.clone()
         };
         if restart.is_none() && let Some(mut rotation) = self.rotation()? {
+            if rotation.mode == Mode::Hibernate && self.stop_hibernation(&mut rotation).await? {
+                return Ok(());
+            }
             match rotation.stage {
                 RotationStage::Stopping => {
                     // Do not send another shutdown after an ambiguous
@@ -295,6 +429,7 @@ impl Lifecycle {
                     return self.clear_head();
                 }
                 RotationStage::Starting | RotationStage::Launching | RotationStage::Complete | RotationStage::Refused => {}
+                RotationStage::Sleeping => anyhow::bail!("Invalid durable HEAD rotation stage"),
             }
         }
         if let Some((expected, record)) = restart {

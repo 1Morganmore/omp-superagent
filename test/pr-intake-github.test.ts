@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { IntakeMergeIdentity } from "../src/pr-intake-github";
+import type { IntakeMergeIdentity } from "../src/pr/pr-intake-github";
 
 const head = "a".repeat(40);
 const otherHead = "b".repeat(40);
@@ -170,7 +170,7 @@ if (last === pr && existsSync(dir + "/merged")) {
   const runner = join(directory, "run.ts");
   await writeFile(runner, `
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { inspectIntakeMerge, mergeIntakePull, readIntakePulls } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr-intake-github.ts"))};
+import { inspectIntakeMerge, mergeIntakePull, readIntakePulls } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr/pr-intake-github.ts"))};
 const dir = ${JSON.stringify(directory)};
 const action = process.argv[2];
 const repository = process.argv[3];

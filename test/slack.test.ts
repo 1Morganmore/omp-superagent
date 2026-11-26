@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import type { WebClientOptions } from "@slack/web-api";
 import { SlackMessenger, type SlackMessengerOptions } from "./oracles/bun-gateway/slack.ts";
-import { DeliveryError } from "../src/delivery.ts";
+import { DeliveryError } from "../src/messaging/delivery.ts";
 import type { Approval, DialogResponse, Inbound, Messenger, OutputRecord, Route } from "../src/contracts.ts";
-import { MESSENGER_COMMANDS } from "../src/messenger-commands.ts";
-import { Store } from "../src/store.ts";
-import { decisionId } from "../src/decisions";
+import { MESSENGER_COMMANDS } from "../src/messaging/messenger-commands.ts";
+import { Store } from "../src/storage/store.ts";
+import { decisionId } from "../src/lane/decisions";
 
 type Data = Record<string, any>;
 type Handlers = Parameters<Messenger["start"]>[0];

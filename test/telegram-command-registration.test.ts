@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BotCommand, BotCommandScopeChat, BotCommandScopeChatMember } from "grammy/types";
-import type { Config } from "../src/config";
-import { MESSENGER_COMMANDS } from "../src/messenger-commands";
-import { registerTelegramCommands } from "../src/telegram-command-registration";
+import type { Config } from "../src/config/config";
+import { MESSENGER_COMMANDS } from "../src/messaging/messenger-commands";
+import { registerTelegramCommands } from "../src/messaging/telegram-command-registration";
 import { loopbackOperator } from "./fixtures/operator";
 
 const tokenName = "TELEGRAM_MENU_TEST_TOKEN";

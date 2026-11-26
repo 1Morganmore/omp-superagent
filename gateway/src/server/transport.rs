@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use axum::{
     Extension, Router,
     body::{Body, Bytes},
@@ -20,6 +20,7 @@ use hyper_util::{
     rt::{TokioIo, TokioTimer},
     service::TowerToHyperService,
 };
+use rustix::fs::{CWD, RenameFlags, renameat_with};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -35,6 +36,8 @@ use super::{
 use crate::store::Store;
 
 pub(crate) mod private_paths;
+#[cfg(test)]
+mod socket_tests;
 
 pub(super) struct SocketIdentity {
     path: PathBuf,
@@ -42,28 +45,64 @@ pub(super) struct SocketIdentity {
     ino: u64,
 }
 
-impl SocketIdentity {
-    pub(super) fn capture(path: &Path) -> Result<Self> {
-        let stat = fs::symlink_metadata(path)?;
+pub(super) struct StagedSocket {
+    identity: SocketIdentity,
+    listener: UnixListener,
+    _directory: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl StagedSocket {
+    pub(super) fn bind(path: &Path) -> Result<Self> {
+        let directory = private_directory(path)?;
+        ensure_vacant(path)?;
+        // Bind below an owner-only directory, with a name short enough not to
+        // reduce the supported Unix path length of run/gateway.sock.
+        let staging = tempfile::Builder::new()
+            .prefix(".g")
+            .rand_bytes(6)
+            .tempdir_in(directory)?;
+        fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
+        let staged_socket = staging.path().join("s");
+        let listener = UnixListener::bind(&staged_socket).context("Binding private Gateway socket")?;
+        fs::set_permissions(&staged_socket, fs::Permissions::from_mode(0o600))?;
+        let stat = fs::symlink_metadata(&staged_socket)?;
         ensure!(
-            stat.file_type().is_socket() && stat.uid() == nix::unistd::geteuid().as_raw(),
-            "Gateway endpoint is not an owned Unix socket"
+            stat.file_type().is_socket()
+                && stat.uid() == nix::unistd::geteuid().as_raw()
+                && stat.mode() & 0o777 == 0o600,
+            "Gateway endpoint is not a private owned Unix socket"
         );
         Ok(Self {
-            path: path.to_owned(),
-            dev: stat.dev(),
-            ino: stat.ino(),
+            identity: SocketIdentity {
+                path: path.to_owned(),
+                dev: stat.dev(),
+                ino: stat.ino(),
+            },
+            listener,
+            _directory: staging,
+            path: staged_socket,
         })
     }
 
-    pub(super) fn secure(&self, store: &Store) -> Result<()> {
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+    pub(super) fn publish(self, store: &Store) -> Result<(UnixListener, SocketIdentity)> {
+        let socket = self.identity;
+        // Keep an existing endpoint and its record intact even if a path
+        // appeared during spool recovery.
+        ensure_vacant(&socket.path)?;
+        // Record the inode under the lifetime lock before publishing it so
+        // a process exit cannot leave an unrecognized endpoint.
         store.set_meta(
             "gateway:socket",
-            &json!({"pid":std::process::id(), "dev":self.dev, "ino":self.ino}).to_string(),
-        )
+            &json!({"pid":std::process::id(), "dev":socket.dev, "ino":socket.ino}).to_string(),
+        )?;
+        renameat_with(CWD, &self.path, CWD, &socket.path, RenameFlags::NOREPLACE)
+            .context("Publishing private Gateway socket")?;
+        Ok((self.listener, socket))
     }
+}
 
+impl SocketIdentity {
     pub(super) fn unlink(&self) -> Result<()> {
         match fs::symlink_metadata(&self.path) {
             Ok(stat) if stat.dev() == self.dev && stat.ino() == self.ino => {
@@ -77,7 +116,15 @@ impl SocketIdentity {
     }
 }
 
-pub(super) fn private_directory(socket_path: &Path) -> Result<()> {
+fn ensure_vacant(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => bail!("Gateway socket path already exists"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn private_directory(socket_path: &Path) -> Result<&Path> {
     let directory = socket_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Gateway socket has no parent directory"))?;
@@ -88,7 +135,7 @@ pub(super) fn private_directory(socket_path: &Path) -> Result<()> {
             && stat.mode() & 0o777 == 0o700,
         "Gateway socket directory is not private and owned"
     );
-    Ok(())
+    Ok(directory)
 }
 
 pub(super) async fn serve(

@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, env, error::Error, fmt::Write as _, fs, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    const CATALOG: &str = "../src/messenger-command-catalog.json";
+    const CATALOG: &str = "../src/messaging/messenger-command-catalog.json";
     const PACKAGE: &str = "../package.json";
     println!("cargo:rerun-if-changed={CATALOG}");
     println!("cargo:rerun-if-changed={PACKAGE}");

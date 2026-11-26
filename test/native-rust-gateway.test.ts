@@ -1,39 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
 import { test } from "bun:test";
-import type { GatewayRestartRecord, Inbound, OutputRecord, Route } from "../src/contracts";
-import { requireGateway } from "../src/gateway-native";
-import type { GatewayStatus } from "../src/gateway-wire";
+import type { GatewayRestartRecord } from "../src/contracts";
+import { requireGateway } from "../src/gateway/gateway-native";
+import type { GatewayStatus } from "../src/gateway/gateway-wire";
 import { waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
-import { gatewayFixture, type Head, until } from "./fixtures/native-rust-gateway";
+import { type Head, until } from "./fixtures/native-rust-gateway";
+import {
+  headInput, input, ledger, meta, sendReceipts, verifyDelivery, verifyTranscript, withNativeRustGateway, type NativeRustGateway,
+} from "./fixtures/native-rust-gateway-assertions";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
-const route: Route = { platform: "discord", accountId: "2", authorityId: "1", guildId: "3", channelId: "4", threadId: null };
-type SendReceipt = { readonly remoteId: string; readonly output: OutputRecord };
-type NativeRustGateway = ReturnType<typeof gatewayFixture>;
-
-async function withNativeRustGateway(proof: (fixture: NativeRustGateway) => Promise<void>): Promise<void> {
-  const root = await mkdtemp(join(await realpath("/tmp"), "osrg-"));
-  const fixture = gatewayFixture(root);
-  let succeeded = false;
-  try {
-    await mkdir(fixture.home, { mode: 0o700 });
-    const preflight = await fixture.sdk("prepare");
-    console.log(preflight.stdout.trim());
-    assert(!existsSync(fixture.sessionFile), "Initial startup must materialize its own stock OMP session");
-    await proof(fixture);
-    succeeded = true;
-  } catch (error) {
-    throw new Error(`Native Rust Gateway proof failed; retained config, SQLite and private logs: ${root}`, { cause: error });
-  } finally {
-    await fixture.cleanup(succeeded);
-    if (succeeded) await rm(root, { recursive: true, force: true });
-  }
-}
 
 function sampleIdleMemory(gatewayPid: number, head: Head): void {
   if (process.env.OMP_TEST_GATEWAY_IDLE_RSS !== "1") return;
@@ -67,62 +47,6 @@ function sampleIdleMemory(gatewayPid: number, head: Head): void {
     return { pid, rssKiB, ...(footprints.has(pid) ? { darwinTopMem: footprints.get(pid) } : {}) };
   };
   console.log(JSON.stringify({ idleMemory: { gateway: role(gatewayPid), rustOwner: role(head.ownerPid), stockOmp: role(head.pid) } }));
-}
-
-function input(id: string, text: string): Inbound {
-  return { id, messageId: id, route, text, receivedAt: Date.now(), attachments: [] };
-}
-
-const headInput = (id: string) => input(id, `/head Native lifecycle request ${id}`);
-
-function ledger<T>(fixture: NativeRustGateway, inspect: (db: Database) => T): T {
-  const db = new Database(join(fixture.root, "coordination.sqlite"), { readonly: true, strict: true });
-  try { return inspect(db); }
-  finally { db.close(); }
-}
-
-function meta(db: Database, key: string): string | undefined {
-  return db.query<{ value: string }, [string]>("SELECT value FROM metadata WHERE key=?").get(key)?.value;
-}
-
-async function sendReceipts(fixture: NativeRustGateway): Promise<readonly SendReceipt[]> {
-  return (await readFile(join(fixture.root, "adapter-output.jsonl"), "utf8")).trim().split("\n")
-    .map((line): SendReceipt => JSON.parse(line));
-}
-
-async function verifyDelivery(fixture: NativeRustGateway, id: string, effectId?: string): Promise<string> {
-  const output = await until(() => ledger(fixture, db => {
-    const state = db.query<{ state: string }, [string]>("SELECT state FROM inputs WHERE id=?").get(id)?.state;
-    const rows = db.query<{ id: string; state: string; remote_id: string | null }, [string, string | null, string | null]>(
-      "SELECT id,state,remote_id FROM outputs WHERE source_id=? AND (? IS NULL OR id=?)").all(id, effectId ?? null, effectId ?? null);
-    assert(rows.length <= 1, `Request ${id} delivered multiple replies for ${effectId ?? "its model turn"}`);
-    const [row] = rows;
-    if (state === "done" && row?.state === "sent") return row;
-  }), `durable input completion and sent output for ${effectId ?? id}`);
-  await until(() => ledger(fixture, db => {
-    const event = db.query<{ delivery_error: string | null; delivered: number }, [string]>(
-      "SELECT delivery_error,delivered_at IS NOT NULL AS delivered FROM gateway_events WHERE identity=?").get(`message:${id}`);
-    if (event?.delivered === 1) {
-      assert.equal(event.delivery_error, null);
-      return event;
-    }
-  }), `accepted native Gateway ingress receipt for ${id}`);
-  const seen = (await sendReceipts(fixture)).filter(receipt =>
-    receipt.output.sourceId === id && (!effectId || receipt.output.id === effectId));
-  assert.equal(seen.length, 1);
-  const [receipt] = seen;
-  assert(receipt);
-  assert.deepEqual({ id: receipt.output.id, remoteId: receipt.remoteId,
-    route: receipt.output.route, replyTo: receipt.output.replyTo },
-  { id: output.id, remoteId: output.remote_id, route, replyTo: { route, messageId: id } });
-  return receipt.output.text;
-}
-
-async function verifyTranscript(fixture: NativeRustGateway, heads: readonly Head[], requests: readonly string[]): Promise<void> {
-  assert.deepEqual(JSON.parse((await fixture.sdk("transcript")).stdout), {
-    requests,
-    shutdowns: heads.map(({ pid, sessionId }) => ({ pid, sessionId, networkAttempts: 0 })),
-  });
 }
 
 async function withNativeSettingsLock(fixture: NativeRustGateway, config: string, proof: () => Promise<void>): Promise<void> {
@@ -206,7 +130,7 @@ nativeTest("authorized messenger /restart accepts compatible config drift and ha
 
     // Change a real native launch setting after the original daemon loaded it.
     const originalConfig = await readFile(fixture.config, "utf8");
-    const nextConfig = JSON.stringify({ ...JSON.parse(originalConfig), maxSubagents: 4 });
+    const nextConfig = JSON.stringify({ ...JSON.parse(originalConfig), maxSubagents: 4, headIdleMs: 0 });
     assert.notEqual(nextConfig, originalConfig);
     await writeFile(fixture.config, nextConfig);
     const nativeConfig = join(fixture.root, "agent", "config.yml");

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
-import { HostConnection } from "../../src/host";
+import { HostConnection } from "../../src/omp/host";
 import superagentExtension from "../../src/extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { nativeToolExchanges, nativeToolTurn } from "./native-tool-transport";

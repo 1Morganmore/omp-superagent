@@ -29,18 +29,26 @@ pub async fn serve(
     let mut interrupt = signal(SignalKind::interrupt())?;
     let service = Arc::new(Lifecycle::open(lifecycle, request).await?);
     service.prepare(request).await?;
-    let adapters = adapters(config, service.store())?;
+    let store = service.store();
+    let adapters = adapters(config, store.clone())?;
     service.set_event_notifier(adapters.changed.clone());
     let hub = Arc::new(server::Hub::new(
-        service.store(),
+        store.clone(),
         service.clone(),
         adapters.clone(),
     ));
-    let server = Server::listen(&state_dir.join("run/gateway.sock"), hub.clone()).await?;
-    if let Err(e) = adapters.start().await {
-        server.close().await?;
-        return Err(e);
-    }
+    service.set_controller(Arc::downgrade(&hub));
+    // An existing HEAD reconnects as soon as this endpoint appears, before
+    // activate() runs. It must never restore cards or read history through a
+    // partially authenticated adapter set. Ingress still waits for /ready.
+    adapters.start().await?;
+    let server = match Server::listen(&state_dir.join("run/gateway.sock"), hub.clone()).await {
+        Ok(server) => server,
+        Err(error) => {
+            adapters.stop().await.context("Stopping adapters after Gateway socket startup failed")?;
+            return Err(error);
+        }
+    };
     service.set_transports_ready(true);
     // Keep stop admission independent from slow startup/monitor probes, but
     // never cancel a lifecycle future halfway through an owned process spawn.
@@ -68,7 +76,12 @@ pub async fn serve(
                 biased;
                 _ = service.shutdown_requested() => break,
                 _ = tick.tick() => {
-                    if service.monitor(hub.head_ready()).await.is_err() { eprintln!("Gateway HEAD ownership requires reconciliation"); }
+                    if service.monitor(hub.head_ready(), hub.admission_ready()).await.is_err() { eprintln!("Gateway HEAD ownership requires reconciliation"); }
+                }
+                _ = store.ingress_changed() => {
+                    if service.wake_on_ingress().await.is_err() {
+                        eprintln!("Gateway HEAD wake requires reconciliation");
+                    }
                 }
             }
         }

@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { Routes } from "discord.js";
 import { homepage, version } from "../package.json";
 import { main } from "../src/cli";
-import type { Config } from "../src/config";
-import { registerDiscordCommands } from "../src/discord-command-registration";
+import type { Config } from "../src/config/config";
+import { registerDiscordCommands } from "../src/messaging/discord-command-registration";
 import { DISCORD_COMMANDS } from "./fixtures/discord-commands";
 import { loopbackOperator } from "./fixtures/operator";
 

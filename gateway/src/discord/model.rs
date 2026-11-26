@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 
 use super::{Effect, EffectError};
 
+const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+
 pub(super) fn read<'de, T: Deserialize<'de>>(value: &'de Value) -> Effect<T> {
     T::deserialize(value).map_err(|_| EffectError::rejected("Invalid Discord effect arguments"))
 }
@@ -17,7 +19,14 @@ pub(super) fn snowflake(id: &str) -> bool {
 
 pub(super) fn snowflake_time(id: &str) -> Option<u64> {
     let value = id.parse::<u64>().ok()?;
-    snowflake(id).then_some((value >> 22) + 1_420_070_400_000)
+    snowflake(id).then_some((value >> 22) + DISCORD_EPOCH_MS)
+}
+
+pub(super) fn snowflake_before(epoch_micros: i64) -> Option<u64> {
+    // A snowflake gives time only to the millisecond. Exclude the whole
+    // boundary millisecond rather than admitting a possible later message.
+    let millis = u64::try_from(epoch_micros.div_euclid(1_000)).ok()?;
+    millis.checked_sub(DISCORD_EPOCH_MS)?.checked_mul(1 << 22)
 }
 
 pub(super) fn utf16(value: &str) -> usize {

@@ -5,7 +5,7 @@ import type { WebClientOptions } from "@slack/web-api";
 import { DiscordMessenger } from "./oracles/bun-gateway/discord.ts";
 import { SlackMessenger, type SlackMessengerOptions } from "./oracles/bun-gateway/slack.ts";
 import { TelegramMessenger } from "./oracles/bun-gateway/telegram.ts";
-import { DeliveryError } from "../src/delivery.ts";
+import { DeliveryError } from "../src/messaging/delivery.ts";
 import type { Route } from "../src/contracts.ts";
 
 // Only SDK transport boundaries are simulated. No bot, webhook, or socket is

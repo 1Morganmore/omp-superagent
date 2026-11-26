@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { runRestrictedGroup } from "../src/group-runner";
+import { runRestrictedGroup } from "../src/group/group-runner";
 import { nativeTestArgv } from "./fixtures/native-command";
 
 const wireSchema = Type.Object({

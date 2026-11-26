@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "../src/config";
-import { MESSENGER_COMMANDS } from "../src/messenger-commands";
-import { registerSlackCommands } from "../src/slack-command-registration";
+import type { Config } from "../src/config/config";
+import { MESSENGER_COMMANDS } from "../src/messaging/messenger-commands";
+import { registerSlackCommands } from "../src/messaging/slack-command-registration";
 import { loopbackOperator } from "./fixtures/operator";
 
 const teamId = "T123456";

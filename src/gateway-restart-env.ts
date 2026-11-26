@@ -1,9 +1,9 @@
 // One shot, under the recorded restart-runner PID. Resolve FILE.env with the
 // same private-file checks as `start`; never serialize tokens to argv or pipes.
 import { resolve } from "node:path";
-import { loadConfigSnapshot, requireMessengerCredentials } from "./config";
-import { loadCredentials } from "./credentials";
-import { requireGateway } from "./gateway-native";
+import { loadConfigSnapshot, requireMessengerCredentials } from "./config/config";
+import { loadCredentials } from "./config/credentials";
+import { requireGateway } from "./gateway/gateway-native";
 
 const [file, request, originalStateDir, ...extra] = process.argv.slice(2);
 if (!file || !request || !originalStateDir || extra.length) throw new Error("Missing restart identity");

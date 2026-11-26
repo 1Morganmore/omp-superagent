@@ -1,13 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { hostPaths, type Config } from "../src/config";
+import { hostPaths, type Config } from "../src/config/config";
 import { physicalRoute } from "../src/contracts";
 import type { Inbound, Lane, Messenger, OutputRecord, Route } from "../src/contracts";
-import { DeliveryError } from "../src/delivery";
-import { isLaneWatchNotice, LaneWatcher } from "../src/lane-watch";
-import { Superagent, type RuntimeHost, type RuntimeState } from "../src/runtime";
-import { Store } from "../src/store";
+import { DeliveryError } from "../src/messaging/delivery";
+import { isLaneWatchNotice, LaneWatcher } from "../src/lane/lane-watch";
+import { Superagent } from "../src/runtime/controller";
+import type { RuntimeHost, RuntimeState } from "../src/runtime/native-frames";
+import { Store } from "../src/storage/store";
 
 const origin: Route = { platform: "discord", accountId: "2", authorityId: "1", guildId: "3", channelId: "4",
   threadId: null, topicId: "watch-topic" };

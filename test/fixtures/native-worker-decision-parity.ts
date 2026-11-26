@@ -2,9 +2,9 @@ import { expect } from "bun:test";
 import { strict as assert } from "node:assert";
 import { EventEmitter, once } from "node:events";
 import { physicalRoute, type Approval, type DialogResponse, type Inbound, type Lane, type OutputRecord } from "../../src/contracts";
-import type { Superagent } from "../../src/runtime";
-import type { Store } from "../../src/store";
-import { lookupWorker, workerConnect, workerRef } from "../../src/worker-wire";
+import type { Superagent } from "../../src/runtime/controller";
+import type { Store } from "../../src/storage/store";
+import { lookupWorker, workerConnect, workerRef } from "../../src/worker/worker-wire";
 import { RecordingMessenger } from "./model-native-runtime";
 
 export class DecisionParityMessenger extends RecordingMessenger {

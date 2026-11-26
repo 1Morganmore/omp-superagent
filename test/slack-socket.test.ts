@@ -9,7 +9,7 @@ import { LogLevel } from "@slack/web-api";
 import { SocketModeClient } from "@slack/socket-mode";
 import type { Inbound } from "../src/contracts.ts";
 import { SlackMessenger } from "./oracles/bun-gateway/slack.ts";
-import { Store } from "../src/store.ts";
+import { Store } from "../src/storage/store.ts";
 
 type SocketData = { fixture: true };
 

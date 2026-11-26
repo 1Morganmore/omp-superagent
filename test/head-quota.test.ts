@@ -8,7 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgRetryUsageReservePct } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { readHeadQuota } from "../src/head-quota";
+import { readHeadQuota } from "../src/runtime/head-quota";
 
 test.each([
   { reason: "fresh eligible quota", reportAge: 0, failureAge: 1_000, allowed: true, permitted: true, expected: true },

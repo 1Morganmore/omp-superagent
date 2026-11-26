@@ -4,9 +4,9 @@ import { resolve } from "node:path";
 import type { ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import { type LaneEvidence, type LaneReportEvent, type ScopeReviewReceipt, parseLaneReportResult } from "./lane-report";
-import { registerResultAttach, RESULT_ATTACH_TOOL } from "./result-attachment";
-import { registerDecisionAsk } from "./decision-tool";
+import { type LaneEvidence, type LaneReportEvent, type ScopeReviewReceipt, parseLaneReportResult } from "./lane/lane-report";
+import { registerResultAttach, RESULT_ATTACH_TOOL } from "./messaging/result-attachment";
+import { registerDecisionAsk } from "./lane/decision-tool";
 
 const instructions = readFileSync(new URL("../skills/lane/SKILL.md", import.meta.url), "utf8");
 const nonempty = Type.String({ minLength: 1, pattern: "\\S" });

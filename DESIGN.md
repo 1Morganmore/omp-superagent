@@ -32,13 +32,18 @@ or lanes. This is not a multitenant service or an OS sandbox.
 
 ## Ownership and source map
 
+`src/` keeps the executable CLI and the extension/helper entry points that installed
+launchers and managed Hosts load by path. Their implementations and shared modules
+are grouped by feature below it. `runtime/` owns HEAD coordination; `storage/`
+owns its durable state. Moving a module does not transfer authority to the Gateway.
+
 | Component | Responsibility | Entry points |
 | --- | --- | --- |
-| CLI and setup | Configuration, credentials, doctor, start/status/stop and one-shot macOS registration. | [CLI](src/cli.ts), [config](src/config.ts), [setup](src/setup.ts), [credentials](src/credentials.ts), [autostart](src/autostart.ts) |
-| Gateway | One Rust process authenticates the configured adapters, admits intake durably, proxies scoped messenger effects and supervises exactly one head. It never connects to lane RPC or decides work. | [Gateway](gateway/src/main.rs), [server](gateway/src/server.rs), [ingress ledger](gateway/src/store.rs), [client](src/gateway-client.ts), [adapter hub](gateway/src/adapter.rs) |
-| Head | Its controller owns intake, placement, approvals and delivery. The shared model handles ordinary unbound requests, explicit `/head` work and manager coordination, not ordinary bound-topic prompts or their answers. | [Head extension](src/extension.ts), [runtime](src/runtime.ts), [coordination store](src/store.ts) |
-| Lane | Runs work in its own native session with its own cwd, model and context. Topic answers go through the controller outbox without a shared-model synthesis turn; manager handoffs report to the head. Neither sends directly to a messenger. | [Lane extension](src/lane-extension.ts), [lane reporting](src/lane-report.ts), [role instructions](skills/lane/SKILL.md) |
-| Host | One installed OMP process owns each managed root session. A detached Rust process owns its stdin/stdout and private reconnectable socket; it does not run inference, tools, or supervision policy. | [Host client](src/host.ts), [stdio owner](host-owner/src/main.rs), [SDK helper](src/host-sdk-helper.ts), [native lifecycle extension](src/host-extension.ts) |
+| CLI and setup | Configuration, credentials, doctor, start/status/stop and one-shot macOS registration. | [CLI](src/cli.ts), [config](src/config/config.ts), [setup](src/operator/setup.ts), [credentials](src/config/credentials.ts), [autostart](src/operator/autostart.ts) |
+| Gateway | One Rust process authenticates the configured adapters, admits intake durably, proxies scoped messenger effects and supervises exactly one head. It never connects to lane RPC or decides work. | [Gateway](gateway/src/main.rs), [server](gateway/src/server.rs), [ingress ledger](gateway/src/store.rs), [client](src/gateway/gateway-client.ts), [adapter hub](gateway/src/adapter.rs) |
+| Head | Its controller owns intake, placement, approvals and delivery. The shared model handles ordinary unbound requests, explicit `/head` work and manager coordination, not ordinary bound-topic prompts or their answers. | [Head extension](src/extension.ts), [runtime](src/runtime/controller.ts), [coordination store](src/storage/store.ts) |
+| Lane | Runs work in its own native session with its own cwd, model and context. Topic answers go through the controller outbox without a shared-model synthesis turn; manager handoffs report to the head. Neither sends directly to a messenger. | [Lane extension](src/lane-extension.ts), [lane reporting](src/lane/lane-report.ts), [role instructions](skills/lane/SKILL.md) |
+| Host | One installed OMP process owns each managed root session. A detached Rust process owns its stdin/stdout and private reconnectable socket; it does not run inference, tools, or supervision policy. | [Host client](src/omp/host.ts), [stdio owner](host-owner/src/main.rs), [SDK helper](src/host-sdk-helper.ts), [native lifecycle extension](src/host-extension.ts) |
 
 OMP owns transcripts, tool history, goals, child tasks, provider auth, and native
 execution records. Superagent stores the coordination facts needed to recover work:
@@ -101,6 +106,45 @@ part of the native build.
    registers a per-instance one-shot next-login invocation of the same `start`;
    no `KeepAlive`, immediate activation, or second supervisor. `uninstall` removes
    only future startup. There is no Linux service installer or Windows support.
+
+### Idle HEAD hibernation
+
+`headIdleMs` controls how long a fully idle HEAD stays resident (default 30
+minutes; `0` disables hibernation). It is independent of lane eviction. Only
+the Host and its stdio owner exit: the same Rust Gateway keeps its messenger
+connections and durable ingress. A registered but unloaded lane does not
+need to be started to park HEAD. An active or unverified lane, scheduled work,
+pending approval, unresolved delivery, or other work needing the controller
+prevents hibernation.
+
+If both checks are due and HEAD also qualifies for the existing high-context
+rotation, rotation takes precedence. Hibernation itself never selects a new journal.
+
+Before reporting `head.hibernation.stage: "sleeping"`, the Gateway fences
+dispatch and verifies the original Host's clean journal receipt and both
+process exits. A surviving older Host must explicitly attest to hibernation;
+an ordinary rotation response is not sufficient. An authenticated event arriving
+across this boundary stays in the Gateway queue. On demand, one replacement
+reopens the **same** journal in the **same native profile** and verifies the
+model selection before dispatch resumes. The helper and the live Host verify
+both the agent directory and the native data and session-discovery roots.
+The Gateway does not expose its controller socket until all configured adapters
+have authenticated. A wake stays `launching` until the verified replacement's
+connected controller reaches `/ready`; probing the native PID is not completion.
+If the config changes during wake, restoring the exact reserved bytes allows
+that controller to continue without a second launch or replay. An older checkpoint without an
+attested profile remains held: a matching configuration hash or an operator
+stop cannot reconstruct its original profile identity.
+If the Host starts before its Gateway, it waits to attach; this never retries
+a prompt or a messenger effect.
+A fresh Discord login after a lost session or a Slack Socket Mode reconnect
+also wakes HEAD to check for messages missed offline. A replayed Discord
+connection or Telegram's own polling recovery does not require this wake.
+An ordinary wake does not give history priority over already queued messages.
+An actual history gap requires a scan covering the gap, not one that passed
+the route before the reconnect. Neither a CLI `status` read nor an explicit
+Gateway stop is demand for a Host. A proved failure to create the child releases
+only that launch reservation; an uncertain shutdown or launch stays fenced.
 
 ### Idle head rotation
 
@@ -175,7 +219,7 @@ lifecycle control, not a model turn. It can be admitted while the head is busy:
 
 The [package manifest](package.json) pins the published SDK to **19.2.1**, with
 upstream [v19.2.1 source](https://github.com/can1357/oh-my-pi/commit/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac).
-That pin is not a CLI version allowlist. [CLI inspection](src/installed-omp.ts)
+That pin is not a CLI version allowlist. [CLI inspection](src/omp/installed-omp.ts)
 checks CLI identity, public `rpc-ui`, resume, extension and model flags, and the
 advertised process interface. A process reuses an inspection only while the
 configured executable's resolved regular file (path, device, inode, size, mtime,

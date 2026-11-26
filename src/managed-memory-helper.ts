@@ -1,6 +1,6 @@
 // Configuration only. Never import the SDK entry point, account storage, or a backend.
-import { canEnableGlobalMemory, effectiveManagedMemory, ensureManagedMemory, parseMemoryConsent, type ManagedMemoryReport } from "./managed-memory";
-import { parseNativeLaunch } from "./native-launch-profile";
+import { canEnableGlobalMemory, effectiveManagedMemory, ensureManagedMemory, parseMemoryConsent, type ManagedMemoryReport } from "./omp/managed-memory";
+import { parseNativeLaunch } from "./omp/native-launch-profile";
 
 const unavailable: ManagedMemoryReport = { memory: { status: "unknown" }, updated: false };
 const [operation, ...args] = process.argv.slice(2);

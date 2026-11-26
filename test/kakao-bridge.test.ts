@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { loadConfig } from "../src/config";
+import { loadConfig } from "../src/config/config";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

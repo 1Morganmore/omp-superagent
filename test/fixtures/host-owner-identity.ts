@@ -1,6 +1,6 @@
 import { dlopen } from "bun:ffi";
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { hostOwnerExecutable } from "../../src/host-owner-path";
+import { hostOwnerExecutable } from "../../src/omp/host-owner-path";
 
 type FixtureOwnerIdentity = { readonly manifest: string; readonly start: string };
 

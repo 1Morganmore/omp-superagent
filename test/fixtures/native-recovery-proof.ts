@@ -3,10 +3,10 @@ import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
-import { hostPaths, type Config } from "../../src/config";
+import { hostPaths, type Config } from "../../src/config/config";
 import type { Inbound, Messenger, OutputRecord, Route } from "../../src/contracts";
 import type { GatewayService } from "../oracles/bun-gateway/gateway";
-import { HostConnection } from "../../src/host";
+import { HostConnection } from "../../src/omp/host";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 interface Event {

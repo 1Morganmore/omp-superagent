@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parsePrRef, prKey } from "../src/pr-github";
+import { parsePrRef, prKey } from "../src/pr/pr-github";
 
 const head = "a".repeat(40);
 const old = "b".repeat(40);
@@ -59,7 +59,7 @@ else process.stdout.write(reply.raw ?? JSON.stringify(reply.body));
   const runner = join(directory, "read.ts");
   await writeFile(runner, `
 import { watch } from "node:fs";
-import { readPrSnapshot } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr-github.ts"))};
+import { readPrSnapshot } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr/pr-github.ts"))};
 const controller = new AbortController();
 const cancel = process.argv[3] === "cancel";
 const observer = cancel ? watch(${JSON.stringify(directory)}, (_event, name) => {

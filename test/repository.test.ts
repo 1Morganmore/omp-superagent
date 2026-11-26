@@ -16,7 +16,7 @@ test.each([false, true])("repository discovery ignores inherited Git selection (
       if (await git.exited !== 0) throw new Error(error);
     }
     const child = Bun.spawn([process.execPath, "-e", `
-      import { repositoryRoot } from ${JSON.stringify(resolve(import.meta.dir, "../src/repository.ts"))};
+      import { repositoryRoot } from ${JSON.stringify(resolve(import.meta.dir, "../src/operator/repository.ts"))};
       console.log(JSON.stringify([await repositoryRoot(${JSON.stringify(nested)}), await repositoryRoot(${JSON.stringify(outside)})]));
     `], {
       env: { ...process.env, GIT_DIR: join(first, ".git"),

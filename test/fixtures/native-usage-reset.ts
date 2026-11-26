@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Config } from "../../src/config";
-import { listOmpUsageResets, redeemOmpUsageReset } from "../../src/omp-usage";
+import type { Config } from "../../src/config/config";
+import { listOmpUsageResets, redeemOmpUsageReset } from "../../src/omp/omp-usage";
 
 const [executable, profile] = process.argv.slice(2);
 const root = process.cwd();

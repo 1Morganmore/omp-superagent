@@ -4,11 +4,11 @@ import { chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { DiscordPurposeRequest, GatewayRestartRecord, GatewayRestartRequest, Inbound, Route } from "../../../src/contracts";
-import { routeKey } from "../../../src/contracts";
-import { authorizeDiscordPurpose } from "../../../src/discord-context";
-import { DeliveryError } from "../../../src/delivery";
-import { telegramCommandBlocked } from "../../../src/messenger-commands";
-import type { GatewayEvent, GatewayReceipt, QueuedEvent } from "../../../src/gateway-wire";
+import { physicalRouteKey, routeKey } from "../../../src/contracts";
+import { authorizeDiscordPurpose } from "../../../src/messaging/discord-context";
+import { DeliveryError } from "../../../src/messaging/delivery";
+import { telegramCommandBlocked } from "../../../src/messaging/messenger-commands";
+import type { GatewayEvent, GatewayReceipt, QueuedEvent } from "../../../src/gateway/gateway-wire";
 import type { TelegramRedelivery } from "./telegram";
 
 interface EventRow {
@@ -27,6 +27,7 @@ const nextEvent = `SELECT sequence,data,attempted_at FROM gateway_events WHERE s
   SELECT CASE WHEN head.delivery_error='unresolved' THEN COALESCE((
     SELECT sequence FROM gateway_events INDEXED BY gateway_events_recovery
     WHERE delivered_at IS NULL AND (${recoveryRank}) IS NOT NULL
+      AND json_extract(data,'$.historyDeferred') IS NOT 1
     ORDER BY (${recoveryRank}),sequence LIMIT 1
   ),head.sequence) ELSE head.sequence END
   FROM (SELECT sequence,delivery_error FROM gateway_events
@@ -41,7 +42,7 @@ function decodeEvent(row: EventRow): QueuedEvent {
 function identity(event: GatewayEvent): unknown {
   if (event.kind !== "message") return event;
   const { receivedAt: _, reply: _reply, unresolvedReply: _unresolved, discordContext: _context, routingText: _routingText, ...input } = event.input;
-  return { ...event, input: { ...input, attachments: input.attachments.map(file => {
+  return { kind: event.kind, input: { ...input, attachments: input.attachments.map(file => {
     let location = file.url;
     try {
       const url = new URL(location);
@@ -180,7 +181,8 @@ export class GatewayStore {
       : `reconnect:${crypto.randomUUID()}`;
     return this.db.transaction(() => {
       // Repeated unresolved admissions must not grow a reconnect poison queue.
-      if (event.kind === "reconnect" && this.db.query("SELECT 1 FROM gateway_events WHERE delivered_at IS NULL AND data = ?")
+      if (event.kind === "reconnect" && !event.historyRecovery
+        && this.db.query("SELECT 1 FROM gateway_events WHERE delivered_at IS NULL AND data = ?")
         .get(JSON.stringify(event))) return false;
       const existing = this.db.query("SELECT data FROM gateway_events WHERE identity = ?").get(key) as { data: string } | null;
       if (existing) {
@@ -188,9 +190,51 @@ export class GatewayStore {
           throw new Error("Gateway ingress identity conflict");
         return false;
       }
-      this.db.query("INSERT INTO gateway_events(identity,data,received_at) VALUES (?,?,?)")
+      const inserted = this.db.query("INSERT INTO gateway_events(identity,data,received_at) VALUES (?,?,?)")
         .run(key, JSON.stringify(event), Date.now());
+      if (event.kind === "reconnect" && event.historyRecovery) this.setMeta("gateway:history-sequence", String(inserted.lastInsertRowid));
       return true;
+    }).immediate();
+  }
+
+  historyFence(sequence: number, platform: string): number | null {
+    const row = this.db.query<{ before: number }, [number, string]>(`
+      SELECT COALESCE(json_extract(data,'$.historyBeforeUs'), received_at*1000) AS before
+      FROM gateway_events
+      WHERE sequence=?1 AND delivered_at IS NULL AND identity LIKE 'reconnect:%'
+        AND json_extract(data,'$.historyRecovery')=1
+        AND (json_extract(data,'$.historyPlatform') IS NULL OR json_extract(data,'$.historyPlatform')=?2)
+    `).get(sequence, platform);
+    return row?.before ?? null;
+  }
+
+  orderedHistory(route: Route, sequence: number | undefined, history: Inbound[]): Inbound[] {
+    return this.db.transaction(() => {
+      if (sequence !== undefined && this.historyFence(sequence, route.platform) === null)
+        throw new Error("History gap is no longer pending");
+      const queued = this.db.query<{ delivered_at: number | null; delivery_error: string | null }, [string]>(
+        "SELECT delivered_at,delivery_error FROM gateway_events WHERE identity=?",
+      );
+      const pending = this.db.query<{ data: string }, []>("SELECT data FROM gateway_events WHERE delivered_at IS NULL AND identity LIKE 'message:%'")
+        .all().map(({ data }) => {
+          const event: GatewayEvent = JSON.parse(data);
+          return event.kind === "message" ? event.input : null;
+        });
+      const physical = physicalRouteKey(route);
+      return history.filter(input => {
+        if (physicalRouteKey(input.route) !== physical || input.messageId === null)
+          throw new Error("History crossed physical routes or lacks a message ID");
+        const identity = `message:${input.id}`;
+        const exact = queued.get(identity);
+        if (exact?.delivered_at === null || exact?.delivery_error === "rejected") return false;
+        if (!pending.some(live => live !== null && live.messageId === input.messageId && physicalRouteKey(live.route) === physical)) return true;
+        if (sequence !== undefined) {
+          const event: GatewayEvent = { kind: "message", input, historyDeferred: true };
+          this.db.query("INSERT OR IGNORE INTO gateway_events(identity,data,received_at) VALUES (?,?,?)")
+            .run(identity, JSON.stringify(event), Date.now());
+        }
+        return false;
+      });
     }).immediate();
   }
 
@@ -219,6 +263,12 @@ export class GatewayStore {
         "SELECT sequence,data,attempted_at FROM gateway_events WHERE sequence=? AND delivered_at IS NULL",
       ).get(sequence);
     return row ? decodeEvent(row) : null;
+  }
+  reconciliationEvent(barrier: string): QueuedEvent {
+    const row = this.db.query<EventRow, [string]>(`SELECT sequence,data,attempted_at FROM gateway_events
+      WHERE delivered_at IS NULL AND identity LIKE 'reconnect:%' AND json_extract(data,'$.barrier')=?`).get(barrier);
+    if (!row) throw new Error("Gateway reconciliation event is missing");
+    return decodeEvent(row);
   }
   attempt(sequence: number): void {
     this.db.query("UPDATE gateway_events SET attempted_at=COALESCE(attempted_at,?) WHERE sequence=? AND delivered_at IS NULL")

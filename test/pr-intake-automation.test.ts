@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import {
   advancePrIntakeAutomation, prIntakeManualHold, readPrIntakeAutomation,
   type PrIntakeAutomationDeps,
-} from "../src/pr-intake-automation";
-import type { PrIntakeMode } from "../src/pr-intake-mode";
-import type { ReviewRound } from "../src/pr-intake-review";
-import { Store } from "../src/store";
+} from "../src/pr/pr-intake-automation";
+import type { PrIntakeMode } from "../src/pr/pr-intake-mode";
+import type { ReviewRound } from "../src/pr/pr-intake-review";
+import { Store } from "../src/storage/store";
 
 const original = "a".repeat(40), base = "b".repeat(40), fixed = "c".repeat(40);
 const external = "d".repeat(40), merged = "e".repeat(40), another = "f".repeat(40);

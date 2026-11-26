@@ -1,4 +1,4 @@
-import { MESSENGER_COMMANDS } from "../../../src/messenger-commands";
+import { MESSENGER_COMMANDS } from "../../../src/messaging/messenger-commands";
 
 type SlackCommand =
   | { readonly kind: "accepted"; readonly text: string }

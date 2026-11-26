@@ -214,9 +214,13 @@ impl Adapter for Slack {
                     .await?;
                 Ok(json!(route))
             }
-            ("fetchAfter", [route, timestamp]) => Ok(json!(
+            ("fetchAfter", [route, timestamp, fence @ ..]) if fence.len() <= 1 => Ok(json!(
                 self.inner
-                    .fetch_after(decode(route)?, decode(timestamp)?)
+                    .fetch_after(
+                        decode(route)?,
+                        decode(timestamp)?,
+                        fence.first().map(decode::<i64>).transpose()?,
+                    )
                     .await?
             )),
             ("inspectThread" | "updateThread", _) => Err(EffectError::rejected(

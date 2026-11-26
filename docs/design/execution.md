@@ -181,13 +181,18 @@ fenced; the report does not authorize a replay or a move to another lane.
 
 ## Execution budget and Host lifecycle
 
-[`maxHosts`, `maxSubagents`, and `idleMs`](../../src/config.ts) are explicit
+[`maxHosts`, `maxSubagents`, and `idleMs`](../../src/config/config.ts) are explicit
 operator inputs. `maxHosts` includes the head; the per-Host native child
 concurrency budget is `floor(maxSubagents / maxHosts)`. This bounds configured
 execution concurrency, not machine memory, CPU or provider spend. Lanes wait
 durably when slots are full. Prioritize authorized follow-ups; approval and
 stop controls remain reachable. A queued lane, a resident Host, an active turn
 and an accepted work result are different states.
+
+The separate [`headIdleMs` policy](../../DESIGN.md#idle-head-hibernation) can
+unload HEAD when there are no resident lanes or controller obligations. It
+does not reassign the HEAD slot to a lane. The Gateway retains admission,
+not model or lane authority; waking resumes the same journal.
 
 Each resident lane is an independent OMP process. Detaching the head's control
 connection or replacing the head does not end that process. Reconnect only to
@@ -214,8 +219,11 @@ persists its launch fence immediately before the manifest is sent, so a refusal 
 before then still releases the slot. Discovery and preparation have separate deadlines.
 A descendant holding output open cannot extend those deadlines. The owner invokes short-lived
 SDK helpers for operations that depend on stock semantics, including fitting a withdrawn
-queue. After exit, a separate operation [reads the journal](../../src/native-journal.ts)
-without loading an SDK or the launch profile. Only the first physical line, with
+queue. The Gateway reads the [session header](../../native-journal/header.rs) itself.
+After its child exits, the [Rust owner](../../host-owner/src/exit_receipt.rs) verifies
+the journal and publishes the exit receipt without starting Bun or loading an SDK.
+The [resident worker](../../src/omp/native-journal.ts) still reads a header in process.
+Only the first physical line, with
 surrounding whitespace trimmed, may be a title slot. Before the session header
 only JSON whitespace is skipped, not a UTF-8 BOM. Identity lookup stops at the
 header; it does not attest to the body. Exit verification checks the entire
@@ -250,7 +258,7 @@ The [Host extension](../../src/host-extension.ts) uses the exact registered
 where available, or the older public `hasPendingAsyncWork()` where appropriate;
 owned services, child work and unconfirmed completions still need separate
 checks. The configured CLI's advertised process interface selects the read-only
-[OMP 18 broker](../../src/host-broker-services.ts) or [OMP 19 daemon](../../src/host-services.ts)
+[OMP 18 broker](../../src/omp/host-broker-services.ts) or [OMP 19 daemon](../../src/omp/host-services.ts)
 observation path. Do not start or take over their services, treat probe failure
 as an empty result, or invent native service generations for old broker records.
 A terminal service row is not confirmation that its native completion was
@@ -280,7 +288,7 @@ the validated successor. A failure to write at that point fails the restart;
 it does not restart the predecessor or activate adapters. Head and lane extension
 composition must be valid before either launch can persist a fallback.
 
-The [guarded native writer](../../src/native-settings.ts) rechecks the expected
+The [guarded native writer](../../src/omp/native-settings.ts) rechecks the expected
 configuration under the native lock, preserves unrelated settings, and reads
 back the effective value. It does not overwrite stale values, higher-priority
 disables or unsets, or unverified legacy/unknown settings. If enabled memory
@@ -290,7 +298,7 @@ still specifically requires an active, searchable Mnemopi backend on the head.
 
 ### Native discovery and resume
 
-[Native discovery](../../src/native-sessions.ts) publishes symlinks to the
+[Native discovery](../../src/omp/native-sessions.ts) publishes symlinks to the
 original journal and artifact directory in the active profile's native project
 bucket. It does not copy transcripts, transfer a writer lease or wake unloaded
 lanes. Use normal OMP discovery and `/resume`; native rules govern concurrent
@@ -315,7 +323,7 @@ resumes an eligible head goal as described in the [restart contract](../../DESIG
 
 ## Models and presets
 
-[`lane_models`](../../src/lane-models.ts) derives the shortlist from native
+[`lane_models`](../../src/lane/lane-models.ts) derives the shortlist from native
 availability and exact provider/model IDs. Model capabilities and prices are
 catalogue fields, not measured quality, total cost or permission to spend.
 The [model-selection skill](../../skills/head/references/model-selection.md)
@@ -325,7 +333,7 @@ unavailability or failure without inventing a receipt or switching providers.
 Judge usage is native. Runtime enforces exact selection, availability and reason,
 not a mandatory judge call.
 
-At startup, [preset initialization](../../src/native-presets.ts) inspects native
+At startup, [preset initialization](../../src/omp/native-presets.ts) inspects native
 `high`, `middle`, `low` presets. If needed the existing head gets one tracked
 bootstrap turn; do not repeat an uncertain turn after reconnect or restart.
 Create only missing presets and verify native readback before ordinary work
@@ -414,7 +422,7 @@ also requires the model for which the options were shown.
 
 ## Owner-facing reply voice
 
-[SOUL](../../src/soul.ts) is an instance-wide presentation preference, not a
+[SOUL](../../src/omp/soul.ts) is an instance-wide presentation preference, not a
 role, workflow, or OMP profile. The default and the one saved override use
 bounded choices for presentational concept (plain, editorial, or mentoring),
 tone, register, detail, answer order, and emoji. The HEAD
@@ -468,7 +476,7 @@ may select a method inside an already authorized objective without claiming the
 operator selected it. Read the installed skill and preserve its approval and
 artifact ownership requirements.
 
-[Workflow dispatch](../../src/workflow.ts) binds each choice to the original
+[Workflow dispatch](../../src/lane/workflow.ts) binds each choice to the original
 source and an explicit `workflow: {name, reason}` on every workflow-selecting
 `lane_start` or `lane_message`, even when forwarding a user selection. A brief
 or report is not the selection field. Preserve the original text and native
@@ -510,15 +518,15 @@ does not stand in for its missing canonical command.
 
 ## Managed omp-superkit integration
 
-[Preparation](../../scripts/prepare-ulw.ts) runs during `postinstall` or
+[Preparation](../../scripts/prepare-super.ts) runs during `postinstall` or
 `bun run prepare:ulw`, even if OMP is not installed. The
-[declared remote](../../upstream/ulw.json) is the official `omp-superkit`
-repository. [Managed installation](../../src/managed-ulw.ts) and duplicate
+[declared remote](../../upstream/super.json) is the official `omp-superkit`
+repository. [Managed installation](../../src/omp/managed-super.ts) and duplicate
 detection recognize both `omp-superkit` and the legacy `omp-ulw` package ID.
 
 Stage the observed revision and its dependencies in a project-owned immutable
 package. Ignore arbitrary dependency lifecycle scripts; run defined
-materialization and an [offline native prompt-composition probe](../../src/managed-ulw-probe.ts)
+materialization and an [offline native prompt-composition probe](../../src/managed-super-probe.ts)
 for ordinary and explicitly activated operation. For the canonical layout the probe
 checks that the hook uses the canonical directive and pointer paths and that native
 discovery resolves both canonical skills and legacy aliases. An older revision
@@ -548,7 +556,7 @@ discarding custom commands or enabling disabled extensions.
 
 ## Scheduled work and PR observation
 
-- [Cron jobs](../../src/cron-jobs.ts) run through the head's existing maintenance
+- [Cron jobs](../../src/cron/cron-jobs.ts) run through the head's existing maintenance
   loop, not a Gateway scheduler or a second agent. `/cron` is a code-handled
   control scoped to the original owner's full route. `cron_create` requires
   an explicit request in the current admitted owner turn and the native tool
@@ -571,7 +579,7 @@ discarding custom commands or enabling disabled extensions.
   than forwarded to a model, and queued shell output is not sent. Verify any
   previously started legacy run on its original host before resolving it.
   See the [operator reference](../OPERATIONS.en.md#scheduled-jobs-cron) for syntax and controls.
-- [Repository PR intake](../../src/cron-pr-intake.ts) is a typed cron job, not
+- [Repository PR intake](../../src/cron/cron-pr-intake.ts) is a typed cron job, not
   an executable prompt. Only original configured-owner Discord guild parent
   controls enroll a repository. Discovery pins the authenticated GitHub owner
   and repository, filters old/self-authored PRs, and records each offer before
@@ -582,7 +590,7 @@ discarding custom commands or enabling disabled extensions.
   lane; it is not owner input and cannot serve as a source for manager tools.
   No ordinary scheduled prompt, observed PR text or model answer grants authority.
   Older discovery-only registrations remain manual until the owner opts in.
-  [Review control](../../src/pr-intake-review.ts) binds subsequent actions to
+  [Review control](../../src/pr/pr-intake-review.ts) binds subsequent actions to
   that lane, route, enrollment epoch, review input, delivered answer and SHA.
   Static review uses a trusted workspace without a contributor checkout. Unlike
   ordinary coding lanes, this restricted local Host must attest a tool-less
@@ -596,7 +604,7 @@ discarding custom commands or enabling disabled extensions.
   higher stages require an explicit policy or a fresh SHA-bound owner command.
   An uncertain write permits read-only reconciliation, not resubmission. See [operator commands
   and supported GitHub protections](../OPERATIONS.en.md#reviewing-new-external-prs-cron-pr-add).
-- [PR watch](../../src/pr-watch.ts) reads only explicitly registered GitHub PRs
+- [PR watch](../../src/pr/pr-watch.ts) reads only explicitly registered GitHub PRs
   through existing `gh` authentication and GETs. Establish a quiet baseline,
   then record changed observations and their cursor together. Work only while
   the head runtime is available; a watch cannot recover every remote event

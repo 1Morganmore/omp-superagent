@@ -14,12 +14,12 @@ use super::{
     config::{GATEWAY_START_CONFIG_ENV, RUNNER_CONFIG_ENV},
     fs::{EXIT_TIMEOUT, Endpoint, WAIT_SLICE, alive, log, metadata, socket_stat},
     host_launch::ensure_launchable_memory,
+    managed_super::Ulw,
     process::{ChildKind, detached},
     restart_record::{
         self as restart, ACTIVE, FENCE, Fence, HEAD, Plan, Record, SOCKET, STOP, Stage, plan_key,
     },
     stock_ops::inspect_omp,
-    ulw::Ulw,
 };
 
 // Budget for serial session, stock CLI and memory probes (130s combined),

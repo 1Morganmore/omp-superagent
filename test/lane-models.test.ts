@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { codingModels, isLaneModel, laneModelArgument, sameLaneModel } from "../src/lane-models";
+import { codingModels, isLaneModel, laneModelArgument, sameLaneModel } from "../src/lane/lane-models";
 
 test("coding candidates exclude specialized runners and never expose credentials or endpoints", () => {
   const identities = [

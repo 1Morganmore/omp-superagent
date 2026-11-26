@@ -57,6 +57,11 @@ async function receipts(root: string): Promise<FixtureReceipt[]> {
   return result;
 }
 
+export async function fixtureHostLaunches(root: string): Promise<readonly string[]> {
+  const records = await receipts(root);
+  return records.map(record => record.launch).sort();
+}
+
 export async function assertResidentFixtureOwner(root: string, identity: { readonly nativePid: number; readonly ownerPid: number }): Promise<void> {
   const { nativePid, ownerPid } = identity;
   const registration = (await receipts(root)).find(record => record.nativePid === nativePid && record.ownerPid === ownerPid);

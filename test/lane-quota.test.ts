@@ -14,7 +14,7 @@ import { RpcPromptResults } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt
 import type { RpcPromptResultFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { providerRefusalData } from "@oh-my-pi/pi-coding-agent/session/provider-refusal";
 import type { ModelUsageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { headRecoveryEvidence, laneQuotaExhausted, settledLaneReceipt } from "../src/head-recovery";
+import { headRecoveryEvidence, laneQuotaExhausted, settledLaneReceipt } from "../src/runtime/head-recovery";
 
 const codexMessage = "Codex error event: The usage limit has been reached (code=usage_limit_reached)";
 const codexError = { provider: "openai-codex", model: "gpt-5.4", message: codexMessage, retryable: false };

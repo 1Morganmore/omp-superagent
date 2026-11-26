@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{GatewayReceipt, Store, answer_digest};
+use super::{GatewayReceipt, HEAD_ROTATION, HEAD_SESSION_FILE, HibernationChange, Store, answer_digest};
 
 mod recovery;
 
@@ -69,6 +69,189 @@ fn rotation_shutdown_authority_is_refused_after_an_operator_lifecycle_fence() ->
     store.set_meta("head:restart-fence", "{}")?;
     assert!(!store.begin_rotation(None, Some("explicit-stop"), &stopping)?);
     assert!(store.get_meta(super::HEAD_ROTATION)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn hibernation_preserves_same_session_and_holds_later_ingress_in_order_across_reopen() -> Result<()> {
+    let root = StateDir::new()?;
+    let journal = "/saved/sessions/main/rotated/current/session.jsonl";
+    let original = json!({"sessionId":"same","sessionFile":journal,"pid":101,"ownerPid":102,"dev":1,"ino":1});
+    let settings = json!({"modelRoles":{"default":"provider/model"},"defaultThinkingLevel":"high"});
+    let mut plan = json!({"id":"sleep","mode":"hibernate","stage":"stopping","original":original,
+        "sessionFile":journal,"stopBoundary":null,"replacementSessionId":null,"replacementOwnerPid":null,
+        "attestation":{"generation":3,"selection":{"modelSettings":settings}}});
+    let stopping = plan.to_string();
+    {
+        let store = Store::open(&root.0)?;
+        store.set_meta(HEAD_SESSION_FILE, journal)?;
+        store.set_meta("main:sessionId", "same")?;
+        store.set_meta("main:generation", "3")?;
+        store.set_meta("head:model-settings:same", r#"{"settings":{},"clearedRoles":["advisor"]}"#)?;
+        store.set_meta("gateway:head", &original.to_string())?;
+        store.begin_effect("group-reply", "sendGroup", &[])?;
+        assert!(!store.begin_rotation(None, None, &stopping)?);
+        store.finish_effect("group-reply", &json!({"ok":true}))?;
+        assert!(store.begin_rotation(None, None, &stopping)?);
+        assert!(store.begin_effect("late-send", "send", &[]).is_err());
+        assert!(store.admit(&json!({"kind":"reconnect"}))?);
+        assert!(!store.has_wake_input()?);
+        for id in ["first", "second"] {
+            assert!(store.admit(&json!({"kind":"message","input":{"id":id}}))?);
+        }
+        assert!(store.has_wake_input()?);
+        assert!(store.next(None)?.is_none());
+        plan["stage"] = json!("sleeping");
+        store.commit_hibernation(&stopping, &plan.to_string(), HibernationChange::Park)?;
+    }
+    let store = Store::open(&root.0)?;
+    let sleeping = plan.to_string();
+    assert_eq!(store.get_meta("gateway:head")?.as_deref(), Some("null"));
+    assert_eq!(store.get_meta(HEAD_SESSION_FILE)?.as_deref(), Some(journal));
+    assert_eq!(store.get_meta("main:sessionId")?.as_deref(), Some("same"));
+    assert_eq!(store.get_meta("main:generation")?.as_deref(), Some("3"));
+    let saved: serde_json::Value = serde_json::from_str(
+        &store.get_meta("head:model-settings:same")?.context("Missing preserved HEAD selection")?,
+    )?;
+    assert_eq!(saved, json!({"settings":settings,"clearedRoles":["advisor"]}));
+    assert!(store.next(None)?.is_none());
+    plan["stage"] = json!("launching");
+    plan["replacementSessionId"] = json!("same");
+    let launching = plan.to_string();
+    store.commit_hibernation(&sleeping, &launching, HibernationChange::ReserveWake)?;
+    assert!(store.commit_hibernation(&sleeping, &launching, HibernationChange::ReserveWake).is_err());
+    plan["replacementOwnerPid"] = json!(202);
+    let owned = plan.to_string();
+    store.commit_hibernation(&launching, &owned, HibernationChange::RecordOwner)?;
+    assert!(store.next(None)?.is_none());
+
+    let mut awake = original;
+    awake["pid"] = json!(201);
+    awake["ownerPid"] = json!(202);
+    plan["stage"] = json!("complete");
+    let complete = plan.to_string();
+    let mut wrong = awake.clone();
+    wrong["sessionId"] = json!("other");
+    assert!(store.commit_hibernation(&owned, &complete, HibernationChange::Publish(&wrong)).is_err());
+    store.set_meta("gateway:operator-stop", "stop")?;
+    assert!(store.commit_hibernation(&owned, &complete, HibernationChange::Publish(&awake)).is_err());
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(owned.as_str()));
+    assert!(store.next(None)?.is_none());
+
+    // The unchanged stop boundary is the successful publication control.
+    store.db()?.execute("DELETE FROM metadata WHERE key='gateway:operator-stop'", [])?;
+    store.commit_hibernation(&owned, &complete, HibernationChange::Publish(&awake))?;
+    let reconnect = store.next(None)?.context("Original transport notice missing")?;
+    assert_eq!(reconnect.event["kind"], "reconnect");
+    store.receipt(reconnect.sequence, GatewayReceipt::Accepted)?;
+    for id in ["first", "second"] {
+        let frame = store.next(None)?.context("Durably buffered input missing")?;
+        assert_eq!(frame.event["input"]["id"], id);
+        store.receipt(frame.sequence, GatewayReceipt::Accepted)?;
+    }
+    assert!(store.next(None)?.is_none());
+    assert_eq!(store.get_meta("main:generation")?.as_deref(), Some("3"));
+    Ok(())
+}
+
+#[test]
+fn operator_stop_retires_only_the_exact_parked_hibernation() -> Result<()> {
+    let root = StateDir::new()?;
+    let store = Store::open(&root.0)?;
+    let journal = "/saved/sessions/main/rotated/current/session.jsonl";
+    let original = json!({"sessionId":"same","sessionFile":journal,"pid":101,"ownerPid":102});
+    let mut plan = json!({"id":"sleep","mode":"hibernate","stage":"stopping","original":original,
+        "sessionFile":journal,"stopBoundary":null,"resumeProfileHash":"old-profile",
+        "attestation":{"generation":3,"selection":{"modelSettings":{"modelRoles":{"default":"provider/model"}}}}});
+    store.set_meta(HEAD_SESSION_FILE, journal)?;
+    store.set_meta("main:sessionId", "same")?;
+    store.set_meta("main:generation", "3")?;
+    store.set_meta("gateway:head", &original.to_string())?;
+    let stopping = plan.to_string();
+    assert!(store.begin_rotation(None, None, &stopping)?);
+
+    plan["stage"] = json!("sleeping");
+    // A failed spawn must restore the exact checkpoint bytes, not a
+    // reserialized approximation or a checkpoint at the new stop fence.
+    let sleeping = serde_json::to_string_pretty(&plan)?;
+    store.commit_hibernation(&stopping, &sleeping, HibernationChange::Park)?;
+    let mut wake = plan.clone();
+    wake["stage"] = json!("launching");
+    wake["configHash"] = json!("wake-config");
+    wake["replacementSessionId"] = json!("same");
+    let reserved = wake.to_string();
+    store.commit_hibernation(&sleeping, &reserved, HibernationChange::ReserveWake)?;
+    store.set_meta("gateway:operator-stop", "current-stop")?;
+    let mut incorrectly_rebased = plan.clone();
+    incorrectly_rebased["stopBoundary"] = json!("current-stop");
+    assert!(store.commit_hibernation(&reserved, &incorrectly_rebased.to_string(),
+        HibernationChange::ReleaseUnspawnedWake).is_err());
+    store.commit_hibernation(&reserved, &sleeping, HibernationChange::ReleaseUnspawnedWake)?;
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(sleeping.as_str()));
+    assert!(store.commit_hibernation(&sleeping, &wake.to_string(), HibernationChange::ReserveWake).is_err());
+    wake["stopBoundary"] = json!("current-stop");
+    assert!(store.commit_hibernation(&sleeping, &wake.to_string(), HibernationChange::ReserveWake).is_err());
+
+    let settings = store.get_meta("head:model-settings:same")?.context("Missing parked HEAD settings")?;
+    plan["stage"] = json!("complete");
+    plan["resumeProfileHash"] = json!(null);
+    plan["stopBoundary"] = json!("stale-stop");
+    assert!(store.commit_hibernation(&sleeping, &plan.to_string(), HibernationChange::OperatorStopped).is_err());
+    plan["stopBoundary"] = json!("current-stop");
+    let retired = serde_json::to_string_pretty(&plan)?;
+    store.set_meta("gateway:head", &original.to_string())?;
+    assert!(store.commit_hibernation(&sleeping, &retired, HibernationChange::OperatorStopped).is_err());
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(sleeping.as_str()));
+
+    store.set_meta("gateway:head", "null")?;
+    store.commit_hibernation(&sleeping, &retired, HibernationChange::OperatorStopped)?;
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(retired.as_str()));
+    assert!(store.commit_hibernation(&sleeping, &wake.to_string(), HibernationChange::ReserveWake).is_err());
+
+    let started = json!({"sessionId":"same","sessionFile":journal,"pid":201,"ownerPid":202});
+    plan["stage"] = json!("launching");
+    plan["configHash"] = json!("new-config");
+    plan["resumeProfileHash"] = json!("new-profile");
+    plan["replacementSessionId"] = json!("same");
+    store.set_meta("gateway:operator-stop", "later-stop")?;
+    assert!(store.commit_hibernation(&retired, &plan.to_string(), HibernationChange::ReserveOperatorStart).is_err());
+    assert_eq!(store.get_meta("gateway:head")?.as_deref(), Some("null"));
+    plan["stopBoundary"] = json!("later-stop");
+    let reserved = plan.to_string();
+    store.commit_hibernation(&retired, &reserved, HibernationChange::ReserveOperatorStart)?;
+    assert!(store.commit_hibernation(&retired, &reserved, HibernationChange::ReserveOperatorStart).is_err());
+    store.set_meta("gateway:operator-stop", "newer-stop")?;
+    store.commit_hibernation(&reserved, &retired, HibernationChange::ReleaseUnspawnedWake)?;
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(retired.as_str()));
+    assert_eq!(store.get_meta("gateway:operator-stop")?.as_deref(), Some("newer-stop"));
+    assert!(store.commit_hibernation(&retired, &reserved, HibernationChange::ReserveOperatorStart).is_err());
+    plan["stopBoundary"] = json!("newer-stop");
+    let reserved = plan.to_string();
+    store.commit_hibernation(&retired, &reserved, HibernationChange::ReserveOperatorStart)?;
+    plan["replacementOwnerPid"] = json!(202);
+    let owned = plan.to_string();
+    store.commit_hibernation(&reserved, &owned, HibernationChange::RecordOwner)?;
+    assert!(store.commit_hibernation(&reserved, &retired, HibernationChange::ReleaseUnspawnedWake).is_err());
+    assert!(store.commit_hibernation(&owned, &retired, HibernationChange::ReleaseUnspawnedWake).is_err());
+    drop(store);
+    let store = Store::open(&root.0)?;
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(owned.as_str()));
+    assert_eq!(store.get_meta("gateway:head")?.as_deref(), Some("null"));
+    plan["stage"] = json!("complete");
+    let published = plan.to_string();
+    store.commit_hibernation(&owned, &published, HibernationChange::Publish(&started))?;
+    assert_eq!(store.get_meta("gateway:head")?, Some(started.to_string()));
+    assert_eq!(store.get_meta(HEAD_ROTATION)?.as_deref(), Some(published.as_str()));
+    store.set_meta("gateway:head", "null")?;
+    assert!(store.commit_hibernation(&published, &reserved, HibernationChange::ReserveOperatorStart).is_err());
+    for (key, expected) in [
+        (HEAD_SESSION_FILE, journal),
+        ("main:sessionId", "same"),
+        ("main:generation", "3"),
+        ("head:model-settings:same", settings.as_str()),
+    ] {
+        assert_eq!(store.get_meta(key)?.as_deref(), Some(expected));
+    }
     Ok(())
 }
 

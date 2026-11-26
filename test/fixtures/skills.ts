@@ -10,9 +10,9 @@ import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-in
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { buildHostArgs } from "../../src/host";
+import { buildHostArgs } from "../../src/omp/host";
 import { nativeDisabledProviders } from "./native-extension";
-import { decisionId } from "../../src/decisions";
+import { decisionId } from "../../src/lane/decisions";
 import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult, ExtensionUIDialogOptions } from "@oh-my-pi/pi-coding-agent";
 
 // A fresh process keeps OMP's native discovery caches, active profile, and URL
@@ -74,7 +74,7 @@ const hostArgs = await buildHostArgs({
   command: [process.execPath], socketPath: path.join(root, "proof.sock"),
   sessionFile: path.join(root, "session.jsonl"), cwd: workspace, extensionPath,
   env: {}, logPath: path.join(root, "host.log"), subagentConcurrency: 1,
-  managedUlwPath: ulwPath ? path.dirname(ulwPath) : path.join(import.meta.dir, "managed-ulw"),
+  managedUlwPath: ulwPath ? path.dirname(ulwPath) : path.join(import.meta.dir, "managed-super"),
 });
 const extensionPaths = hostArgs.flatMap((arg, index) => arg === "-e" ? [hostArgs[index + 1]!] : []);
 if (ulwPath) {

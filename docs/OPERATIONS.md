@@ -208,6 +208,13 @@ SUPER 스킬 조회·추가 레인·goal·모델 변경·workflow artifact가 �
 18에서 19로 올리기 전에 기존 Host가 맡은 백그라운드 서비스를 확인한다. OMP 19의 사용자별
 데몬은 이전 브로커의 서비스를 인수하지 않는다. 새 데몬의 목록이 비어 있어도 이전 세션에서
 완료를 확인하지 못한 작업의 종료·회수를 승인하는 증거는 아니다.
+
+**Bun 저널 검증기를 사용하던 설치를 덮어쓸 때:** 기존 설치를 유지한 상태에서 작업 정산을
+기다리고, 상주 레인 Host(원격 워커 포함)와 Gateway/HEAD를 정상 종료한다. 종료 영수증과
+소유 프로세스의 실제 종료를 확인한 뒤 파일을 교체한다. `stop main`만으로는 독립 레인이
+종료되지 않는다. 이전 소유자는 종료 시까지 원래 helper 파일이 필요하고, 새 소유자는 Rust로
+저널을 검증한다. 상태 DB와 세션 파일은 그대로 보존한다.
+
 기본 `command: ["omp"]`는 PATH에서 찾는다. 다른 설치를 쓰려면 `command`의 첫 항목에
 그 OMP 경로를 넣는다. 상대 경로는 설정 파일의 디렉터리 기준이며 모든 레인이 같은 경로를
 사용한다. 이 저장소는 OMP를 다운로드하거나 소스에서 빌드하지 않는다.
@@ -261,7 +268,7 @@ export PATH="$PWD/.upstream/toolchain/node_modules/.bin:$PATH"
 bun run prepare:ulw
 ```
 
-설정은 `upstream/ulw.json`의 공식 원격과 `checkIntervalMs: 3600000`(1시간)이다. 설치 때 원격의
+설정은 `upstream/super.json`의 공식 원격과 `checkIntervalMs: 3600000`(1시간)이다. 설치 때 원격의
 **기본 브랜치 HEAD**를 확인한다. production Gateway 시작에는 이미 유효한 active 설치가
 필요하다. 이를 확인하면 IPC/head를 먼저 시작하고 startup 원격 확인은 백그라운드로 수행하며,
 이후 매시간 새 커밋을 확인해 준비·활성화한다. 느리거나 접근 불가능한 upstream 때문에 정상
@@ -355,7 +362,7 @@ bun --no-env-file src/cli.ts discord-commands --config config.local.json --apply
 
 첫 명령은 읽기 전용 변경 확인이다. `--apply`는 **이 봇의 전역 명령 목록 전체를 교체**하므로
 전용 Superagent 앱에서만 사용한다. Hermes 전용 명령은 제거하고 `/head`를 포함한
-[공통 명령 목록과 Discord 전용 `/usage-reset`](../src/messenger-command-catalog.json)을 등록한다.
+[공통 명령 목록과 Discord 전용 `/usage-reset`](../src/messaging/messenger-command-catalog.json)을 등록한다.
 별도 guild 명령이 전역 명령을 가리는 경우 몰래 삭제하지 않고 충돌을 알린다.
 등록은 모델·메신저 연결을 시작하지 않으며 setup·doctor·start의 부수 효과로 실행되지 않는다.
 인수가 있는 명령은 선택적인 `text` 필드를 사용한다. 예를 들어 `/model`의 `text`에
@@ -764,6 +771,7 @@ high/middle/low는 명시적 `start`의 전용 초기 설정 턴에서 기존 �
 | `maxHosts` | 헤드 1개를 포함한 상주 Host 예산. 필수 정수, 최소 2. 초과 작업은 대기한다. |
 | `maxSubagents` | 전체 Host에 분배할 네이티브 task 동시성 예산. 필수 정수, `maxHosts` 이상. Host별 한도는 `floor(maxSubagents / maxHosts)`다. |
 | `idleMs` | 안전하게 정착한 유휴 레인을 회수하기까지의 시간(밀리초). 필수 0 이상 정수. 헤드는 대상이 아니며 세션 기록은 삭제하지 않는다. |
+| `headIdleMs` | 할 일이 없는 HEAD를 메모리에 유지하는 시간(밀리초). 기본값 `1800000`(30분), `0`이면 휴면을 사용하지 않는다. 레인 회수 시간과 세션 기록은 바뀌지 않는다. |
 | `model` | 선택 항목. 헤드 시작에 사용할 OMP 모델 식별자. 생략 시 기존 OMP 설정을 따른다. 모든 새 레인의 기본값이 아니며 새 레인은 `lane_start`의 model 또는 preset으로 각각 선택한다. 재개는 저장된 레인 선택을 유지한다. |
 | `discord` | 선택 블록. 존재하면 `tokenEnv`, `ownerId`, `allowedGuildIds`, `allowedChannelIds` 모두 필수. |
 | `discord.requireAddressing` | 선택 불리언, 기본값 `false`. `true`이면 허용된 서버의 부모 채널과 이 봇이 만들지 않은 스레드에서 이 봇의 실제 멘션 또는 이 봇이 보낸 메시지에 대한 답장이 포함된 소유자의 일반 메시지만 접수한다. |
@@ -1288,6 +1296,24 @@ Gateway는 헤드가 연속 **30분 이상 유휴**이고 native 컨텍스트 �
 새 헤드 세션으로 교체를 시도한다. 승인·실행·전송 등 미해결 작업이 있거나 사용률이 불명이면
 교체하지 않는다. 레인 `idleMs`와는 별개다. `status`의 `head.rotation`에서 이전·새 세션 ID와
 교체 단계를 확인할 수 있다. `/restart`는 이 자동 교체와 달리 같은 헤드 세션을 복원한다.
+
+`head.hibernation.stage`가 `sleeping`이면 `head.pid: null`, `head.ready: false`가 정상이다.
+Gateway는 메신저 연결을 유지한다. 다음 입력을 저장한 뒤 **같은 세션**을 깨우므로 첫 응답에는
+Host 기동 시간이 더해진다. Discord 세션을 잃고 새로 연결하거나 Slack이 재연결되면,
+새 메시지가 없어도 누락된 이력을 확인하기 위해 깨어난다. `omp-sa status` 조회만으로는 깨지 않는다. 메모리보다 첫 응답
+속도가 중요하면 `headIdleMs: 0`으로 설정한다. 상주 레인, 예약 작업, 미정산 작업이 있으면
+설정한 시간이 지나도 HEAD를 내리지 않는다.
+저널이 심볼릭 링크이거나, Host가 안전하게 휴면할 수 있다고 확인하지 못하거나, 순정 OMP가
+현재 모델 선택을 복원할 수 없으면 HEAD는 상주한다. 휴면 때문에 꺼 둔 유료 서비스 등급이
+다시 켜지거나, `--max-time` 제한이 처음부터 시작되거나, 완료된 `--plan-yolo`가 재실행되지는 않는다.
+잠든 HEAD를 복구할 때는 원래의 OMP 프로필과 세션 저장 위치를 사용한다. 에이전트 디렉터리가
+같아도 `XDG_DATA_HOME` 변경으로 실제 세션 경로가 달라졌다면 이어받지 않는다.
+`launching`은 네이티브 프로세스가 이미 떠 있어도 컨트롤러의 준비를 확인하지 못한 상태일 수 있다.
+기동 도중 설정을 바꿨다면 파일을 원래 바이트 그대로 복원한다. 같은 HEAD가 이미 저장된 입력을 처리하므로 다시 보낼 필요가 없다.
+HEAD가 Gateway에서 시작 시 이력 조회 순서를 보장할 수 없다고 보고하면, 작업을 재개하기
+전에 Gateway를 정상 정지하고 같은 설치본에서 Gateway와 HEAD를 함께 다시 시작한다.
+휴면 중 메신저 권한 설정을 바꾸려면 Gateway를 정상 정지하고 설정을 수정한 뒤 명시적으로
+다시 시작한다. 메시지 수신만으로 바뀐 권한을 적용해 자동 기동하지 않는다.
 
 인수 없는 `/usage`는 모델을 호출하지 않고, 설치된 OMP가 보고한 수치만 원래 대화에
 보낸다. 제공자별 남은 한도와 초기화 시각은 Superagent 호스트의 로컬 시간대를 자동으로 따른다.

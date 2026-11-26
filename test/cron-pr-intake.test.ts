@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { mkdtempDisposableSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "../src/config";
+import type { Config } from "../src/config/config";
 import type { InputRecord, Route } from "../src/contracts";
-import { CRON_RUN_PREFIX, CronJobs } from "../src/cron-jobs";
-import { CronPrIntake, isPrIntakeOffer, type ReadIntakePulls } from "../src/cron-pr-intake";
-import { prModeArgument } from "../src/pr-intake-mode";
-import { Store } from "../src/store";
+import { CRON_RUN_PREFIX, CronJobs } from "../src/cron/cron-jobs";
+import { CronPrIntake, isPrIntakeOffer, type ReadIntakePulls } from "../src/cron/cron-pr-intake";
+import { prModeArgument } from "../src/pr/pr-intake-mode";
+import { Store } from "../src/storage/store";
 
 const parent: Route = { platform: "discord", accountId: "2", authorityId: "1", guildId: "3", channelId: "4", threadId: null };
 const alternate: Route = { ...parent, channelId: "6" };

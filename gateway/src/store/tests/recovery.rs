@@ -17,6 +17,81 @@ fn message(id: &str, text: &str) -> Value {
 }
 
 #[test]
+fn overlapping_history_gaps_keep_distinct_durable_recovery_positions() -> Result<()> {
+    let root = StateDir::new()?;
+    let store = Store::open(&root.0)?;
+    let first_gap = json!({"kind":"reconnect","historyRecovery":true,
+        "historyPlatform":"slack","historyBeforeUs":1_750_000_000_000_102_i64});
+    let second_gap = json!({"kind":"reconnect","historyRecovery":true,
+        "historyPlatform":"slack","historyBeforeUs":1_750_000_000_000_104_i64});
+    let mut slash = message("slash", "/new");
+    slash["input"]["messageId"] = Value::Null;
+    let live = message("live", "live followup");
+    let missed = message("missed", "offline");
+
+    assert!(store.admit(&first_gap)?);
+    let first = store.next(None)?.context("First gap was not queued")?;
+    store.attempt(first.sequence)?;
+    assert!(store.admit(&slash)?);
+    assert!(store.admit(&second_gap)?);
+    assert!(store.admit(&live)?);
+    assert_eq!(store.history_fence(first.sequence, "slack")?, first_gap["historyBeforeUs"].as_i64());
+    assert_eq!(store.history_fence(first.sequence, "discord")?, None);
+    assert_eq!(
+        store.ordered_history(&route(), None, vec![missed["input"].clone(), live["input"].clone()])?,
+        [missed["input"].clone()],
+    );
+    store.receipt(first.sequence, GatewayReceipt::Accepted)?;
+    let command = store.next(None)?.context("The intervening command was lost")?;
+    assert_eq!(command.event, slash);
+    store.receipt(command.sequence, GatewayReceipt::Accepted)?;
+    let second = store.next(None)?.context("The second gap was lost")?;
+    assert_eq!(second.event, second_gap);
+    assert_ne!(second.sequence, first.sequence);
+    assert_eq!(store.history_fence(second.sequence, "slack")?, second_gap["historyBeforeUs"].as_i64());
+    assert_eq!(store.history_fence(first.sequence, "slack")?, None);
+    assert_eq!(store.get_meta("gateway:history-sequence")?, Some(second.sequence.to_string()));
+    store.receipt(second.sequence, GatewayReceipt::Accepted)?;
+    assert_eq!(store.next(None)?.context("Live followup was lost")?.event, live);
+    Ok(())
+}
+
+#[test]
+fn distinct_history_revision_is_durable_behind_its_pending_original() -> Result<()> {
+    let root = StateDir::new()?;
+    let store = Store::open(&root.0)?;
+    assert!(store.admit(&json!({"kind":"reconnect","historyRecovery":true}))?);
+    let gap = store.next(None)?.context("History gap was not admitted")?;
+    let mut original = message("slack:account:channel:1000.000001:original", "original");
+    original["input"]["route"]["platform"] = json!("slack");
+    original["input"]["messageId"] = json!("1000.000001");
+    let mut revision = original.clone();
+    revision["input"]["id"] = json!("slack:account:channel:1000.000001:edit:1000.000002:hash");
+    revision["input"]["text"] = json!("/restart");
+    assert!(store.admit(&original)?);
+    assert!(store.ordered_history(&original["input"]["route"], Some(gap.sequence), vec![
+        original["input"].clone(), revision["input"].clone(),
+    ])?.is_empty());
+    assert!(!store.admit(&revision)?, "exact live redelivery must reuse the recovered revision");
+    assert_eq!(store.pending()?, 3);
+    store.receipt(gap.sequence, GatewayReceipt::Unresolved)?;
+    drop(store);
+
+    let store = Store::open(&root.0)?;
+    let held = store.next(None)?.context("Unfinished history gap was lost")?;
+    assert_eq!(held.sequence, gap.sequence, "an edit must not bypass its original as a recovery control");
+    store.receipt(held.sequence, GatewayReceipt::Accepted)?;
+    let first = store.next(None)?.context("Original was lost")?;
+    assert_eq!(first.event, original);
+    store.receipt(first.sequence, GatewayReceipt::Accepted)?;
+    let second = store.next(None)?.context("Distinct recovered revision was lost")?;
+    assert_eq!(second.event["input"], revision["input"]);
+    store.receipt(second.sequence, GatewayReceipt::Accepted)?;
+    assert_eq!(store.pending()?, 0);
+    Ok(())
+}
+
+#[test]
 fn quarantine_prioritizes_barriers_then_exact_whitespace_recovery_controls() -> Result<()> {
     let root = StateDir::new()?;
     let store = Store::open(&root.0)?;

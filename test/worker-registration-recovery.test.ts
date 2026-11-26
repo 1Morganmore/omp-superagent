@@ -6,15 +6,15 @@ import {
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
-import { selectWorkerPlacement } from "../src/worker-placement";
-import { addWorker, listWorkers } from "../src/worker-registration";
-import { lookupWorker, type WorkerDescription, type WorkerRegistration } from "../src/worker-wire";
+import { selectWorkerPlacement } from "../src/worker/worker-placement";
+import { addWorker, listWorkers } from "../src/worker/worker-registration";
+import { lookupWorker, type WorkerDescription, type WorkerRegistration } from "../src/worker/worker-wire";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-const registrationModule = join(import.meta.dir, "../src/worker-registration.ts");
-const wireModule = join(import.meta.dir, "../src/worker-wire.ts");
+const registrationModule = join(import.meta.dir, "../src/worker/worker-registration.ts");
+const wireModule = join(import.meta.dir, "../src/worker/worker-wire.ts");
 const repoId = "a".repeat(64);
 const revision = "b".repeat(40);
 

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import { HostConnection, startHost } from "../src/host";
+import { HostConnection, startHost } from "../src/omp/host";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { nativeTestCommand } from "./fixtures/native-command";
 import { offlineMnemopi } from "./fixtures/native-memory";
@@ -32,7 +32,7 @@ nativeTest("stock OMP resumes a managed session by ID, respects a live native wr
   const options = {
     command, cwd, env, socketPath: path.join(root, "lane.sock"), sessionFile: path.join(root, "session.jsonl"),
     logPath: path.join(root, "native.log"), extensionPath: path.join(import.meta.dir, "fixtures/native-extension.ts"),
-    managedUlwPath: path.join(import.meta.dir, "fixtures/managed-ulw"),
+    managedUlwPath: path.join(import.meta.dir, "fixtures/managed-super"),
     model: "socket-host-smoke/local", subagentConcurrency: 1,
   };
   let host: { pid: number } | undefined;

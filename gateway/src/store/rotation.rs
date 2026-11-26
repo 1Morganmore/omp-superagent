@@ -6,6 +6,7 @@ use super::{Store, get_meta, set_meta};
 
 pub(crate) const HEAD_ROTATION: &str = "gateway:head-rotation";
 pub(crate) const HEAD_SESSION_FILE: &str = "main:sessionFile";
+pub(crate) const LAST_HEAD_ROTATION: &str = "gateway:last-head-rotation";
 
 impl Store {
     /// Linearize shutdown authorization with ingress and the operator stop
@@ -18,11 +19,14 @@ impl Store {
     ) -> Result<bool> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let proposed: Value = serde_json::from_str(plan)?;
+        let sleep = proposed["mode"] == "hibernate";
         let pending: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM gateway_events WHERE delivered_at IS NULL)
                 OR EXISTS(SELECT 1 FROM gateway_effects WHERE state='attempted'
-                    AND operation IN ('send','presentApproval','dismissApproval','createThread','updateThread'))",
-            [],
+                    AND (operation IN ('send','presentApproval','dismissApproval','createThread','updateThread')
+                      OR (? AND operation IN ('sendGroup','showApproval'))))",
+            [sleep],
             |row| row.get(0),
         )?;
         if pending
@@ -31,6 +35,23 @@ impl Store {
             || get_meta(&tx, "head:restart-fence")?.is_some_and(|value| !value.is_empty())
         {
             return Ok(false);
+        }
+        if sleep {
+            let current = get_meta(&tx, "gateway:head")?
+                .map(|encoded| serde_json::from_str::<Value>(&encoded)).transpose()?;
+            let generation = get_meta(&tx, "main:generation")?.as_deref().unwrap_or("0").parse::<u64>()?;
+            if current.as_ref() != Some(&proposed["original"])
+                || get_meta(&tx, "main:sessionId")?.as_deref() != proposed["original"]["sessionId"].as_str()
+                || proposed["attestation"]["generation"].as_u64() != Some(generation)
+            {
+                return Ok(false);
+            }
+        }
+        if let Some(previous) = preceding {
+            let previous_plan: Value = serde_json::from_str(previous)?;
+            if previous_plan.is_object() && previous_plan["mode"].is_null() {
+                set_meta(&tx, LAST_HEAD_ROTATION, previous)?;
+            }
         }
         set_meta(&tx, HEAD_ROTATION, plan)?;
         tx.commit()?;

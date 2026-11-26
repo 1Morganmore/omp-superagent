@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { discoverInstalledOmp, inspectInstalledOmp, resolveOmpCommand } from "../../src/installed-omp";
+import { discoverInstalledOmp, inspectInstalledOmp, resolveOmpCommand } from "../../src/omp/installed-omp";
 
 export function nativeTestArgv(environment: NodeJS.ProcessEnv = process.env): string[] {
   if (environment.OMP_TEST_COMMAND === undefined) {

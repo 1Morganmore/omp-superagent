@@ -203,8 +203,12 @@ impl Adapter for Discord {
             }
             ("inspectDiscordContext", [route]) => state.inspect_context(&read(route)?).await,
             ("discordPurpose", [request]) => state.purpose(read(request)?).await,
-            ("fetchAfter", [route, cursor]) => {
-                state.fetch_after(&read(route)?, read(cursor)?).await
+            ("fetchAfter", [route, cursor, fence @ ..]) if fence.len() <= 1 => {
+                state.fetch_after(
+                    &read(route)?,
+                    read(cursor)?,
+                    fence.first().map(read::<i64>).transpose()?,
+                ).await
             }
             _ => Err(EffectError::rejected(
                 "Unsupported Discord operation or arguments",

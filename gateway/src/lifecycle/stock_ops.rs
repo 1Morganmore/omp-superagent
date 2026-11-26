@@ -10,6 +10,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
+    sync::{Semaphore, oneshot},
     time::timeout,
 };
 
@@ -152,16 +153,39 @@ pub(super) fn bun(config: &LifecycleConfig, environment: &BTreeMap<OsString, OsS
     command
 }
 
-pub(super) async fn session_id(config: &LifecycleConfig, path: &Path) -> Result<Option<String>> {
-    let mut command = bun(config, &config.head_environment());
-    command
-        .arg(config.root.join("src/gateway-host-helper.ts"))
-        .arg("session-id")
-        .arg(path);
-    tagged_output(
-        &capture(command, None, OPERATION_TIMEOUT).await?,
-        "GATEWAY_HOST ",
-    )
+pub(super) async fn session_id(path: &Path) -> Result<Option<String>> {
+    let path = path.to_owned();
+    await_journal_read(move || crate::journal_header::read_session_id(&path)).await
+}
+
+pub(super) async fn verify_session_journal(path: &Path, expected_id: &str) -> Result<bool> {
+    let path = path.to_owned();
+    let id = expected_id.to_owned();
+    let deadline = std::time::Instant::now() + OPERATION_TIMEOUT;
+    await_journal_read(move || crate::journal_scan::scan(&path, &id, deadline, |_| {})).await
+}
+
+async fn await_journal_read<T: Send + 'static>(
+    read: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> Result<T> {
+    // One Gateway owns one HEAD. A filesystem read already in the kernel
+    // cannot be cancelled by dropping its future. Keep the slot until the
+    // read itself finishes, without making Tokio join a stalled thread on exit.
+    static SLOT: Semaphore = Semaphore::const_new(1);
+    timeout(OPERATION_TIMEOUT, async {
+        let permit = SLOT.acquire().await?;
+        let (sender, receiver) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("head-journal".into())
+            .spawn(move || {
+                let _permit = permit;
+                // A caller that timed out must not consume this stale result.
+                let _ = sender.send(read());
+            })
+            .context("Could not start native session journal read")?;
+        receiver.await.context("Native session journal reader stopped")?
+            .context("Gateway Host session journal is unavailable")
+    }).await.context("Native session journal read timed out")?
 }
 
 pub(super) fn tagged_output<T: serde::de::DeserializeOwned>(
@@ -227,4 +251,42 @@ pub(super) async fn capture(
     })
     .await
     .context("Stock OMP operation timed out")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn preflight_rejects_a_competing_session_header_even_when_identity_is_readable() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("head.jsonl");
+        let valid = "{\"type\":\"session\",\"id\":\"head\"}\n{\"type\":\"custom\",\"id\":\"1\"}\n";
+        std::fs::write(&path, valid)?;
+        assert!(verify_session_journal(&path, "head").await?);
+        std::fs::write(&path, format!("{valid}{{\"type\":\n\"session\",\"id\":\"head\"}}\n"))?;
+        assert_eq!(session_id(&path).await?.as_deref(), Some("head"));
+        assert!(!verify_session_journal(&path, "head").await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_header_read_keeps_its_slot_but_never_supplies_the_next_identity() -> Result<()> {
+        let (entered, started) = oneshot::channel();
+        let (release, stalled) = std::sync::mpsc::channel();
+        let first = tokio::spawn(await_journal_read(move || {
+            entered.send(()).unwrap();
+            stalled.recv().unwrap();
+            Ok(Some("old"))
+        }));
+        started.await?;
+        first.abort(); // Like the operation deadline, this drops the waiter, not the syscall.
+        assert!(first.await.unwrap_err().is_cancelled());
+        let retry = await_journal_read(|| Ok(Some("current")));
+        tokio::pin!(retry);
+        assert!(timeout(Duration::from_millis(50), &mut retry).await.is_err());
+        release.send(())?;
+        assert_eq!(retry.await?, Some("current"));
+        Ok(())
+    }
 }

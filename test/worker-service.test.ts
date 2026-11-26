@@ -5,11 +5,11 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync,
 import { createServer, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { reserveCheckout } from "../src/worker-checkout";
-import { WorkerLedger } from "../src/worker-ledger";
-import { workerLaunchProfile } from "../src/worker-profile";
-import { workerRepositoryIdentity } from "../src/worker-repository";
-import { remoteLanePaths, type WorkerLaneRef, type WorkerPolicy } from "../src/worker-wire";
+import { reserveCheckout } from "../src/worker/worker-checkout";
+import { WorkerLedger } from "../src/worker/worker-ledger";
+import { workerLaunchProfile } from "../src/worker/worker-profile";
+import { workerRepositoryIdentity } from "../src/worker/worker-repository";
+import { remoteLanePaths, type WorkerLaneRef, type WorkerPolicy } from "../src/worker/worker-wire";
 
 async function fixture(startupFile?: string) {
   const root = mkdtempSync(join(realpathSync("/tmp"), "ow-"));
@@ -66,7 +66,7 @@ test("worker requests use data schemas even under the native OMP extension loade
   // tool schemas. Exercise its real module graph in a separate Bun process.
   const output = execFileSync(process.execPath, ["--no-env-file", "-e", `
     const { loadLegacyPiModule } = await import("@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat");
-    const { parseWorkerRequest } = await loadLegacyPiModule(${JSON.stringify(join(import.meta.dir, "../src/worker-request.ts"))});
+    const { parseWorkerRequest } = await loadLegacyPiModule(${JSON.stringify(join(import.meta.dir, "../src/worker/worker-request.ts"))});
     const parse = input => parseWorkerRequest(Buffer.from(JSON.stringify(input)));
     console.log(parse({ version: 1, op: "describe" }).op);
     try { parse({ version: 1, op: "describe", command: "unexpected" }); }

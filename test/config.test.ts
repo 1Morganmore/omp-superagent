@@ -3,13 +3,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { authorizeRoute, configuredPlatforms, credentialEnvNames, loadConfig, requireMessengerCredentials } from "../src/config";
+import { authorizeRoute, configuredPlatforms, credentialEnvNames, loadConfig, requireMessengerCredentials } from "../src/config/config";
 import { main } from "../src/cli";
-import { loadCredentials } from "../src/credentials";
-import { discoverInstalledOmp, inspectInstalledOmp } from "../src/installed-omp";
+import { loadCredentials } from "../src/config/credentials";
+import { discoverInstalledOmp, inspectInstalledOmp } from "../src/omp/installed-omp";
 import type { Route } from "../src/contracts";
 import { dependencies } from "../package.json";
-import { requireGateway } from "../src/gateway-native";
+import { requireGateway } from "../src/gateway/gateway-native";
 import { offlineMnemopi } from "./fixtures/native-memory";
 
 const testedVersion = dependencies["@oh-my-pi/pi-coding-agent"];
@@ -33,6 +33,13 @@ describe("operator execution limits", () => {
 
   test("rejects a subagent budget that cannot cover admitted hosts", async () => {
     await expect(loadConfig(await config({ maxHosts: 4, maxSubagents: 2 }))).rejects.toThrow("maxSubagents");
+  });
+  test("HEAD hibernation defaults independently of lane eviction and can be disabled", async () => {
+    expect((await loadConfig(await config({ idleMs: 0 }))).headIdleMs).toBe(30 * 60 * 1000);
+    expect((await loadConfig(await config({ headIdleMs: 0 }))).headIdleMs).toBe(0);
+    for (const headIdleMs of [null, -1, 0.5]) {
+      await expect(loadConfig(await config({ headIdleMs }))).rejects.toThrow("headIdleMs");
+    }
   });
   test("resolves workspace and state paths relative to the configuration", async () => {
     const path = await config();
@@ -294,7 +301,7 @@ else process.exit(8);
     dirs.push(dir);
     const fifo = join(dir, "omp");
     expect(Bun.spawnSync(["mkfifo", "-m", "700", fifo]).exitCode).toBe(0);
-    const module = join(import.meta.dir, "../src/installed-omp.ts");
+    const module = join(import.meta.dir, "../src/omp/installed-omp.ts");
     // A blocked synchronous open cannot be interrupted by a test timer in the same process.
     const inspector = Bun.spawn([process.execPath, "--no-env-file", "-e", `
       import { inspectInstalledOmp } from ${JSON.stringify(module)};
@@ -490,7 +497,7 @@ else process.exit(8);
     const { code, stdout, stderr } = await runGateway(f.directory, ["serve", "--config", file], {
       // An invalid header prevents any real transport request even if ordering regresses.
       [tokenEnv]: "private-messenger-token\u0007",
-      OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH: join(import.meta.dir, "fixtures/managed-ulw"),
+      OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH: join(import.meta.dir, "fixtures/managed-super"),
     });
     expect({ code, stdout }).toEqual({ code: 1, stdout: "" });
     expect(stderr).not.toContain("private-messenger-token");

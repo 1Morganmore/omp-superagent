@@ -1,14 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { Config } from "../src/config";
+import type { Config } from "../src/config/config";
 import type { Approval, Attachment, Inbound, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "../src/contracts";
 import type { DownloadMessenger as Messenger } from "./fixtures/inbound-attachments";
-import { DeliveryError } from "../src/delivery";
-import { createGatewayMessenger } from "../src/gateway-client";
-import { gatewayCall, gatewayPaths } from "../src/gateway-protocol";
+import { DeliveryError } from "../src/messaging/delivery";
+import { createGatewayMessenger } from "../src/gateway/gateway-client";
+import { gatewayCall, gatewayPaths } from "../src/gateway/gateway-protocol";
 import { GatewayServer } from "./oracles/bun-gateway/gateway-server";
-import type { GatewayStatus } from "../src/gateway-wire";
+import type { GatewayStatus } from "../src/gateway/gateway-wire";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
 import { MessengerHub } from "./oracles/bun-gateway/messengers";
 

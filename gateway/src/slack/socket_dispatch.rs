@@ -3,10 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use serde_json::json;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+
+use crate::store::history_gap;
 
 use super::{CancellationToken, Envelope, Event, Identity, Inner, QUEUE_CAPACITY};
 
@@ -18,7 +20,12 @@ pub(super) struct Dispatchers {
 }
 
 impl Dispatchers {
-    pub(super) fn new(inner: Arc<Inner>, identity: Arc<Identity>, reconnect: bool) -> Self {
+    pub(super) fn new(
+        inner: Arc<Inner>,
+        identity: Arc<Identity>,
+        reconnect: bool,
+    ) -> anyhow::Result<Self> {
+        let gap = reconnect.then(|| history_gap("slack")).transpose()?;
         let cancelled = CancellationToken::new();
         let (input, messages) = mpsc::channel(QUEUE_CAPACITY);
         let (interactions, callbacks) = mpsc::channel(QUEUE_CAPACITY);
@@ -28,14 +35,14 @@ impl Dispatchers {
             identity,
             cancelled: cancelled.clone(),
         };
-        workers.spawn(scope.clone().intake(messages, reconnect));
+        workers.spawn(scope.clone().intake(messages, gap));
         workers.spawn(scope.cards(callbacks));
-        Self {
+        Ok(Self {
             cancelled,
             input,
             interactions,
             workers,
-        }
+        })
     }
 
     pub(super) fn send(&self, envelope: Envelope) -> anyhow::Result<()> {
@@ -102,13 +109,13 @@ impl Worker {
     async fn intake(
         self,
         mut queue: mpsc::Receiver<Envelope>,
-        reconnect: bool,
+        gap: Option<Value>,
     ) -> anyhow::Result<()> {
         if !self.ready().await? {
             return Ok(());
         }
-        if reconnect {
-            self.inner.admit(json!({ "kind": "reconnect" })).await?;
+        if let Some(gap) = gap {
+            self.inner.admit(gap).await?;
         }
         while let Some(envelope) = self.next(&mut queue).await {
             self.handle(envelope).await;

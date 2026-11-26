@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { intakeFixDigest, parseIntakeFix } from "../src/pr-intake-fix";
+import { intakeFixDigest, parseIntakeFix } from "../src/pr/pr-intake-fix";
 
 const root = "repos/owner/repo";
 const pr = `${root}/pulls/7`;
@@ -150,8 +150,8 @@ if (method === "GET" && a.includes("--paginate") && a.includes("--slurp")) {
   const runner = join(directory, "run.ts");
   await writeFile(runner, `
 import { existsSync, writeFileSync, readFileSync } from "node:fs";
-import { readIntakeMaterial } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr-intake-material.ts"))};
-import { applyIntakeFix, reconcileIntakeFix } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr-intake-fix.ts"))};
+import { readIntakeMaterial } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr/pr-intake-material.ts"))};
+import { applyIntakeFix, reconcileIntakeFix } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr/pr-intake-fix.ts"))};
 const dir = ${JSON.stringify(directory)};
 const mode = ${JSON.stringify(mode)};
 const signal = new AbortController().signal;

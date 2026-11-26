@@ -1,10 +1,10 @@
 // Private one-shot input from the Rust forced-command transport, not SSH stdio.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { readWorkerPolicy } from "./worker-enrollment";
-import { WorkerRefusal } from "./worker-request";
-import { prepareWorker } from "./worker-service";
-import { WORKER_HEADER_BYTES } from "./worker-wire";
+import { readWorkerPolicy } from "./worker/worker-enrollment";
+import { WorkerRefusal } from "./worker/worker-request";
+import { prepareWorker } from "./worker/worker-service";
+import { WORKER_HEADER_BYTES } from "./worker/worker-wire";
 
 const [path, ...extra] = process.argv.slice(2);
 if (!path || extra.length || process.env.SSH_ORIGINAL_COMMAND !== "omp-sa-worker-v1")

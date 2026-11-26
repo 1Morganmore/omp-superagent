@@ -5,11 +5,11 @@ import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addWorker, listWorkers } from "../src/worker-registration";
-import { workerRepositoryHead, workerRepositoryIdentity } from "../src/worker-repository";
-import type { WorkerDescription, WorkerSelector } from "../src/worker-wire";
+import { addWorker, listWorkers } from "../src/worker/worker-registration";
+import { workerRepositoryHead, workerRepositoryIdentity } from "../src/worker/worker-repository";
+import type { WorkerDescription, WorkerSelector } from "../src/worker/worker-wire";
 
-const placementModule = fileURLToPath(new URL("../src/worker-placement.ts", import.meta.url));
+const placementModule = fileURLToPath(new URL("../src/worker/worker-placement.ts", import.meta.url));
 const origin = "https://github.com/example/project.git";
 const roots: string[] = [];
 afterEach(async () => {

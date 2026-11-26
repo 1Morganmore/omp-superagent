@@ -2,12 +2,13 @@ import { afterEach, expect, test } from "bun:test";
 import { containsMagicKeyword } from "@oh-my-pi/pi-coding-agent/session/magic-keywords";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { type Config, hostPaths } from "../src/config";
+import { type Config, hostPaths } from "../src/config/config";
 import type { Approval, DialogResponse, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, Inbound, Messenger, OutputRecord, Route } from "../src/contracts";
-import { authorizeDiscordPurpose, changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "../src/discord-context";
-import { DeliveryError } from "../src/delivery";
-import { Superagent, type RuntimeHost, type RuntimeState } from "../src/runtime";
-import { Store } from "../src/store";
+import { authorizeDiscordPurpose, changeDiscordPurpose, discordPurposeNotes, discordPurposeRequest } from "../src/messaging/discord-context";
+import { DeliveryError } from "../src/messaging/delivery";
+import { Superagent } from "../src/runtime/controller";
+import type { RuntimeHost, RuntimeState } from "../src/runtime/native-frames";
+import { Store } from "../src/storage/store";
 
 const route: Route = { platform: "discord", accountId: "2", authorityId: "1", guildId: "3", channelId: "4", threadId: "5" };
 const context: DiscordContext = {

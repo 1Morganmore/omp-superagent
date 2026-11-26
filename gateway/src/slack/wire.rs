@@ -69,6 +69,10 @@ impl Ts {
         &self.0
     }
 
+    pub(super) fn from_epoch_micros(value: i64) -> Self {
+        Self(format!("{}.{:06}", value.div_euclid(1_000_000), value.rem_euclid(1_000_000)))
+    }
+
     pub(super) fn compare(&self, other: &Self) -> Ordering {
         let left = self.0.trim_start_matches('0');
         let right = other.0.trim_start_matches('0');

@@ -2,7 +2,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, ensure};
 use futures_util::{SinkExt, StreamExt};
-use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
@@ -19,8 +18,11 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::dispatch::{Connection, Dispatcher, Ready};
-use super::login::{IdentifyLimiter, gateway_url};
+use super::dispatch::{Connection, Dispatcher};
+use super::login::IdentifyLimiter;
+
+mod session;
+pub(super) use session::Session;
 
 pub(super) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -31,28 +33,6 @@ struct Frame {
     t: Option<String>,
     #[serde(default)]
     d: Value,
-}
-
-#[derive(Default)]
-pub(super) struct Session {
-    pub resume: Option<Resume>,
-    presence_account: Option<String>,
-    presence_allowed: Option<time::Instant>,
-}
-
-impl Session {
-    pub fn new(presence_account: Option<String>) -> Self {
-        Self {
-            presence_account,
-            ..Self::default()
-        }
-    }
-}
-
-pub(super) struct Resume {
-    pub url: Url,
-    id: String,
-    sequence: u64,
 }
 
 pub(super) enum End {
@@ -221,31 +201,35 @@ impl Link<'_> {
                             if self.session.resume.is_none() && event != "READY" {
                                 anyhow::bail!("Discord Gateway sent an event before authentication");
                             }
-                            if event == "READY" {
-                                let ready = Ready::deserialize(&frame.d)
-                                    .map_err(|_| anyhow::anyhow!("Discord Gateway READY is invalid"))?;
-                                let url = gateway_url(&ready.resume_gateway_url)?;
-                                if ready.authenticate(state, self.session.presence_account.as_deref()).is_err()
-                                    || ready.session_id.is_empty()
-                                {
-                                    return Ok(End::Fatal(4004));
+                            let ready = if event == "READY" {
+                                match self.session.prepare_ready(state, &frame.d, sequence)? {
+                                    Ok(resume) => {
+                                        self.dispatcher.prepare_ready(self.startup.is_none()).await?;
+                                        if self.session.presence_account.is_none() {
+                                            state.restore_ready_presence().await?;
+                                        }
+                                        Some(resume)
+                                    }
+                                    Err(end) => return Ok(end),
                                 }
-                                if self.session.presence_account.is_none() {
-                                    state.restore_ready_presence().await?;
-                                }
-                                self.session.resume = Some(Resume { url, id: ready.session_id, sequence });
-                            }
+                            } else { None };
                             self.dispatcher.event(event, frame.d, &Connection {
                                 fresh: self.authenticated, admission_ready: *self.admitted, outbound: &outbound,
                             }).await?;
+                            if let Some(resume) = ready {
+                                if self.startup.is_some() {
+                                    self.dispatcher.initial_login()?;
+                                }
+                                self.session.resume = Some(resume);
+                            } else if event == "RESUMED" && !self.authenticated {
+                                self.dispatcher.reconnect()?;
+                            }
                             if let Some(resume) = &mut self.session.resume { resume.sequence = resume.sequence.max(sequence); }
-                            if matches!(event, "READY" | "RESUMED") {
+                            if matches!(event, "READY" | "RESUMED") && !self.authenticated {
                                 self.authenticated = true;
                                 connection.connected(identified_presence.take());
                                 if let Some(startup) = self.startup.take() {
                                     if startup.send(Ok(())).is_err() { return Ok(End::Identify); }
-                                } else {
-                                    self.dispatcher.reconnect()?;
                                 }
                             }
                         }

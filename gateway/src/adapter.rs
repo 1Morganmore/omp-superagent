@@ -173,6 +173,13 @@ impl Context {
     pub(crate) fn discord_intake(&self) -> DiscordIntake<'_> {
         DiscordIntake(&self.store)
     }
+    pub(crate) fn promote_discord_history_gap(&self, sequence: i64) -> Result<()> {
+        ensure!(*self.ready.borrow(), "Gateway admission not ready");
+        let hub = self.hub()?;
+        self.discord_intake().promote_history_gap(sequence)?;
+        hub.changed.notify_one();
+        Ok(())
+    }
     pub(crate) fn discord_presence(&self) -> PresenceStore<'_> {
         PresenceStore(&self.store)
     }

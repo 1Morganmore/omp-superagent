@@ -5,16 +5,16 @@ import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
-import { hostPaths, loadConfig, type Config } from "../src/config";
-import { HostConnection, startHost } from "../src/host";
-import { hostOwnerExecutable } from "../src/host-owner-path";
-import { Superagent } from "../src/runtime";
-import { Store } from "../src/store";
+import { hostPaths, loadConfig, type Config } from "../src/config/config";
+import { HostConnection, startHost } from "../src/omp/host";
+import { hostOwnerExecutable } from "../src/omp/host-owner-path";
+import { Superagent } from "../src/runtime/controller";
+import { Store } from "../src/storage/store";
 import { DecisionParityMessenger, verifyWorkerDecisionParity } from "./fixtures/native-worker-decision-parity";
 import { waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
-import { selectWorkerPlacement } from "../src/worker-placement";
+import { selectWorkerPlacement } from "../src/worker/worker-placement";
 import { lookupWorker, remoteLanePaths, workerConnect, workerOpen, workerProbe, type WorkerLaneRef,
-  type WorkerRegistration } from "../src/worker-wire";
+  type WorkerRegistration } from "../src/worker/worker-wire";
 import { nativeTestArgv } from "./fixtures/native-command";
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { offlineMnemopi } from "./fixtures/native-memory";
@@ -118,7 +118,7 @@ async function verifyChatLane(config: Config, enrollment: string, path: string) 
     await Promise.all([dirname(main.socketPath), dirname(main.logPath), dirname(main.sessionFile)]
       .map(dir => mkdir(dir, { recursive: true, mode: 0o700 })));
     await startHost({ ...main, command: config.command, cwd: config.headCwd, extensionPath: provider,
-      env: { HOME: config.stateDir, PATH: path, PI_CODING_AGENT_DIR: agent }, managedUlwPath: resolve(import.meta.dir, "fixtures/managed-ulw"),
+      env: { HOME: config.stateDir, PATH: path, PI_CODING_AGENT_DIR: agent }, managedUlwPath: resolve(import.meta.dir, "fixtures/managed-super"),
       model: `${model.provider}/${model.id}`, subagentConcurrency: 1 });
     ownedHead = await HostConnection.connect(main.socketPath);
     await runtime.start();
@@ -143,7 +143,7 @@ async function verifyChatLane(config: Config, enrollment: string, path: string) 
       await runtime.stop();
       for (const lane of lanes) {
         if (!lane.remote || !lane.pid) continue;
-        const { workerRef } = await import("../src/worker-wire");
+        const { workerRef } = await import("../src/worker/worker-wire");
         const connection = await workerConnect(await lookupWorker(config.stateDir, lane.remote), workerRef(lane));
         await shutdownFixture(connection);
       }
@@ -201,7 +201,7 @@ sshTest("enroll via the CLI, launch once over SSH, reconnect to the same stock O
     `AuthorizedKeysFile ${target}/.ssh/authorized_keys`, "StrictModes no", "UsePAM no",
     "KbdInteractiveAuthentication no", "PasswordAuthentication no", "AuthenticationMethods publickey",
     `AllowUsers ${userInfo().username}`, "DisableForwarding yes", "PermitTTY no",
-    `SetEnv HOME=${target} PATH=${path} PI_CODING_AGENT_DIR=${agent} OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH=${join(repo,"test/fixtures/managed-ulw")}`,
+    `SetEnv HOME=${target} PATH=${path} PI_CODING_AGENT_DIR=${agent} OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH=${join(repo,"test/fixtures/managed-super")}`,
   ].join("\n") + "\n");
   // Isolate the host-key store. The real client must use the enrolled port.
   await writeFile(join(bin, "ssh"), `#!/bin/sh\nexec "${ssh}" -o UserKnownHostsFile="${known}" "$@"\n`, { mode: 0o700 });

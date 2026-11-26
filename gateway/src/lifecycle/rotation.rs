@@ -1,170 +1,127 @@
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
-use crate::store::{HEAD_ROTATION, HEAD_SESSION_FILE, Store};
+use crate::store::{HEAD_ROTATION, HibernationChange};
 
 use super::{
-    Lifecycle, LifecycleConfig, Phase,
+    Lifecycle, Phase,
     fs::{self, EXIT_TIMEOUT, WAIT_SLICE, alive},
-    host_rpc::{Head, ShutdownRefused, confirmed_exit},
+    host_rpc::{Head, Probe, ShutdownRefused, confirmed_exit},
     restart_record::{HEAD, STOP, meta},
+    rotation_plan::rotated_file,
 };
+
+pub(super) use super::rotation_plan::{Attestation, Mode, Rotation, Stage, session_file, session_file_from_meta};
 
 const MIN_IDLE_MS: u64 = 30 * 60 * 1000;
 const PROBE_INTERVAL: Duration = Duration::from_secs(15);
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(super) enum Stage {
-    Stopping,
-    Starting,
-    Launching,
-    Complete,
-    Refused,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Rotation {
-    pub id: String,
-    pub stage: Stage,
-    pub original: Head,
-    pub session_file: PathBuf,
-    pub config_hash: String,
-    pub stop_boundary: Option<String>,
-    pub attestation: Attestation,
-    pub replacement_session_id: Option<String>,
-    pub replacement_owner_pid: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Attestation {
-    pub generation: u64,
-    idle_ms: u64,
-    context_percent: f64,
-    native_run: u64,
-    pub selection: Selection,
-    // Opaque to Gateway. Only the runtime may use these source-bound
-    // admissions, after verifying the unchanged lane processes and journals.
-    residents: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Selection {
-    provider: String,
-    model_id: String,
-    reasoning: bool,
-    thinking_level: Option<String>,
-    configured_thinking_level: Option<String>,
-    pub model_settings: Value,
-}
-
-impl Selection {
-    pub fn matches(&self, state: &Value) -> bool {
-        let model = &state["model"];
-        let level = state["thinkingLevel"].as_str();
-        let configured = state["configuredThinkingLevel"].as_str();
-        model["provider"].as_str() == Some(&self.provider)
-            && model["id"].as_str() == Some(&self.model_id)
-            && model["reasoning"].as_bool() == Some(self.reasoning)
-            && state.get("configuredThinkingLevel").is_some()
-            && (self.configured_thinking_level.as_deref() == Some("auto")
-                || self.effort_matches(self.thinking_level.as_deref(), level))
-            && self.effort_matches(self.configured_thinking_level.as_deref(), configured)
-            && state["modelSettings"] == self.model_settings
-    }
-
-    fn effort_matches(&self, before: Option<&str>, current: Option<&str>) -> bool {
-        before == current || (!self.reasoning
-            && matches!((before, current), (None, Some("off")) | (Some("off"), None)))
-    }
-}
-
-pub(super) fn valid_session_file(config: &LifecycleConfig, path: &Path) -> bool {
-    if path == config.head_session {
-        return true;
-    }
-    let Some(parent) = path.parent() else { return false };
-    let Some(generation) = parent.file_name().and_then(|id| id.to_str()) else { return false };
-    Uuid::parse_str(generation).is_ok()
-        && path == config.state_dir.join("sessions/main/rotated").join(generation).join("session.jsonl")
-}
-
-pub(super) fn session_file(config: &LifecycleConfig, store: &Store) -> Result<PathBuf> {
-    session_file_from_meta(config, store.get_meta(HEAD_SESSION_FILE)?)
-}
-
-pub(super) fn session_file_from_meta(config: &LifecycleConfig, value: Option<String>) -> Result<PathBuf> {
-    let path = value.map_or_else(|| config.head_session.clone(), PathBuf::from);
-    ensure!(valid_session_file(config, &path), "Invalid durable HEAD session file");
-    Ok(path)
-}
+const MIN_HIBERNATION_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 impl Lifecycle {
-    pub(super) fn rotation(&self) -> Result<Option<Rotation>> {
-        let config = &self.0.config;
-        let plan: Option<Rotation> = meta(self.0.store.get_meta(HEAD_ROTATION)?)?;
-        if let Some(plan) = &plan {
-            let target = config.state_dir.join("sessions/main/rotated").join(&plan.id).join("session.jsonl");
-            ensure!(Uuid::parse_str(&plan.id).is_ok() && plan.session_file == target && plan.original.session_file != target
-                && valid_session_file(config, &plan.original.session_file),
-                "Invalid durable HEAD rotation paths");
-        }
-        Ok(plan)
-    }
-
     pub(super) async fn monitor_rotation(&self, controller_ready: bool) -> Result<()> {
         let _supervising = self.0.supervision.lock().await;
-        if let Some(mut plan) = self.rotation()? && plan.stage == Stage::Stopping {
-            // A crash/timeout after sending shutdown is never authorization to
-            // send it again. Only an exact clean exit can resume the rotation.
-            if !alive(plan.original.pid)? {
-                self.finish_rotation_exit(&mut plan).await?;
-            } else {
-                self.state()?.head_error =
-                    Some("HEAD rotation is waiting for verified exit; no shutdown was repeated");
+        let previous = self.rotation()?;
+        if let Some(mut plan) = previous.filter(|plan| plan.stage.active()) {
+            if plan.stage == Stage::Stopping {
+                // Never reissue shutdown after an unresolved attempt.
+                if !alive(plan.original.pid)? {
+                    self.finish_rotation_exit(&mut plan).await?;
+                } else {
+                    self.state()?.head_error =
+                        Some("HEAD lifecycle is waiting for verified exit; no shutdown was repeated");
+                }
             }
             return Ok(());
         }
-        let head = {
+        let (head, rotation_due, hibernation_due) = {
             let mut state = self.state()?;
-            if state.phase != Phase::Running || !controller_ready || *self.0.closing.borrow()
-                || state.next_rotation_probe.is_some_and(|next| next > Instant::now())
-            {
+            if state.phase != Phase::Running || !controller_ready || *self.0.closing.borrow() {
                 return Ok(());
             }
-            state.next_rotation_probe = Some(Instant::now() + PROBE_INTERVAL);
-            state.head.clone()
+            let now = Instant::now();
+            let rotation_due = state.next_rotation_probe.is_none_or(|next| next <= now);
+            let sleep_period = Duration::from_millis(self.0.config.head_idle_ms);
+            let hibernation_due = !sleep_period.is_zero()
+                && if let Some(next) = state.next_hibernation_probe {
+                    next <= now
+                } else {
+                    // Give a newly ready controller a full idle interval
+                    // before asking for an additional native idle snapshot.
+                    state.next_hibernation_probe = now.checked_add(sleep_period);
+                    false
+                };
+            if !rotation_due && !hibernation_due {
+                return Ok(());
+            }
+            if rotation_due {
+                state.next_rotation_probe = Some(now + PROBE_INTERVAL);
+            }
+            if hibernation_due {
+                state.next_hibernation_probe = Some(now + sleep_period.clamp(
+                    MIN_HIBERNATION_PROBE_INTERVAL, PROBE_INTERVAL,
+                ));
+            }
+            (state.head.clone(), rotation_due, hibernation_due)
         };
         let Some(head) = head else { return Ok(()) };
         let mut probe = match self.probe().await {
             Ok(probe) if probe.head.same(&head) => probe,
             _ => return Ok(()), // Ordinary ownership supervision handles outages.
         };
-        if !probe.idle_for_restart() || !known_context(&probe.state) {
+        if !probe.idle_for_restart() {
             return Ok(());
         }
-        let Some(attestation) = probe.rotation_attestation().await? else { return Ok(()) };
-        if attestation.idle_ms < MIN_IDLE_MS || attestation.context_percent < 50.0
-            || !attestation.selection.matches(&probe.state) {
-            return Ok(());
+        // Preserve rotation at its existing threshold when both operations
+        // are due. Sleep never depends on a context-usage estimate.
+        if rotation_due && known_context(&probe.state)
+            && let Some(attestation) = probe.rotation_attestation(Mode::Rotate).await?
+            && attestation.idle_ms >= MIN_IDLE_MS
+            && attestation.context_percent.is_some_and(|percent| percent >= 50.0)
+            && attestation.selection.matches(&probe.state)
+        {
+            return self.begin_head_lifecycle(probe, Mode::Rotate, attestation).await;
         }
+        if hibernation_due
+            && let Some(attestation) = probe.rotation_attestation(Mode::Hibernate).await?
+            && attestation.idle_ms >= self.0.config.head_idle_ms
+            && attestation.residents.is_empty()
+            && attestation.selection.matches(&probe.state)
+        {
+            return self.begin_head_lifecycle(probe, Mode::Hibernate, attestation).await;
+        }
+        Ok(())
+    }
+
+    async fn begin_head_lifecycle(&self, mut probe: Probe, mode: Mode, attestation: Attestation) -> Result<()> {
         let store = &self.0.store;
         let id = Uuid::new_v4().to_string();
+        let (session_file, resume_profile_hash) = match mode {
+            Mode::Rotate => (rotated_file(&self.0.config, &id), None),
+            Mode::Hibernate => (
+                probe.head.session_file.clone(),
+                Some(self.0.config.resume_profile_hash.clone()),
+            ),
+        };
         let mut plan = Rotation {
-            session_file: self.0.config.state_dir.join("sessions/main/rotated").join(&id).join("session.jsonl"),
-            id, stage: Stage::Stopping, original: head,
+            id, mode, stage: Stage::Stopping, session_file, original: probe.head.clone(),
             config_hash: self.0.config.config_hash()?,
             stop_boundary: store.get_meta(STOP)?,
             attestation, replacement_session_id: None, replacement_owner_pid: None,
+            resume_profile_hash, wake_stop: None, recorded: String::new(),
         };
+        if let Err(error) = super::host_launch::check_head_lifecycle_command(&self.0.config, &plan).await {
+            if mode == Mode::Hibernate {
+                let idle_period = Duration::from_millis(self.0.config.head_idle_ms);
+                self.state()?.next_hibernation_probe = Instant::now().checked_add(idle_period.max(PROBE_INTERVAL));
+            }
+            eprintln!("HEAD remains resident: {error}");
+            return Ok(());
+        }
+        plan.recorded = serde_json::to_string(&plan)?;
         {
             let mut state = self.state()?;
             let recorded = store.get_meta(HEAD_ROTATION)?;
@@ -172,13 +129,13 @@ impl Lifecycle {
             if state.phase != Phase::Running || *self.0.closing.borrow()
                 || generation != plan.attestation.generation
                 || self.0.config_hash.get() != Some(&plan.config_hash)
-                || !store.begin_rotation(recorded.as_deref(), plan.stop_boundary.as_deref(), &serde_json::to_string(&plan)?)?
+                || !store.begin_rotation(recorded.as_deref(), plan.stop_boundary.as_deref(), &plan.recorded)?
             {
                 return Ok(());
             }
-            state.phase = Phase::Rotating;
+            state.phase = if mode == Mode::Hibernate { Phase::Hibernating } else { Phase::Rotating };
         }
-        if let Err(error) = probe.shutdown_rotation(&plan.id).await {
+        if let Err(error) = probe.shutdown_rotation(&plan.id, mode).await {
             if error.downcast_ref::<ShutdownRefused>().is_some() {
                 self.refuse_rotation(&mut plan)?;
                 return Ok(());
@@ -192,6 +149,9 @@ impl Lifecycle {
     }
 
     async fn finish_rotation_exit(&self, plan: &mut Rotation) -> Result<()> {
+        if plan.mode == Mode::Hibernate {
+            return self.park_head(plan).await;
+        }
         let config = &self.0.config;
         confirmed_exit(&config.head_socket, &plan.original).await?;
         let deadline = Instant::now() + EXIT_TIMEOUT;
@@ -223,27 +183,45 @@ impl Lifecycle {
     pub(super) fn refuse_rotation(&self, plan: &mut Rotation) -> Result<()> {
         let mut state = self.state()?;
         plan.stage = Stage::Refused;
-        self.0.store.set_meta(HEAD_ROTATION, &serde_json::to_string(plan)?)?;
-        if state.phase == Phase::Rotating {
+        if plan.mode == Mode::Hibernate {
+            self.save_hibernation(plan, HibernationChange::Refused)?;
+        } else {
+            self.0.store.set_meta(HEAD_ROTATION, &serde_json::to_string(plan)?)?;
+        }
+        if matches!(state.phase, Phase::Rotating | Phase::Hibernating) {
             state.phase = Phase::Running;
         }
+        state.head_error = None;
         if let Some(changed) = self.0.notify.get() {
             changed.notify_one();
         }
         Ok(())
     }
 
-    pub(super) fn publish_rotation(&self, plan: &mut Rotation, head: &Head, snapshot: &Value) -> Result<()> {
+    pub(super) fn verify_replacement(&self, plan: &Rotation, head: &Head, snapshot: &Value) -> Result<()> {
         ensure!(plan.stage == Stage::Launching
-            && head.pid != plan.original.pid && head.owner_pid != plan.original.owner_pid
+            && plan.matches_replacement_pids(head)
             && alive(head.pid)? && alive(head.owner_pid)?
-            && head.session_id != plan.original.session_id && head.session_file == plan.session_file
-            && plan.replacement_owner_pid == Some(head.owner_pid)
+            && plan.matches_replacement_session(&head.session_id) && head.session_file == plan.session_file
             && plan.replacement_session_id.as_deref() == Some(head.session_id.as_str())
             && plan.attestation.selection.matches(snapshot),
-            "Rotated HEAD identity/model/effort is not confirmed");
+            "Replacement HEAD identity or exact stock selection is not confirmed");
+        ensure!(plan.mode != Mode::Hibernate || plan.attestation.matches_hibernation_profile(snapshot),
+            "Awakened HEAD did not verify the original native OMP profile");
+        ensure!(plan.mode != Mode::Hibernate || plan.attestation.selection.has_exact_stock_resume(),
+            "Awakened HEAD lacks an exact stock resume attestation");
+        ensure!(plan.mode != Mode::Hibernate || head.loaded_superkit_path.is_some(),
+            "Awakened HEAD did not verify its managed integration");
+        Ok(())
+    }
+
+    pub(super) fn publish_rotation(&self, plan: &mut Rotation, head: &Head) -> Result<()> {
         plan.stage = Stage::Complete;
-        self.0.store.finish_rotation(&json!(head), &serde_json::to_string(plan)?)?;
+        if plan.mode == Mode::Hibernate {
+            self.save_hibernation(plan, HibernationChange::Publish(&json!(head)))?;
+        } else {
+            self.0.store.finish_rotation(&json!(head), &serde_json::to_string(plan)?)?;
+        }
         if let Some(changed) = self.0.notify.get() {
             changed.notify_one();
         }

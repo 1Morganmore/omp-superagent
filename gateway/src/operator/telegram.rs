@@ -14,7 +14,7 @@ const PROFILE_UNRESOLVED: &str = "Profile update is unresolved; it may have reac
 const IDS: &str = "Telegram command menus require a positive owner ID and negative allowed group IDs";
 const LANGUAGE: &str = "Telegram command language must be an empty string or a two-letter lowercase ISO 639-1 code";
 const MAX_SAFE_ID: i64 = 9_007_199_254_740_991;
-const LANGUAGE_CODES: &str = include_str!("../../../src/telegram-command-languages.json");
+const LANGUAGE_CODES: &str = include_str!("../../../src/messaging/telegram-command-languages.json");
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

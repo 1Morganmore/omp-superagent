@@ -3,9 +3,9 @@ import { appendFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { loadConfig } from "../../src/config";
-import { createGatewayMessenger } from "../../src/gateway-client";
-import { Store } from "../../src/store";
+import { loadConfig } from "../../src/config/config";
+import { createGatewayMessenger } from "../../src/gateway/gateway-client";
+import { Store } from "../../src/storage/store";
 import { recordHostFixture } from "./host-fixture-processes";
 import { stockHostFixture } from "./stock-host";
 

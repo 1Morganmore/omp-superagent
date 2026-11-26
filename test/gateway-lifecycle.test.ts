@@ -7,15 +7,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { main } from "../src/cli";
-import { hostPaths, type Config } from "../src/config";
+import { hostPaths, type Config } from "../src/config/config";
 import type { GatewayRestartRecord, GatewayRestartRequest, Inbound } from "../src/contracts";
 import { launchGateway } from "./oracles/bun-gateway/gateway";
-import { gatewayPaths } from "../src/gateway-protocol";
+import { gatewayPaths } from "../src/gateway/gateway-protocol";
 import { normalizedRestartConfigHash, processAlive, restartConfigHash, runGatewayRestart,
   type RestartPlan } from "./oracles/bun-gateway/gateway-restart";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
-import type { ManagedUlwStatus } from "../src/managed-ulw";
-import { Store } from "../src/store";
+import type { ManagedUlwStatus } from "../src/omp/managed-super";
+import { Store } from "../src/storage/store";
 import {
   cleanups, configFixture, detachedFixture, fixture, LIFECYCLE_PHASE_MS, metadata,
   route, RPC_MS, STARTUP_MS, token, until, waitStatus, withFixtureToken,

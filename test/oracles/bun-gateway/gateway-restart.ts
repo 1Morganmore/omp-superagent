@@ -3,12 +3,12 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { hostPaths, loadConfig, loadConfigSnapshot, requireMessengerCredentials, type Config } from "../../../src/config";
-import { loadCredentials } from "../../../src/credentials";
+import { hostPaths, loadConfig, loadConfigSnapshot, requireMessengerCredentials, type Config } from "../../../src/config/config";
+import { loadCredentials } from "../../../src/config/credentials";
 import type { GatewayRestartRecord } from "../../../src/contracts";
 import { GatewayStore } from "./gateway-store";
-import type { GatewayStatus } from "../../../src/gateway-wire";
-import { gatewayPaths } from "../../../src/gateway-protocol";
+import type { GatewayStatus } from "../../../src/gateway/gateway-wire";
+import { gatewayPaths } from "../../../src/gateway/gateway-protocol";
 
 export interface RestartPlan {
   configPath: string;
@@ -44,7 +44,7 @@ export async function readRestartConfig(path: string) {
 }
 
 export function restartCompatible(active: Config, candidate: Config): boolean {
-  const context = ({ maxHosts, maxSubagents, idleMs, model, ...context }: Config) => context;
+  const context = ({ maxHosts, maxSubagents, idleMs, headIdleMs, model, ...context }: Config) => context;
   return JSON.stringify(context(active)) === JSON.stringify(context(candidate));
 }
 

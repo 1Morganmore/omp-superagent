@@ -1,5 +1,10 @@
 mod commands;
+mod exit_receipt;
 mod inventory;
+#[path = "../../native-journal/format.rs"]
+mod journal_format;
+#[path = "../../native-journal/scan.rs"]
+mod journal_scan;
 mod owner;
 mod projection;
 mod transport;

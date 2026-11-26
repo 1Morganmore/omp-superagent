@@ -2,12 +2,12 @@ import { expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
-import { type Config, hostPaths, privateDirectory } from "../../src/config";
+import { type Config, hostPaths, privateDirectory } from "../../src/config/config";
 import type { Approval, Attachment, Inbound, Messenger, OutputRecord, Route } from "../../src/contracts";
-import { HostConnection, startHost } from "../../src/host";
-import { Superagent } from "../../src/runtime";
-import { Store } from "../../src/store";
-import { workflowContext } from "../../src/workflow";
+import { HostConnection, startHost } from "../../src/omp/host";
+import { Superagent } from "../../src/runtime/controller";
+import { Store } from "../../src/storage/store";
+import { workflowContext } from "../../src/lane/workflow";
 import { nativeDisabledProviders } from "./native-extension";
 import { autonomyModel } from "./autonomy-native-extension";
 import { nativeTestCommand } from "./native-command";
@@ -89,7 +89,7 @@ export async function nativeAutonomyRuntime(): Promise<void> {
     ...(process.env.OMP_TEST_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.OMP_TEST_NATIVES_DIR } : {}),
   };
   const provider = path.resolve(import.meta.dir, "autonomy-native-extension.ts");
-  const managedUlwPath = path.resolve(import.meta.dir, "managed-ulw");
+  const managedUlwPath = path.resolve(import.meta.dir, "managed-super");
   const config: Config = {
     path: path.join(root, "superagent.json"), stateDir: root, headCwd: root,
     command: [...command, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e", provider],

@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { authorizeRoute, parseConfig } from "../src/config";
-import { DeliveryError } from "../src/delivery";
-import { GroupAccess, groupRequests } from "../src/group-access";
-import type { GroupReply, GroupRequest } from "../src/group-policy";
+import { authorizeRoute, parseConfig } from "../src/config/config";
+import { DeliveryError } from "../src/messaging/delivery";
+import { GroupAccess, groupRequests } from "../src/group/group-access";
+import type { GroupReply, GroupRequest } from "../src/group/group-policy";
 
 const dirs: string[] = [];
 afterEach(() => {

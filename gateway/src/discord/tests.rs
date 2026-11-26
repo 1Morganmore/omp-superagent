@@ -22,7 +22,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 use super::*;
 use crate::{
     adapter::Hub,
-    store::{GatewayReceipt, Store},
+    store::{GatewayReceipt, QueuedEvent, Store},
 };
 
 #[path = "tests/addressing.rs"]
@@ -33,6 +33,8 @@ mod addressing_authority_tests;
 mod addressing_recovery_tests;
 #[path = "tests/commands.rs"]
 mod command_tests;
+#[path = "tests/history_gap.rs"]
+mod history_gap_tests;
 #[path = "tests/model_picker.rs"]
 mod model_picker_tests;
 #[path = "tests/presence.rs"]
@@ -186,12 +188,17 @@ async fn dispatch(ws: &mut FixtureSocket, sequence: u64, event: &str, data: Valu
     wire(ws, json!({"op":0, "s":sequence, "t":event, "d":data})).await;
 }
 
-async fn identify(listener: &TcpListener, voice: bool) -> FixtureSocket {
+async fn gateway_login(listener: &TcpListener) -> (FixtureSocket, Value) {
     let (stream, _) = listener.accept().await.unwrap();
     let mut ws = accept_async(stream).await.unwrap();
     wire(&mut ws, json!({"op":10,"d":{"heartbeat_interval":60_000}})).await;
-    let identify: Value =
+    let packet =
         serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    (ws, packet)
+}
+
+async fn identify(listener: &TcpListener, voice: bool) -> FixtureSocket {
+    let (mut ws, identify) = gateway_login(listener).await;
     assert_eq!(identify["op"], 2);
     let intents = identify["d"]["intents"].as_u64().unwrap();
     assert_eq!(
@@ -224,21 +231,24 @@ async fn received(emitted: &mut mpsc::UnboundedReceiver<(String, Value)>, expect
     body
 }
 
-async fn event(hub: &Hub, store: &Store) -> Value {
+async fn queued_event(hub: &Hub, store: &Store) -> QueuedEvent {
     time::timeout(Duration::from_secs(5), async {
         loop {
             let changed = hub.changed.notified();
             if let Some(next) = store.next(None).unwrap() {
-                store
-                    .receipt(next.sequence, GatewayReceipt::Accepted)
-                    .unwrap();
-                return next.event;
+                return next;
             }
             changed.await;
         }
     })
     .await
     .expect("Discord event was not admitted")
+}
+
+async fn event(hub: &Hub, store: &Store) -> Value {
+    let next = queued_event(hub, store).await;
+    store.receipt(next.sequence, GatewayReceipt::Accepted).unwrap();
+    next.event
 }
 
 fn message(id: &str, guild: Option<&str>, channel: &str, owner: &str, text: &str) -> Value {
@@ -918,22 +928,7 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     assert!(observed.try_recv().is_err());
 
     wire(&mut socket, json!({"op":7})).await;
-    let (stream, _) = time::timeout(Duration::from_secs(5), ws.accept())
-        .await
-        .unwrap()
-        .unwrap();
-    let mut resumed = accept_async(stream).await.unwrap();
-    wire(
-        &mut resumed,
-        json!({"op":10,"d":{"heartbeat_interval":60_000}}),
-    )
-    .await;
-    let frame = time::timeout(Duration::from_secs(5), resumed.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let resume: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    let (mut resumed, resume) = time::timeout(Duration::from_secs(5), gateway_login(&ws)).await.unwrap();
     assert_eq!(resume["op"], 6);
     assert_eq!(resume["d"]["session_id"], "test-session");
     assert_eq!(resume["d"]["seq"], last_sequence);
@@ -953,7 +948,12 @@ async fn websocket_ingress_and_rest_cards_keep_original_discord_identity() {
     .await;
     dispatch(&mut resumed, last_sequence + 3, "RESUMED", json!({"trace":[]})).await;
     assert_eq!(event(&hub, &store).await["input"]["messageId"], "207");
-    assert_eq!(event(&hub, &store).await["kind"], "reconnect");
+    assert_eq!(event(&hub, &store).await, json!({"kind":"reconnect"}));
+    wire(&mut resumed, json!({"op":9,"d":false})).await;
+    let _identified = time::timeout(Duration::from_secs(12), identify(&ws, false)).await.unwrap();
+    let gap = event(&hub, &store).await;
+    assert_eq!(gap["historyRecovery"], true);
+    assert_eq!(gap["historyPlatform"], "discord");
     hub.stop().await.unwrap();
     server.abort();
 }

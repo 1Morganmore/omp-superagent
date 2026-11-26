@@ -5,10 +5,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { autostartStatus, installAutostart, uninstallAutostart, type AutostartAdapters } from "../src/autostart";
+import { autostartStatus, installAutostart, uninstallAutostart, type AutostartAdapters } from "../src/operator/autostart";
 import { main } from "../src/cli";
-import { parseConfig } from "../src/config";
-import { writeCredentials } from "../src/credentials";
+import { parseConfig } from "../src/config/config";
+import { writeCredentials } from "../src/config/credentials";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -347,7 +347,7 @@ describe("macOS login registration", () => {
     // native loader or messenger account activation can execute.
     const script = `
       Bun.plugin({ name: "forbid-account-runtime", setup(build) {
-        build.onLoad({ filter: /(?:node_modules\\/.*(?:pi-coding-agent|discord|grammy|slack)|\\/src\\/(?:host|gateway|runtime|messengers)\\.ts$)/ }, args => {
+        build.onLoad({ filter: /(?:node_modules\\/.*(?:pi-coding-agent|discord|grammy|slack)|\\/src\\/(?:omp\\/host|runtime\\/controller|gateway\\/gateway-(?:native|client))\\.ts$)/ }, args => {
           throw new Error("Forbidden runtime/account import: " + args.path);
         });
       }});

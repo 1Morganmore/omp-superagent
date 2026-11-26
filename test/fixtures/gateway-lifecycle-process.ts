@@ -4,8 +4,8 @@ import { appendFileSync, existsSync, watch } from "node:fs";
 import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, requireMessengerCredentials } from "../../src/config";
-import { loadCredentials } from "../../src/credentials";
+import { loadConfig, requireMessengerCredentials } from "../../src/config/config";
+import { loadCredentials } from "../../src/config/credentials";
 import type { Inbound } from "../../src/contracts";
 import type { DownloadMessenger as Messenger } from "./inbound-attachments";
 import { runGatewayRestart } from "../oracles/bun-gateway/gateway-restart";
@@ -79,7 +79,7 @@ if (arg("--runner")) {
     async openAttachment() { return new Response("fixture"); },
   };
   const starting = startGateway(config, { messenger, restartRequestId: arg("--restart-request"), onError: error => console.error(error),
-    managedUlwPath: fileURLToPath(new URL("./managed-ulw", import.meta.url)),
+    managedUlwPath: fileURLToPath(new URL("./managed-super", import.meta.url)),
     launchRestartRunner: (configPath, requestId, fd) => spawn(process.execPath,
       ["--no-env-file", self, "--config", configPath, "--runner", requestId], {
         cwd: config.headCwd, detached: true, stdio: ["ignore", fd, fd], shell: false,

@@ -4,14 +4,15 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionEntries, type FileEntry, type SessionHeader } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { type Config, hostPaths, privateDirectory } from "../../src/config";
+import { type Config, hostPaths, privateDirectory } from "../../src/config/config";
 import { physicalRouteKey, type Approval, type Inbound, type Lane, type LanePresetSnapshot, type Messenger, type OutputRecord,
   type Route, type ThreadInfo, type ThreadUpdate } from "../../src/contracts";
-import { buildHostArgs, HostConnection, startHost, type HostOptions } from "../../src/host";
-import { Superagent, type RuntimeState } from "../../src/runtime";
-import { readOmpUsage } from "../../src/omp-usage";
-import { NativePresetManager } from "../../src/native-presets";
-import { Store } from "../../src/store";
+import { buildHostArgs, HostConnection, startHost, type HostOptions } from "../../src/omp/host";
+import { Superagent } from "../../src/runtime/controller";
+import type { RuntimeState } from "../../src/runtime/native-frames";
+import { readOmpUsage } from "../../src/omp/omp-usage";
+import { NativePresetManager } from "../../src/omp/native-presets";
+import { Store } from "../../src/storage/store";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { nativeDisabledProviders } from "./native-extension";
 import { modelAbortMarker, modelCompactAbortInstructions, modelCompactInstructions, modelCompactMarker, modelCompactSummary,
@@ -145,7 +146,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   if (natives && !path.isAbsolute(natives)) throw new Error("OMP_TEST_NATIVES_DIR must be absolute");
   const managedUlwPath = process.env.OMP_TEST_ULW_EXTENSION
     ? path.dirname(await fs.realpath(path.resolve(process.env.OMP_TEST_ULW_EXTENSION)))
-    : path.resolve(import.meta.dir, "managed-ulw");
+    : path.resolve(import.meta.dir, "managed-super");
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "osr-"));
   await fs.chmod(root, 0o700);
   const home = path.join(root, "home");

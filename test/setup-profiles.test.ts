@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import type { Config } from "../src/config";
-import { setupBotProfiles } from "../src/setup-profiles";
+import type { Config } from "../src/config/config";
+import { setupBotProfiles } from "../src/operator/setup-profiles";
 import { loopbackOperator } from "./fixtures/operator";
 
 const image = readFileSync(new URL("../assets/superagent-avatar.jpg", import.meta.url));

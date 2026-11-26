@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { invokeOperator, type OperatorRun } from "../../src/operator";
+import { invokeOperator, type OperatorRun } from "../../src/operator/operator";
 
 let executable: Promise<string> | undefined;
 export function operatorExample(): Promise<string> {

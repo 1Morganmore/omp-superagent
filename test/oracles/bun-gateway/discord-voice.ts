@@ -1,5 +1,5 @@
 import { ChannelType, MessageType, type Message, type TextChannel } from "discord.js";
-import type { DiscordVoiceConfig } from "../../../src/config";
+import type { DiscordVoiceConfig } from "../../../src/config/config";
 import { VoiceDrafts } from "./discord-voice-draft";
 import type { openVoiceLink } from "./discord-voice-link";
 import type { openLive } from "./openai-live";

@@ -5,9 +5,9 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { hostPaths, loadConfig } from "../../src/config";
+import { hostPaths, loadConfig } from "../../src/config/config";
 import type { DownloadMessenger as Messenger } from "./inbound-attachments";
-import { loadCredentials } from "../../src/credentials";
+import { loadCredentials } from "../../src/config/credentials";
 import type { GatewayService } from "../oracles/bun-gateway/gateway";
 import { offlineMnemopi } from "./native-memory";
 
@@ -201,7 +201,7 @@ try {
   const { writeStockHostExecutable } = await import("./stock-host");
   await writeStockHostExecutable(executable, `import ${JSON.stringify(hostFixture)};\n`);
   const { startGateway } = await import("../oracles/bun-gateway/gateway");
-  const { gatewayPaths, gatewayStatus } = await import("../../src/gateway-protocol");
+  const { gatewayPaths, gatewayStatus } = await import("../../src/gateway/gateway-protocol");
   const absent = await cli("status");
   assert.equal(absent.gateway, null);
   assert.equal(absent.autostart.installed, false);
@@ -219,7 +219,7 @@ try {
     async openAttachment() { return new Response("local"); },
   };
   service = await startGateway(config, { messenger, onError: () => {},
-    managedUlwPath: path.resolve(import.meta.dir, "managed-ulw"),
+    managedUlwPath: path.resolve(import.meta.dir, "managed-super"),
   });
   await until(() => service!.status().head.ready, "Isolated Gateway/fixture head readiness");
   headPid = service.status().head.pid!;
@@ -234,7 +234,7 @@ try {
   await liveHead();
   // Exercise the existing restart gate as well: a sent owner intent and its
   // matching fence cannot authorize replacement while native work is busy.
-  const { Store } = await import("../../src/store");
+  const { Store } = await import("../../src/storage/store");
   const request = { requestId: crypto.randomUUID(), inputId: "autostart-restart", ackOutputId: "autostart-restart-ack" };
   const route = { platform: "discord" as const, accountId: "1", authorityId: "2", guildId: null, channelId: "3", threadId: null };
   const sessionFile = hostPaths(config, "main").sessionFile;

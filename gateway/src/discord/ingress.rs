@@ -14,12 +14,14 @@ use super::outputs::{attachment_url, nonce};
 use super::rest::{Rest, broken, no_mentions};
 use super::voice::{Command, Voice};
 use super::{
-    Effect, EffectError, State,
+    Effect, State,
     model::{
         Channel, Message, Reference, ReferencedMessage, RemoteMessage, Route, User, actual_guild,
         hash, snowflake, snowflake_time,
     },
 };
+
+mod history;
 
 const VOICE_DRAFT_HEADER: &str = "Proposed work from the live voice session (not yet submitted).\n";
 
@@ -412,84 +414,5 @@ impl State {
         }
         input["discordContext"] = self.context_snapshot(route, Some(channel)).await;
         Ok(Some(input))
-    }
-
-    pub(super) async fn fetch_after(&self, route: &Route, cursor: &str) -> Effect<Value> {
-        if !snowflake(cursor) {
-            return Err(EffectError::rejected(
-                "Catchup requires a stored Discord message snowflake",
-            ));
-        }
-        let route = route.physical();
-        self.assert_route(&route)?;
-        if self.group_route(&route) {
-            return Err(EffectError::rejected("Discord group rooms do not allow history recovery"));
-        }
-        self.assert_live_intake_drained(&route)?;
-        let cached = self.channels.read().await.get(route.destination()).cloned();
-        let channel = match cached {
-            Some(channel) => channel,
-            None => {
-                let Some(channel) = self.rest.history_lookup::<Channel>(
-                    &format!("channels/{}", route.destination()),
-                ).await? else { return Ok(Value::Null) };
-                if channel.id != route.destination() {
-                    return Err(broken("Discord history channel did not match its requested destination"));
-                }
-                self.remember_channel(channel.clone()).await;
-                channel
-            }
-        };
-        if self.route_for(&channel)? != route {
-            return Err(EffectError::rejected("Discord destination identity changed"));
-        }
-        let channel = channel.sendable()?;
-        let mut after = cursor.to_owned();
-        let mut inputs = Vec::new();
-        loop {
-            let page: Option<Vec<Value>> = self
-                .rest
-                .history_lookup(&format!(
-                    "channels/{}/messages?after={after}&limit=100",
-                    channel.id
-                ))
-                .await?;
-            let Some(page) = page else { return Ok(Value::Null) };
-            let count = page.len();
-            let mut messages =
-                page.into_iter()
-                    .map(|raw| {
-                        let message = Message::deserialize(&raw)
-                            .map_err(|_| broken("Discord history contained an invalid message"))?;
-                        let id = message.id.parse::<u64>().map_err(|_| {
-                            broken("Discord history contained an invalid message ID")
-                        })?;
-                        if !message.matches(&route) {
-                            return Err(broken(
-                                "Discord history destination did not match its request",
-                            ));
-                        }
-                        Ok((id, message))
-                    })
-                    .collect::<Effect<Vec<_>>>()?;
-            messages.sort_unstable_by_key(|(id, _)| *id);
-            let previous = after
-                .parse::<u64>()
-                .map_err(|_| broken("Discord history cursor could not be verified"))?;
-            for (id, message) in messages {
-                if id <= previous {
-                    return Err(broken("Discord history cursor did not advance"));
-                }
-                after = message.id.clone();
-                if let Some(input) = self.with_context(&message, &route, &channel, self.addressing_enabled(&route)).await? {
-                    inputs.push(input);
-                }
-            }
-            if count < 100 {
-                break;
-            }
-        }
-        self.assert_live_intake_drained(&route)?;
-        Ok(Value::Array(inputs))
     }
 }

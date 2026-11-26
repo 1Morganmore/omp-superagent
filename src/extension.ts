@@ -4,23 +4,25 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Type } from "@sinclair/typebox";
-import { configuredPlatforms, hostPaths, loadConfigSnapshot } from "./config";
-import { createGatewayMessenger } from "./gateway-client";
-import { Superagent } from "./runtime";
-import { Store } from "./store";
-import { lanePlacement } from "./lane-rows";
-import { sameLaneModel } from "./lane-models";
-import { NativePresetManager } from "./native-presets";
-import { publishNativeSession } from "./native-sessions";
-import { isPrReviewLane } from "./pr-intake-review";
+import { configuredPlatforms, hostPaths, loadConfigSnapshot } from "./config/config";
+import { loadWakeConfig } from "./config/wake-config";
+import { createGatewayMessenger } from "./gateway/gateway-client";
+import { Superagent } from "./runtime/controller";
+import { Store } from "./storage/store";
+import { lanePlacement } from "./lane/lane-rows";
+import { sameLaneModel } from "./lane/lane-models";
+import { NativePresetManager } from "./omp/native-presets";
+import { publishNativeSession, type HostReadyEvent } from "./omp/native-sessions";
+import { isPrReviewLane } from "./pr/pr-intake-review";
 import { MODEL_PRESET_NAMES, WORKFLOW_NAMES } from "./contracts";
-import type { PrWatchCommand } from "./pr-watch";
-import type { LaneWatchCommand } from "./lane-watch";
-import { registerDecisionAsk } from "./decision-tool";
-import { registerResultAttach, RESULT_ATTACH_TOOL } from "./result-attachment";
-import { HEAD_ROTATION_GUARD, HEAD_ROTATION_PROBE, type RotationGuardEvent, type RotationProbeEvent } from "./head-rotation";
-import { readHeadQuota } from "./head-quota";
-import { soulUpdateSchema } from "./soul";
+import type { PrWatchCommand } from "./pr/pr-watch";
+import type { LaneWatchCommand } from "./lane/lane-watch";
+import { registerDecisionAsk } from "./lane/decision-tool";
+import { registerResultAttach, RESULT_ATTACH_TOOL } from "./messaging/result-attachment";
+import { HEAD_ROTATION_GUARD, HEAD_ROTATION_PROBE, HEAD_SLEEP_PROBE_READY, type HeadSleepProbeReadyEvent,
+  type RotationGuardEvent, type RotationProbeEvent } from "./runtime/head-rotation";
+import { readHeadQuota } from "./runtime/head-quota";
+import { soulUpdateSchema } from "./omp/soul";
 
 // Inject the role contract, not the references. Resolve the reference directory
 // from this package so a same-name workspace skill cannot change the procedure.
@@ -62,17 +64,22 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   // Subagents inherit environment but must not acquire the head's controller.
   let runtime: Superagent | undefined;
   let loading: Promise<void> | undefined;
+  const hostShutdown = new AbortController();
   let closed = false;
   let startupError: unknown;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopHostReady: (() => void) | undefined;
+  const stopSleepProbeReady = pi.events.on(HEAD_SLEEP_PROBE_READY, value => {
+    const { respond } = value as HeadSleepProbeReadyEvent;
+    respond(runtime?.canProbeHeadSleep() ?? false);
+  });
   const stopRotationProbe = pi.events.on(HEAD_ROTATION_PROBE, value => {
-    const { state, respond } = value as RotationProbeEvent;
-    respond(runtime?.attestHeadRotation(state) ?? Promise.resolve(null));
+    const { mode, state, respond } = value as RotationProbeEvent;
+    respond(runtime?.attestHeadRotation(state, mode) ?? Promise.resolve(null));
   });
   const stopRotationGuard = pi.events.on(HEAD_ROTATION_GUARD, value => {
-    const { id, state, respond } = value as RotationGuardEvent;
-    respond(runtime?.guardHeadRotation(id, state) ?? false);
+    const { id, mode, state, respond } = value as RotationGuardEvent;
+    respond(runtime?.guardHeadRotation(id, state, mode) ?? false);
   });
   let presets: Promise<NativePresetManager> | undefined;
   const requireRuntime = (ctx: ExtensionContext) => {
@@ -515,14 +522,20 @@ export default function superagentExtension(pi: ExtensionAPI): void {
       throw new Error("Start this extension with omp-sa start and its owned stock OMP host");
     // Native startup precedes the private pipe owner's socket readiness.
     // Activate only after that exact owner has materialized and verified us.
-    stopHostReady = pi.events.on("superagent:host-ready", () => {
+    stopHostReady = pi.events.on("superagent:host-ready", value => {
       if (timer || loading || closed) return;
       timer = setTimeout(() => {
       loading = (async () => {
-        const { config, sourceHash } = await loadConfigSnapshot(configPath);
+        const { nativeProfile, waking } = value as HostReadyEvent;
+        if (!nativeProfile) throw new Error("HEAD did not identify its native session storage");
         const restartHash = process.env.OMP_SUPERAGENT_RESTART_CONFIG_SHA256;
-        if (restartHash !== undefined && restartHash !== sourceHash)
+        if (waking && !restartHash) throw new Error("HEAD wake is missing its reserved configuration");
+        const snapshot = waking && restartHash
+          ? { config: await loadWakeConfig(configPath, restartHash, hostShutdown.signal), sourceHash: restartHash }
+          : await loadConfigSnapshot(configPath);
+        if (restartHash !== undefined && restartHash !== snapshot.sourceHash)
           throw new Error("Gateway configuration changed before replacement HEAD initialization");
+        const { config } = snapshot;
         delete process.env.OMP_SUPERAGENT_RESTART_CONFIG_SHA256;
         const store = new Store(join(config.stateDir, "coordination.sqlite"));
         let messenger: ReturnType<typeof createGatewayMessenger>;
@@ -531,9 +544,9 @@ export default function superagentExtension(pi: ExtensionAPI): void {
             if (lane.remote || !lane.sessionId || isPrReviewLane(store, lane.id)) continue;
             const { sessionFile } = hostPaths(config, lane.id);
             if (lane.sessionFile !== sessionFile) throw new Error("Refusing to publish a lane outside its managed session path");
-            await publishNativeSession(sessionFile, lane.cwd, lane.sessionId);
+            await publishNativeSession(sessionFile, lane.cwd, lane.sessionId, nativeProfile);
           }
-          messenger = createGatewayMessenger(config);
+          messenger = createGatewayMessenger(config, hostShutdown.signal);
         } catch (error) {
           store.close();
           throw error;
@@ -581,6 +594,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
           throw error;
         }
       })().catch(error => {
+        if (closed) return;
         startupError = error;
         pi.logger.error(`Superagent startup failed: ${error instanceof Error ? error.message : String(error)}`);
         ctx.ui.setStatus("superagent", "startup failed; see host log");
@@ -590,9 +604,11 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   });
   pi.on("session_shutdown", async () => {
     closed = true;
+    hostShutdown.abort();
     stopHostReady?.();
     stopRotationProbe();
     stopRotationGuard();
+    stopSleepProbeReady();
     if (timer) clearTimeout(timer);
     await loading;
     await runtime?.stop();

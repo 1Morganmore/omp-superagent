@@ -2,7 +2,7 @@ import {
   ApplicationCommandOptionType, ApplicationCommandType, ApplicationIntegrationType, InteractionContextType,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
 } from "discord.js";
-import { MESSENGER_COMMAND_CATALOG } from "../../src/messenger-commands";
+import { MESSENGER_COMMAND_CATALOG } from "../../src/messaging/messenger-commands";
 
 /** Test-side projection of the shared catalog using Discord's SDK types. */
 export const DISCORD_COMMANDS: readonly RESTPostAPIChatInputApplicationCommandsJSONBody[] = MESSENGER_COMMAND_CATALOG.map(

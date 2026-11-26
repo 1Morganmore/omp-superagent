@@ -40,6 +40,7 @@ struct SlackFixture {
     websocket: SocketAddr,
     traces: mpsc::UnboundedSender<(String, Value)>,
     card: Arc<Mutex<Value>>,
+    history: Arc<Mutex<Vec<Value>>>,
     hold_channel: Arc<Semaphore>,
 }
 
@@ -126,6 +127,9 @@ async fn api(
         "conversations.replies" if args["ts"] == "1000.000001" => {
             json!({"messages":[state.card.lock().await.clone()]})
         }
+        "conversations.history" if args["channel"] == "DOWNER" => {
+            json!({"messages": &*state.history.lock().await})
+        }
         "chat.update" => {
             let mut card = state.card.lock().await;
             card["blocks"] = args["blocks"].clone();
@@ -174,6 +178,7 @@ impl Fixture {
             websocket: websocket.local_addr().expect("fixture websocket address"),
             traces: trace_tx,
             card: Arc::new(Mutex::new(Value::Null)),
+            history: Arc::new(Mutex::new(Vec::new())),
             hold_channel: Arc::new(Semaphore::new(0)),
         };
         let app = Router::new()
@@ -433,6 +438,59 @@ async fn startup_and_reconnect_require_fresh_matching_slack_hello() {
         .expect("inspect ingress")
         .expect("reconnect marker");
     assert_eq!(row.event["kind"], "reconnect");
+    assert_eq!(row.event["historyRecovery"], true);
+    assert_eq!(row.event["historyPlatform"], "slack");
+    assert!(row.event["historyBeforeUs"].as_i64().is_some());
     assert_eq!(fixture.store.pending().expect("inspect pending ingress"), 2);
     fixture.hub.stop().await.expect("stop Slack adapter");
+}
+
+#[tokio::test]
+async fn slack_gateway_history_uses_the_cutoff_of_each_pending_gap() -> anyhow::Result<()> {
+    use crate::server::tests::{GatewayClient, LifecycleFixture, SocketDir};
+
+    let mut fixture = Fixture::new().await;
+    let (_peer, started) = fixture.start("ALOCAL").await;
+    started?;
+    fixture.hub.ready.send_replace(true);
+    let route = json!({"platform":"slack","accountId":"TLOCAL:UBOT","authorityId":"UOWNER",
+        "guildId":null,"channelId":"DOWNER","threadId":null});
+    let message = |ts: &str, text: &str| json!({"type":"message","user":"UOWNER","ts":ts,"text":text});
+    let mut later_edit = message("1750000000.000100", "edited in gap B");
+    later_edit["edited"] = json!({"user":"UOWNER","ts":"1750000000.000103"});
+    *fixture.state.history.lock().await = vec![
+        message("1750000000.000103", "gap B only"),
+        message("1750000000.000101", "gap A only"),
+        later_edit,
+    ];
+    let gap = |cutoff: i64| json!({"kind":"reconnect","historyRecovery":true,
+        "historyPlatform":"slack","historyBeforeUs":cutoff});
+    fixture.store.admit(&gap(1_750_000_000_000_102))?;
+    let queue = fixture.store.next(None)?.expect("gap A");
+    fixture.store.admit(&json!({"kind":"message","input":{"id":"slash","route":route,
+        "messageId":null,"text":"/new","receivedAt":0,"attachments":[]}}))?;
+    fixture.store.admit(&gap(1_750_000_000_000_104))?;
+    let root = SocketDir::new()?;
+    let client = GatewayClient::with_adapters(&root, fixture.store.clone(), Arc::new(LifecycleFixture), fixture.hub.clone()).await?;
+    let read = |sequence| json!({"id":uuid::Uuid::new_v4().to_string(),"operation":"fetchAfter",
+        "args":[route,"1750000000.000099",sequence]});
+
+    let first = client.call("/effect", &read(queue.sequence)).await?;
+    assert_eq!(first["ok"], true);
+    assert_eq!(first["value"].as_array().expect("history inputs").iter().map(|input| &input["text"])
+        .collect::<Vec<_>>(), [&json!("gap A only")]);
+    assert_eq!(fixture.called("conversations.history").await["latest"], "1750000000.000102");
+    fixture.store.receipt(queue.sequence, crate::store::GatewayReceipt::Accepted)?;
+    let slash = fixture.store.next(None)?.expect("intervening slash command");
+    assert_eq!(slash.event["input"]["id"], "slash");
+    fixture.store.receipt(slash.sequence, crate::store::GatewayReceipt::Accepted)?;
+    let queue = fixture.store.next(None)?.expect("gap B");
+    let second = client.call("/effect", &read(queue.sequence)).await?;
+    assert_eq!(second["ok"], true);
+    assert_eq!(second["value"].as_array().expect("history inputs").iter().map(|input| &input["text"])
+        .collect::<Vec<_>>(), [&json!("edited in gap B"), &json!("gap A only"), &json!("gap B only")]);
+    assert_eq!(fixture.called("conversations.history").await["latest"], "1750000000.000104");
+
+    client.server.close().await?;
+    fixture.hub.stop().await
 }

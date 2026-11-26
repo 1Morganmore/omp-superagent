@@ -3,11 +3,11 @@ import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
-import { parseConfig } from "../src/config";
+import { parseConfig } from "../src/config/config";
 import {
   assertCredentialsUnchanged, loadCredentials, readCredentialFile, serializeCredentials,
   validateCredential, writeCredentials,
-} from "../src/credentials";
+} from "../src/config/credentials";
 
 const directories: string[] = [];
 const environment = new Map<string, string | undefined>();
@@ -86,7 +86,7 @@ describe("private setup credentials", () => {
   test("two setup processes with the same original snapshot cannot both replace credentials", async () => {
     const { path } = fixture();
     writeCredentials(path, { SETUP_TEST_TOKEN: "original" }, undefined);
-    const modulePath = new URL("../src/credentials.ts", import.meta.url).href;
+    const modulePath = new URL("../src/config/credentials.ts", import.meta.url).href;
     const spawnWriter = (value: string) => Bun.spawn([
       process.execPath, "--no-env-file", "-e", `
         import { readCredentialFile, writeCredentials } from ${JSON.stringify(modulePath)};
@@ -245,7 +245,7 @@ async function nativeMemoryCase(before: string, after = "") {
   const directory = setupDirectory();
   const home = join(directory, "home");
   mkdirSync(home);
-  const policy = new URL("../src/managed-memory.ts", import.meta.url).href;
+  const policy = new URL("../src/omp/managed-memory.ts", import.meta.url).href;
   const nativeSettings = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
   const nativeBackend = import.meta.resolve("@oh-my-pi/pi-coding-agent/memory-backend/settings");
   const nativeDirs = import.meta.resolve("@oh-my-pi/pi-utils/dirs");
@@ -574,7 +574,7 @@ async function nativeJudgeCase(before: string) {
   const directory = setupDirectory();
   const home = join(directory, "home");
   mkdirSync(home);
-  const helper = new URL("../src/setup-judge.ts", import.meta.url).href;
+  const helper = new URL("../src/operator/setup-judge.ts", import.meta.url).href;
   const nativeDirs = import.meta.resolve("@oh-my-pi/pi-utils/dirs");
   const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `
     import { mkdir, readdir, lstat, readFile, readlink, symlink } from "node:fs/promises";

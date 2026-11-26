@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { HostConnection, PR_REVIEW_INPUT_PREFIX, startHost, type HostFrame, type HostOptions } from "../src/host";
+import { HostConnection, PR_REVIEW_INPUT_PREFIX, startHost, type HostFrame, type HostOptions } from "../src/omp/host";
 import { stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { nativeTestCommand } from "./fixtures/native-command";
 import { nativeDisabledProviders } from "./fixtures/native-extension";

@@ -19,6 +19,10 @@ pub(super) const RESTART_CONFIG_ENV: &str = "OMP_SUPERAGENT_RESTART_CONFIG_SHA25
 pub(super) const RUNNER_CONFIG_ENV: &str = "OMP_SUPERAGENT_RUNNER_CONFIG_SHA256";
 pub(super) const GATEWAY_START_CONFIG_ENV: &str = "OMP_SUPERAGENT_GATEWAY_START_CONFIG_SHA256";
 
+const fn default_head_idle_ms() -> u64 {
+    30 * 60 * 1000
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
@@ -35,6 +39,8 @@ struct Normalized {
     command: Vec<String>,
     max_hosts: u64,
     max_subagents: u64,
+    #[serde(default = "default_head_idle_ms")]
+    head_idle_ms: u64,
     model: Option<String>,
     discord: Option<Discord>,
     telegram: Option<Token>,
@@ -75,6 +81,7 @@ pub struct LifecycleConfig {
     pub(super) command: Vec<String>,
     pub(super) model: Option<String>,
     pub(super) concurrency: u64,
+    pub(super) head_idle_ms: u64,
     pub(super) bun: PathBuf,
     pub(super) root: PathBuf,
     pub(super) head_socket: PathBuf,
@@ -86,6 +93,7 @@ pub struct LifecycleConfig {
     voice_credential: Option<String>,
     pub(super) source_hash: String,
     pub(super) normalized_hash: String,
+    pub(super) resume_profile_hash: String,
     restart_context: Value,
 }
 
@@ -166,15 +174,17 @@ impl LifecycleConfig {
         // Only these settings can change without changing the identity, native
         // launch profile or authority of a resumed session. The model default
         // is only a bootstrap selector; the resumed session keeps its own model.
-        for field in ["maxHosts", "maxSubagents", "idleMs", "model"] {
+        for field in ["maxHosts", "maxSubagents", "idleMs", "headIdleMs", "model"] {
             context.remove(field);
         }
+        let resume_profile_hash = hex::encode(Sha256::digest(serde_json::to_vec(&restart_context)?));
         Ok(Self {
             path: raw.path,
             cwd: raw.head_cwd,
             command: raw.command,
             model: raw.model,
             concurrency,
+            head_idle_ms: raw.head_idle_ms,
             bun,
             root,
             head_socket,
@@ -187,6 +197,7 @@ impl LifecycleConfig {
             voice_credential,
             source_hash,
             normalized_hash,
+            resume_profile_hash,
             restart_context,
         })
     }

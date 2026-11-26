@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { findSessionFiles } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { publishNativeSession } from "../../src/native-sessions";
+import { publishNativeSession } from "../../src/omp/native-sessions";
 
 const root = process.argv[2]!;
 const cwd = path.join(root, "workspace");
@@ -52,4 +52,11 @@ await fs.unlink(entry);
 await fs.writeFile(entry, "Unrelated operator file");
 await assert.rejects(() => publishNativeSession(original, cwd), /already belongs to another file/);
 assert.equal(await fs.readFile(entry, "utf8"), "Unrelated operator file");
+
+const foreign = path.join(root, "other-profile");
+await fs.mkdir(foreign);
+await fs.rename(path.dirname(entry), path.join(root, "original-bucket"));
+await fs.symlink(foreign, path.dirname(entry));
+await assert.rejects(() => publishNativeSession(original, cwd), /no longer belongs to the prepared profile/);
+assert.deepEqual(await fs.readdir(foreign), [], "Neither the transcript nor its artifacts may escape through a bucket alias");
 console.log("NATIVE_SESSION_DISCOVERY_PROOF");

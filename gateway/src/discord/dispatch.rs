@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Result, ensure};
 use serde::Deserialize;
-use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use serde_json::Value;
+use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::{
@@ -13,6 +13,10 @@ use super::{
     model::{Channel, User, snowflake},
     pending::Pending,
 };
+
+mod ordered;
+use ordered::{Intake, IntakeQueue};
+pub(super) use ordered::intake_queue;
 
 #[derive(Deserialize)]
 pub(super) struct Ready {
@@ -55,24 +59,9 @@ impl Ready {
     }
 }
 
-pub(super) enum Intake {
-    Owner {
-        through: i64,
-        wire: Option<LiveWire>,
-    },
-    Group(Value),
-    Voice {
-        data: Value,
-        text: String,
-        connection: mpsc::Sender<Value>,
-    },
-    Authenticated,
-    Reconnect,
-}
-
 pub(super) struct Dispatcher {
     state: Arc<State>,
-    intake: mpsc::Sender<Intake>,
+    intake: IntakeQueue,
     interactions: TaskTracker,
     cancel: CancellationToken,
 }
@@ -80,7 +69,7 @@ pub(super) struct Dispatcher {
 impl Dispatcher {
     pub fn new(
         state: Arc<State>,
-        intake: mpsc::Sender<Intake>,
+        intake: IntakeQueue,
         interactions: TaskTracker,
         cancel: CancellationToken,
     ) -> Self {
@@ -99,10 +88,6 @@ impl Dispatcher {
     pub async fn event(&self, event: &str, data: Value, connection: &Connection<'_>) -> Result<()> {
         let state = &self.state;
         match event {
-            "READY" => {
-                state.channels.write().await.clear();
-                self.enqueue(Intake::Authenticated)?;
-            }
             "GUILD_CREATE" => {
                 if let Some(guild) = data["id"]
                     .as_str()
@@ -191,7 +176,7 @@ impl Dispatcher {
                             }
                         } else {
                             let text = command.into_owned();
-                            self.enqueue(Intake::Voice {
+                            self.intake.enqueue(Intake::Voice {
                                 data,
                                 text,
                                 connection: connection.outbound.clone(),
@@ -201,24 +186,18 @@ impl Dispatcher {
                     return Ok(());
                 }
                 match candidate {
-                    CandidateKind::Group if create && live => self.enqueue(Intake::Group(data))?,
+                    CandidateKind::Group if create && live => self.intake.enqueue(Intake::Group(data))?,
                     CandidateKind::Group => (),
                     CandidateKind::Owner(route) => {
                         let unresolved = route.is_none();
                         let Some(pending) = Pending::from_dispatch(state, &data, create, route) else {
                             return Ok(());
                         };
-                        // Reserve the ordering marker first. Neither an
-                        // overloaded queue nor a failed durable write may
-                        // advance the resumable websocket sequence.
-                        let permit = self.intake.try_reserve().map_err(|_| intake_full())?;
-                        let through = pending.record(state)
-                            .map_err(|_| anyhow::anyhow!("Discord candidate could not be recorded; resuming before this event"))?;
                         let wire = (unresolved && data.get("author").is_some()).then_some(LiveWire {
                             group: create && live,
                             data,
                         });
-                        permit.send(Intake::Owner { through, wire });
+                        self.intake.owner(state, pending, wire)?;
                     }
                 }
                 return Ok(());
@@ -267,57 +246,10 @@ impl Dispatcher {
         }
         Ok(())
     }
-
-    pub fn reconnect(&self) -> Result<()> {
-        self.enqueue(Intake::Reconnect)
-    }
-
-    fn enqueue(&self, event: Intake) -> Result<()> {
-        self.intake.try_send(event).map_err(|_| intake_full())
-    }
-}
-
-fn intake_full() -> anyhow::Error {
-    anyhow::anyhow!("Discord candidate intake is full or unavailable; resuming before this event")
 }
 
 pub(super) struct Connection<'a> {
     pub fresh: bool,
     pub admission_ready: bool,
     pub outbound: &'a mpsc::Sender<Value>,
-}
-
-pub(super) async fn ordered_intake(
-    state: Arc<State>,
-    mut incoming: mpsc::Receiver<Intake>,
-    ready: oneshot::Sender<()>,
-    mut backlog: Option<i64>,
-) {
-    if state.ctx.ready().await.is_err() {
-        eprintln!("Discord startup readiness failed; intake remains closed");
-        return;
-    }
-    if ready.send(()).is_err() {
-        return;
-    }
-    while let Some(event) = incoming.recv().await {
-        let result = match event {
-            Intake::Owner { through, wire } => {
-                state.drain_owner_intake(through, wire.as_ref()).await;
-                Ok(())
-            }
-            Intake::Group(data) => state.group_dispatch(&data).await,
-            Intake::Voice { data, text, connection } => state.voice_message(&data, &text, &connection).await,
-            Intake::Authenticated => {
-                if let Some(through) = backlog.take() {
-                    state.drain_owner_intake(through, None).await;
-                }
-                Ok(())
-            }
-            Intake::Reconnect => state.admit(json!({ "kind": "reconnect" })),
-        };
-        if result.is_err() {
-            eprintln!("Discord owner intake could not be confirmed");
-        }
-    }
 }

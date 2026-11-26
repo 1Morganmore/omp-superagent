@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { addWorker, workerHash } from "../src/worker-registration";
-import { workerRepositoryHead } from "../src/worker-repository";
-import type { WorkerDescription } from "../src/worker-wire";
+import { addWorker, workerHash } from "../src/worker/worker-registration";
+import { workerRepositoryHead } from "../src/worker/worker-repository";
+import type { WorkerDescription } from "../src/worker/worker-wire";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });

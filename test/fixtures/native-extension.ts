@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { registerDecisionAsk } from "../../src/decision-tool";
+import { registerDecisionAsk } from "../../src/lane/decision-tool";
 import { recordHostFixture } from "./host-fixture-processes";
 
 const RECORD_TYPE = "omp-superagent-native-test";
@@ -13,10 +13,33 @@ export const nativeDisabledProviders = [...new Set([
   ...getBundledProviders(), "ollama", "lm-studio", "llama.cpp", "apple",
 ])];
 
+async function holdGatewayHead(
+  root: string, checkpoint: string, owner?: { readonly pid: number; readonly nativePid: number },
+): Promise<void> {
+  if (!existsSync(join(root, `hold-${checkpoint}`))) return;
+  const release = join(root, `release-${checkpoint}`);
+  const receipt = owner ? `${checkpoint}.${owner.pid}` : checkpoint;
+  const released = Promise.withResolvers<void>();
+  const watcher = watch(root, () => { if (existsSync(release)) released.resolve(); });
+  try {
+    writeFileSync(join(root, `entered-${receipt}`), owner ? String(owner.nativePid) : "", { mode: 0o600, flag: "wx" });
+    if (!existsSync(release)) await released.promise;
+  } finally { watcher.close(); }
+}
+
 /** Offline native RPC fixture; all provider responses and network attempts are observable. */
 export default function nativeFixture(pi: ExtensionAPI): void {
   const fixtureRoot = process.env.OMP_TEST_HOST_FIXTURE_ROOT;
   if (fixtureRoot) recordHostFixture(fixtureRoot);
+  const gatewayHeadRoot = process.env.OMP_NATIVE_GATEWAY_ROOT === fixtureRoot
+    && process.env.OMP_SUPERAGENT_ROLE === "head" ? fixtureRoot : undefined;
+  if (gatewayHeadRoot) pi.on("session_start", async (_event, ctx) => {
+    if (ctx.agent.kind === "main") {
+      // Stock serves its RPC commands after session_start. An owner already
+      // exists here, but cannot yet identify a publicly attachable HEAD.
+      await holdGatewayHead(gatewayHeadRoot, "head-start", { pid: process.ppid, nativePid: process.pid });
+    }
+  });
   registerDecisionAsk(pi);
   let serviceRequested = false;
   const mock = createMockModel({ provider: "socket-host-smoke", id: "local",
@@ -151,7 +174,9 @@ export default function nativeFixture(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     record(ctx, "shutdown", "native-graceful-shutdown");
+    // Optional test barrier after the real guarded shutdown begins.
+    if (gatewayHeadRoot) await holdGatewayHead(gatewayHeadRoot, `head-shutdown.${process.pid}`);
   });
 }

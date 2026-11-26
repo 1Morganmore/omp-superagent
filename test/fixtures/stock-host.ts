@@ -1,8 +1,9 @@
 import { chmod, realpath, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { HostChannel, type Frame } from "../../src/host-protocol";
+import { HostChannel, type Frame } from "../../src/omp/host-protocol";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { dependencies } from "../../package.json";
+import { NATIVE_PROFILE_ENV, bindNativeProfile, type NativeProfileBinding } from "../../src/omp/native-sessions";
 
 /** Materialize a directly executable CLI with the same metadata and native argv boundary. */
 export async function writeStockHostExecutable(file: string, source: string): Promise<void> {
@@ -30,6 +31,14 @@ export async function stockHostFixture(options: {
   connected?: () => void;
 }): Promise<void> {
   const sessionId = options.sessionId ?? await readSessionHeaderId(options.sessionFile);
+  const profile: NativeProfileBinding | null = JSON.parse(process.env[NATIVE_PROFILE_ENV] ?? "null");
+  if (profile) {
+    const { getAgentDir, findSessionFiles } = await import("@oh-my-pi/pi-coding-agent");
+    if (!sessionId) throw new Error("Fixture session identity is unavailable");
+    await bindNativeProfile({ getAgentDir, findSessionFiles }, {
+      agentDir: getAgentDir(), file: options.sessionFile, id: sessionId,
+    }, profile);
+  }
   const state = () => ({
     sessionId, sessionFile: options.sessionFile, isSettled: true,
     isStreaming: false, isCompacting: false, hasPendingAsyncWork: false, queuedMessageCount: 0,
@@ -60,6 +69,7 @@ export async function stockHostFixture(options: {
         } else if (command.type === "snapshot") {
           respond(channel, command, { data: { ...state(), hostPid: process.pid, generation: 1,
             loadedSuperkitPath: process.env.OMP_SUPERAGENT_MANAGED_ULW_PATH,
+            nativeProfile: profile?.profile,
             settingsScope: "session", modelSettings: { modelRoles: {}, defaultThinkingLevel: "high" },
             hasOwnedRunningWork: false, mutationHeld: false, admitted: false, postPromptWork: false } });
         } else if (command.type === "activate") {

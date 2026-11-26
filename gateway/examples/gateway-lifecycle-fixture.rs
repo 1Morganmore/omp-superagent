@@ -55,6 +55,14 @@ fn authorized(route: &Value) -> bool {
 #[async_trait]
 impl Adapter for OfflineMessenger {
     async fn start(&self) -> Result<()> {
+        if self.root.join("hold-adapter-start").exists() {
+            fs::write(self.root.join("entered-adapter-start"), b"").await?;
+            time::timeout(Duration::from_secs(30), async {
+                while !self.root.join("release-adapter-start").exists() {
+                    time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.context("Timed out waiting for offline adapter authentication")?;
+        }
         let inbox = self.root.join("adapter-inbox.json");
         let ingress = self.ingress.clone();
         let stop = self.stop.clone();
@@ -79,6 +87,11 @@ impl Adapter for OfflineMessenger {
                     Err(error) => return Err(error.into()),
                 };
                 let input: Value = serde_json::from_slice(&bytes)?;
+                if input == json!({"kind":"reconnect","historyRecovery":true}) {
+                    ingress.admit(input)?;
+                    fs::remove_file(&inbox).await?;
+                    continue;
+                }
                 ensure!(
                     authorized(&input["route"]),
                     "Fixture intake route did not match"
@@ -124,7 +137,21 @@ impl Adapter for OfflineMessenger {
             && route["threadId"].is_null();
         match (operation, args) {
             ("assertRoute" | "setActivity", _) => Ok(Value::Null),
-            ("fetchAfter", _) => Ok(json!([])),
+            ("fetchAfter", [_, cursor] | [_, cursor, _]) => {
+                match fs::read(self.root.join("offline-history.json")).await {
+                    Ok(bytes) => {
+                        let page: Value = serde_json::from_slice(&bytes)
+                            .map_err(|_| EffectError::rejected("Invalid fixture history page"))?;
+                        if page["after"] == *cursor && &page["message"]["route"] == route {
+                            Ok(json!([page["message"]]))
+                        } else {
+                            Ok(json!([]))
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::NotFound => Ok(json!([])),
+                    Err(_) => Err(EffectError::rejected("Could not read fixture history page")),
+                }
+            }
             ("canCreateThread", [_]) => Ok(Value::Bool(history_parent)),
             ("createThread", [_, title, source])
                 if history_parent

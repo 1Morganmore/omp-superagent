@@ -5,16 +5,16 @@ import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { Client, Collection, type ClientUser, type Message } from "discord.js";
-import { DEFERRED_ROUTING_META, physicalRoute, physicalRouteKey, routeKey, type Approval, type Inbound, type Lane, type LaneModel, type Route } from "../src/contracts.ts";
+import { physicalRoute, physicalRouteKey, routeKey, routingConversation, type Approval, type Inbound, type Lane, type LaneModel, type Route } from "../src/contracts.ts";
 import { DiscordMessenger } from "./oracles/bun-gateway/discord.ts";
 import { extractDiscordCards } from "./oracles/bun-gateway/discord-markdown.ts";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
-import { Store } from "../src/store.ts";
-import { lanePlacement, readLaneRows } from "../src/lane-rows";
-import { TOPIC_CHOICE_WAIT_MS } from "../src/topic-request";
-import type { LaneReport } from "../src/lane-report";
+import { Store } from "../src/storage/store.ts";
+import { lanePlacement, readLaneRows } from "../src/lane/lane-rows";
+import { TOPIC_CHOICE_WAIT_MS } from "../src/routing/topic-request";
+import type { LaneReport } from "../src/lane/lane-report";
 import type { HeadRecoveryAttempt } from "../src/contracts";
-import { acknowledgeDecision, decisionId, decisionViews } from "../src/decisions";
+import { acknowledgeDecision, decisionId, decisionViews } from "../src/lane/decisions";
 
 const stores: Store[] = [];
 const directories: string[] = [];
@@ -33,6 +33,16 @@ function fixture(): { store: Store; path: string; directory: string } {
   directories.push(directory);
   const path = join(directory, "coordination.sqlite");
   return { store: open(path), path, directory };
+}
+const LEGACY_DEFERRED_ROUTING = "intake:deferred-routing";
+function legacyDeferredQueue(inputs: readonly Inbound[]): string {
+  const directory = mkdtempSync(join(tmpdir(), "omp-superagent-legacy-deferred-"));
+  directories.push(directory);
+  const path = join(directory, "coordination.sqlite");
+  using db = new Database(path);
+  db.run("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  db.query("INSERT INTO metadata VALUES (?, ?)").run(LEGACY_DEFERRED_ROUTING, JSON.stringify(inputs));
+  return path;
 }
 function route(patch: Partial<Route> = {}): Route {
   return {
@@ -86,6 +96,98 @@ function storedOutput(path: string, id: string): { state: string; remote_id: str
 }
 
 describe("durable coordination store", () => {
+  test("legacy deferred routing migrates once in receipt order with exact inputs and conversation scope", () => {
+    const first = {
+      ...inbound("old-first", route({ topicId: "logical-topic" })), receivedAt: 300,
+      reply: { messageId: "original-message", authorId: null, text: "Original reply snapshot" },
+    };
+    const elsewhere = inbound("old-elsewhere", route({ channelId: "a-channel" }));
+    const sameChannel = inbound("old-next", route({ threadId: "other-thread" }));
+    const path = legacyDeferredQueue([first, elsewhere, sameChannel]);
+    const store = open(path);
+    const queue = store.deferredRouting;
+
+    expect(store.getMeta(LEGACY_DEFERRED_ROUTING)).toBeNull();
+    expect(queue.idsBefore(sameChannel.id)).toEqual([first.id, elsewhere.id]);
+    expect(queue.input(first.id)).toEqual(first);
+    expect(queue.input(sameChannel.id)).toEqual(sameChannel);
+    expect(queue.conversations()).toEqual([routingConversation(first.route), routingConversation(elsewhere.route)]);
+    expect(queue.head(routingConversation(sameChannel.route))).toBe(first.id);
+    expect(queue.head(routingConversation(elsewhere.route))).toBe(elsewhere.id);
+    expect(queue.reconcile({ ...first, reply: { ...first.reply, text: "New context must not replace the receipt" } })).toBe(true);
+    expect(queue.input(first.id)).toEqual(first);
+    expect(store.input(first.id)).toBeNull();
+    queue.remove(first.id);
+    const appended = inbound("new");
+    queue.enqueue(appended);
+    store.close();
+
+    const reopened = open(path).deferredRouting;
+    expect(reopened.idsBefore("unqueued")).toEqual([elsewhere.id, sameChannel.id, appended.id]);
+    expect(reopened.head(routingConversation(first.route))).toBe(sameChannel.id);
+  });
+
+  test("a failed legacy deferred routing migration leaves the entire original receipt queue intact", () => {
+    const original = inbound("original");
+    const duplicate = { ...original, text: "conflicting payload" };
+    const path = legacyDeferredQueue([original, duplicate]);
+    expect(() => open(path)).toThrow("UNIQUE constraint failed");
+
+    using db = new Database(path);
+    expect(db.query("SELECT value FROM metadata WHERE key = ?").get(LEGACY_DEFERRED_ROUTING))
+      .toEqual({ value: JSON.stringify([original, duplicate]) });
+    expect(db.query("SELECT 1 FROM sqlite_schema WHERE name = 'deferred_routing'").get()).toBeNull();
+  });
+
+  test("deferred routing point lookups and priority candidates use bounded SQLite index searches", () => {
+    const { store, path, directory } = fixture();
+    const queue = store.deferredRouting;
+    const destination = route();
+    const origin = route({ channelId: "origin" });
+    const lane = { id: "target", route: destination };
+    const ordinary = inbound("ordinary", destination);
+    const bare = { ...inbound("bare", destination), text: "/stop" };
+    const named = { ...inbound("named", origin), text: "/stop target" };
+    const otherLane = { ...inbound("other-lane", destination), text: "/stop other" };
+    const later = { ...inbound("later", origin), text: "/stop target" };
+    const { input: question, deadline } = confirmedChoice(store, directory);
+    const choice = { ...inbound("choice", destination), text: "2", receivedAt: deadline };
+    for (const input of [ordinary, bare, otherLane, named, later, choice]) queue.enqueue(input);
+
+    // Explain the actual statements used by the queue rather than a copy of
+    // their SQL or a timing threshold dependent on fixture size and hardware.
+    using db = new Database(path);
+    const probe = spyOn(Database.prototype, "query");
+    const assertSearch = (...bounds: readonly RegExp[]) => {
+      const plans = probe.mock.calls.flatMap(([sql]) => {
+        using plan = db.prepare<{ detail: string }, null[]>(`EXPLAIN QUERY PLAN ${sql}`);
+        return plan.all(...Array<null>(plan.paramsCount).fill(null)).map(row => row.detail);
+      });
+      probe.mockClear();
+      for (const bound of bounds) expect(plans).toContainEqual(expect.stringMatching(bound));
+      expect(plans.some(detail => /^SCAN deferred_routing\b/.test(detail))).toBe(false);
+    };
+    try {
+      expect(queue.input(named.id)).toEqual(named);
+      assertSearch(/SEARCH deferred_routing .* \(id=\?\)/);
+      expect(queue.head(routingConversation(destination))).toBe(ordinary.id);
+      assertSearch(/SEARCH deferred_routing .* \(conversation=\?\)/);
+      expect([...queue.priority(routingConversation(destination), false)]).toEqual([otherLane]);
+      assertSearch(/SEARCH deferred_routing .*deferred_routing_priority \(conversation=\?\)/);
+      expect([...queue.earlierLaneStops(lane, later.id)]).toEqual([bare, named]);
+      assertSearch(/SEARCH deferred_routing .* \(stop_lane=\? AND sequence<=?\?\)/,
+        /SEARCH deferred_routing .* \(physical_route=\? AND sequence<=?\?\)/);
+      expect(queue.hasEarlierMessage(later, named.messageId ?? "")).toBe(true);
+      assertSearch(/SEARCH deferred_routing .* \(physical_route=\? AND message_id=\? AND sequence<=?\?\)/);
+      queue.remove(later.id);
+      assertSearch(/SEARCH deferred_routing .* \(id=\?\)/);
+      expect(queue.has(later.id)).toBe(false);
+      assertSearch(/SEARCH deferred_routing .* \(id=\?\)/);
+      expect(store.hasPendingTopicChoice(question, deadline)).toBe(true);
+      assertSearch(/SEARCH deferred_routing .* \(physical_route=\? AND choice_at>=?\? AND choice_at<=?\?\)/);
+    } finally { probe.mockRestore(); }
+  });
+
   test("active queue filters keep durable order and exclude terminal work and other targets", () => {
     const { store } = fixture();
     const other = admitLane(store);
@@ -962,13 +1064,14 @@ describe("durable coordination store", () => {
       const { input, deadline } = choice;
       const clock = spyOn(Date, "now").mockReturnValue(deadline + 10);
       try {
-        store.setMeta(DEFERRED_ROUTING_META, JSON.stringify([{
+        const deferred = {
           ...inbound("discord:account:902:original"), messageId: "902", text: "1", receivedAt: choice.confirmedAt,
           ...event(choice, directory),
-        }]));
+        };
+        store.deferredRouting.enqueue(deferred);
         expect(store.hasPendingTopicChoice(input, deadline)).toBe(holds);
         expect(store.tryAutoTopicChoice(input, deadline, "")).toBe(!holds);
-        store.setMeta(DEFERRED_ROUTING_META, "[]");
+        store.deferredRouting.remove(deferred.id);
         if (holds) expect(store.tryAutoTopicChoice(input, deadline, "")).toBe(true);
       } finally { clock.mockRestore(); }
     });
@@ -1954,7 +2057,7 @@ describe("durable coordination store", () => {
   test("OS releases the writer lock after abrupt owner death without deleting a sidecar", async () => {
     const { store, path } = fixture();
     store.close();
-    const module = new URL("../src/store.ts", import.meta.url).href;
+    const module = new URL("../src/storage/store.ts", import.meta.url).href;
     const child = Bun.spawn([process.execPath, "--eval", `
       import { Store } from ${JSON.stringify(module)};
       const store = new Store(${JSON.stringify(path)});

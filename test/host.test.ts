@@ -9,12 +9,12 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import hostExtension from "../src/host-extension";
-import { MANAGED_ULW_ENV } from "../src/managed-ulw";
-import { buildHostArgs, connect, HostConnection, HostStartError, startHost, type HostFrame, type HostOptions } from "../src/host";
-import { HostChannel, HostRequestTimeout, indexServiceCompletions } from "../src/host-protocol";
+import { MANAGED_ULW_ENV } from "../src/omp/managed-super";
+import { buildHostArgs, connect, HostConnection, HostStartError, startHost, type HostFrame, type HostOptions } from "../src/omp/host";
+import { HostChannel, HostRequestTimeout, indexServiceCompletions } from "../src/omp/host-protocol";
 import { assertResidentFixtureOwner, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { writeStockHostExecutable } from "./fixtures/stock-host";
-import { hostOwnerExecutable } from "../src/host-owner-path";
+import { hostOwnerExecutable } from "../src/omp/host-owner-path";
 import { offlineMnemopi } from "./fixtures/native-memory";
 
 test("adapter correlation times out without replay and still observes a late original response", async () => {
@@ -95,7 +95,7 @@ async function directory(launchesHost = false): Promise<string> {
 test("native ownership snapshots resample registration and attachment without trusting a mixed epoch", async () => {
   const root = await directory();
   const socketPath = path.join(root, "native.sock");
-  const managed = path.resolve(import.meta.dir, "fixtures/managed-ulw");
+  const managed = path.resolve(import.meta.dir, "fixtures/managed-super");
   const registry = new AgentRegistry();
   class Session {
     readonly settings = Settings.isolated();
@@ -307,7 +307,7 @@ test("connect negotiates through public RpcClient and probes the live session", 
 });
 
 test("managed attachment to a verified owner without activity projection preserves its native event filter", async () => {
-  const host = await fixture(undefined, path.resolve(import.meta.dir, "fixtures/managed-ulw"));
+  const host = await fixture(undefined, path.resolve(import.meta.dir, "fixtures/managed-super"));
   const connection = await HostConnection.connectForActivity(host.socketPath);
   cleanups.push(() => connection.close());
   expect((await connection.client.getState()).sessionFile).toBe(host.sessionFile);
@@ -465,7 +465,7 @@ function options(root: string): HostOptions {
       HOME: root, USERPROFILE: root, PI_CODING_AGENT_DIR: path.join(root, "agent"),
       XDG_CONFIG_HOME: path.join(root, "config"), PATH: process.env.PATH ?? "/usr/bin:/bin",
     },
-    managedUlwPath: path.resolve(import.meta.dir, "fixtures/managed-ulw"),
+    managedUlwPath: path.resolve(import.meta.dir, "fixtures/managed-super"),
     logPath: path.join(root, "host.log"), model: "provider/model", subagentConcurrency: 2,
   };
 }
@@ -784,6 +784,36 @@ await stockHostFixture({ sessionFile, beforeReady: async () => {
     await waitForFixtureProcessExit([pid, identity.adapterOwnerPid]);
   } finally { await reattached.close(); }
 }, 60_000);
+
+test("wake preparation never recreates, follows a symlink to, or adopts a different HEAD journal", async () => {
+  const root = await directory();
+  const launch = options(root);
+  const expected = "parked-session";
+  const source = path.join(root, "other.jsonl");
+  const header = (id: string) => JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: "2026-01-01T00:00:00Z" }) + "\n";
+  await fs.writeFile(source, header(expected));
+  const prepare = async () => {
+    const child = Bun.spawn([process.execPath, "--no-env-file", "--no-install",
+      path.resolve(import.meta.dir, "../src/host-sdk-helper.ts"), "launch"], {
+      cwd: root, env: { HOME: root, PATH: process.env.PATH, PI_CODING_AGENT_DIR: path.join(root, "agent") },
+      stdin: Buffer.from("null\n" + JSON.stringify({ options: launch, args: [], configPath: path.join(root, "config.json"),
+        processBackend: "daemon", headHibernationSessionId: expected })),
+      stdout: "ignore", stderr: "ignore", timeout: 5_000,
+    });
+    return child.exited;
+  };
+  expect(await prepare()).toBe(1);
+  await expect(fs.lstat(launch.sessionFile)).rejects.toHaveProperty("code", "ENOENT");
+  await fs.symlink(source, launch.sessionFile);
+  expect(await prepare()).toBe(1);
+  expect((await fs.lstat(launch.sessionFile)).isSymbolicLink()).toBe(true);
+  await fs.unlink(launch.sessionFile);
+  await fs.writeFile(launch.sessionFile, header("unrelated"));
+  expect(await prepare()).toBe(1);
+  expect(await fs.readFile(launch.sessionFile, "utf8")).toBe(header("unrelated"));
+  await fs.writeFile(launch.sessionFile, header(expected));
+  expect(await prepare()).toBe(0);
+});
 
 test("repeated Host starts reuse the executable inspection and prepare in one helper spawn", async () => {
   const roots = [await directory(true), await directory(true)];

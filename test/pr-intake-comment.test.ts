@@ -125,7 +125,7 @@ if (query.includes("query IntakeCommentTarget")) {
   const runner = join(directory, "run.ts");
   await writeFile(runner, `
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { inspectIntakeComment, publishIntakeComment } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr-intake-comment.ts"))};
+import { inspectIntakeComment, publishIntakeComment } from ${JSON.stringify(resolve(import.meta.dir, "../src/pr/pr-intake-comment.ts"))};
 const dir = ${JSON.stringify(directory)};
 const [action, summary] = process.argv.slice(2);
 const args = ["OWNER/Repo", 7, ${JSON.stringify(head)}, summary, new AbortController().signal] as const;

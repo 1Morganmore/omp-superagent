@@ -21,6 +21,7 @@ nix = { version = "0.30", features = ["signal", "process", "user", "fs", "dir"] 
 opus2 = { version = "0.4", features = ["bundled"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "multipart"] }
+rustix = { version = "1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 sha2 = "0.10"

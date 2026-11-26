@@ -15,12 +15,12 @@
   "files": [
     "src/",
     "scripts/build-host-owner.ts",
-    "scripts/prepare-ulw.ts",
+    "scripts/prepare-super.ts",
     "scripts/setup.sh",
     "skills/",
     "host-owner/bin/",
     "gateway/bin/",
-    "upstream/ulw.json",
+    "upstream/super.json",
     "assets/",
     "docs/",
     "config.example.json",
@@ -41,9 +41,9 @@
     "release": "bun --no-env-file scripts/release.ts",
     "start": "bun --no-env-file src/cli.ts start",
     "setup": "bash scripts/setup.sh",
-    "prepare:ulw": "bun scripts/prepare-ulw.ts",
+    "prepare:ulw": "bun scripts/prepare-super.ts",
     "prepare": "bun run build:native --install",
-    "postinstall": "bun scripts/prepare-ulw.ts"
+    "postinstall": "bun scripts/prepare-super.ts"
   },
   "engines": {
     "bun": ">=1.4.4"

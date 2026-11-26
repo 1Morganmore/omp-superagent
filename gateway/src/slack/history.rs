@@ -60,11 +60,16 @@ impl Inner {
         &self,
         route: Route,
         source: Ts,
+        before_us: Option<i64>,
     ) -> Result<Vec<Inbound>, EffectError> {
         self.destination(&route).await?;
+        let before = before_us.map(Ts::from_epoch_micros);
+        if before.as_ref().is_some_and(|limit| source.compare(limit).is_ge()) {
+            return Ok(Vec::new());
+        }
         let mut cursor: Option<String> = None;
         let mut oldest = source.clone();
-        let mut latest: Option<Ts> = None;
+        let mut latest = before.clone();
         let mut seen_cursors = HashSet::new();
         let mut results = Vec::new();
         let mut seen_inputs = HashMap::new();
@@ -108,6 +113,11 @@ impl Inner {
                     high = Some(timestamp.clone());
                 }
                 if timestamp.compare(&source).is_gt()
+                    && before.as_ref().is_none_or(|limit| {
+                        timestamp.compare(limit).is_lt()
+                            && message["edited"]["ts"].as_str().and_then(Ts::parse)
+                                .is_none_or(|edit| edit.compare(limit).is_lt())
+                    })
                     && let Some(input) = self.normalize(message, route.clone())?
                     && input.route.thread_id == route.thread_id
                 {
@@ -139,7 +149,8 @@ impl Inner {
             }
             if route.thread_id.is_some() {
                 oldest = high
-                    .filter(|high| high.compare(&oldest).is_gt())
+                    .filter(|high| high.compare(&oldest).is_gt()
+                        && before.as_ref().is_none_or(|limit| high.compare(limit).is_lt()))
                     .ok_or_else(|| {
                         EffectError::rejected("Slack reply pagination did not advance")
                     })?;

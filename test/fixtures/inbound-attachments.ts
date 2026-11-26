@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, open, realpath, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { privateDirectory } from "../../src/config";
+import { privateDirectory } from "../../src/config/config";
 import type { Attachment, InboundAttachmentBatch, InboundAttachmentReceipt, Messenger, Route } from "../../src/contracts";
-import { DeliveryError } from "../../src/delivery";
-import { MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_ATTACHMENT_BATCH } from "../../src/gateway-protocol";
+import { DeliveryError } from "../../src/messaging/delivery";
+import { MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_ATTACHMENT_BATCH } from "../../src/gateway/gateway-protocol";
 
 export type AttachmentDownload = (route: Route, attachment: Attachment, signal: AbortSignal) => Promise<Response>;
 export type DownloadMessenger = Omit<Messenger, "openAttachment"> & { openAttachment: AttachmentDownload };

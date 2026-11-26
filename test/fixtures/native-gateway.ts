@@ -5,15 +5,15 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionEntries, type FileEntry } from "@oh-my-pi/pi-coding-agent";
-import { type Config, hostPaths, privateDirectory } from "../../src/config";
+import { type Config, hostPaths, privateDirectory } from "../../src/config/config";
 import type { Approval, Inbound, Lane, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../../src/contracts";
-import { decisionId } from "../../src/decisions";
-import { gatewayPaths } from "../../src/gateway-protocol";
-import type { GatewayStatus } from "../../src/gateway-wire";
+import { decisionId } from "../../src/lane/decisions";
+import { gatewayPaths } from "../../src/gateway/gateway-protocol";
+import type { GatewayStatus } from "../../src/gateway/gateway-wire";
 import { startGateway, type GatewayService } from "../oracles/bun-gateway/gateway";
-import { HostConnection } from "../../src/host";
+import { HostConnection } from "../../src/omp/host";
 import { nativeDisabledProviders } from "./native-extension";
-import { runNativeUlwProof } from "./native-ulw-proof";
+import { runNativeUlwProof } from "./native-super-proof";
 import { runNativeSoulProof } from "./native-soul-proof";
 import { soulSteerRelease } from "./native-soul-cases";
 import { runNativeRecoveryProof } from "./native-recovery-proof";
@@ -115,7 +115,7 @@ const ulwEntrypoint = process.env.OMP_TEST_ULW_EXTENSION ? await fs.realpath(pro
 assert(!soulScenario || ulwEntrypoint, "Native SOUL proof requires the real Superkit extension");
 const managedUlwPath = ulwEntrypoint
   ? (await fs.stat(ulwEntrypoint)).isDirectory() ? ulwEntrypoint : path.dirname(ulwEntrypoint)
-  : path.resolve(import.meta.dir, "managed-ulw");
+  : path.resolve(import.meta.dir, "managed-super");
 if (ulwEntrypoint) {
   assert((await fs.stat(ulwEntrypoint)).isFile(), "OMP_TEST_ULW_EXTENSION must explicitly name the actual extension entrypoint file");
   const manifest = JSON.parse(await fs.readFile(path.join(managedUlwPath, "package.json"), "utf8")) as { omp?: { extensions?: unknown } };
@@ -153,7 +153,7 @@ const config: Config = {
   command: [...nativeCommand, "-e", path.resolve(import.meta.dir, "native-extension.ts"), "-e",
     presetScenario === "recovery" ? recoveryProvider
       : path.resolve(import.meta.dir, soulScenario ? "native-soul-provider.ts"
-        : ulwEntrypoint ? "native-ulw-provider-extension.ts" : "gateway-provider-extension.ts")],
+        : ulwEntrypoint ? "native-super-provider-extension.ts" : "gateway-provider-extension.ts")],
   maxHosts: 2, maxSubagents: 2, idleMs: 3_600_000, model,
   discord: { tokenEnv: "ISOLATED_GATEWAY_DISCORD_TOKEN", ownerId: "1", allowedGuildIds: ["3"], allowedChannelIds: ["4"] },
 };

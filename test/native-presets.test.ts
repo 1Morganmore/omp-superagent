@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Settings as NativeSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LanePresetSnapshot } from "../src/contracts";
-import type { NativeModel, NativePresetChoices } from "../src/native-presets";
+import type { NativeModel, NativePresetChoices } from "../src/omp/native-presets";
 
 // Settings capability discovery has process-wide native directory caches. Run
 // the real suite in a fresh process whose HOME is private before native imports,
@@ -37,7 +37,7 @@ if (!workerRoot) {
 } else {
   // Intentional module-loading boundary: static native imports would initialize
   // directory caches in the parent before the subprocess's private HOME exists.
-  const { NativePresetManager } = await import("../src/native-presets");
+  const { NativePresetManager } = await import("../src/omp/native-presets");
   const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
   const { cfgModelPresets, cfgModelRoles } = await import("@oh-my-pi/pi-coding-agent/config/model-settings");
   const { getModelPreset, acquireModelRoleMutation } = await import("@oh-my-pi/pi-coding-agent/config/model-presets");
@@ -46,7 +46,7 @@ if (!workerRoot) {
   const { AgentStorage } = await import("@oh-my-pi/pi-coding-agent/session/agent-storage");
   const nativeLocks = await import("@oh-my-pi/pi-utils/file-lock");
   const { getAgentDbPath } = await import("@oh-my-pi/pi-utils/dirs");
-  const { readNativeSettings } = await import("../src/native-settings");
+  const { readNativeSettings } = await import("../src/omp/native-settings");
   const { getBundledModel, getBundledModels, getBundledProviders } = await import("@oh-my-pi/pi-catalog/models");
   const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5");
   const opus = getBundledModel("anthropic", "claude-opus-4-5");
@@ -211,7 +211,7 @@ if (!workerRoot) {
     const middle = { modelRoles: originalRoles, defaultThinkingLevel: Effort.Medium };
     const low = { modelRoles: { default: selector(opus) }, defaultThinkingLevel: Effort.Low };
     const f = await fixture({ global: { modelRoles: originalRoles, modelPresets: { high, middle, low, custom: low } } });
-    const { Store } = await import("../src/store");
+    const { Store } = await import("../src/storage/store");
     const dbFile = path.join(f.root, "coordination.sqlite");
     const first = new Store(dbFile);
     try { await f.manager.syncRoles(first, () => true); }
@@ -239,7 +239,7 @@ if (!workerRoot) {
   test("bootstrap ownership follows an available smol change but does not recreate deleted or replace edited presets", async () => {
     const initialRoles = { ...configured.modelRoles, slow: selector(opus) };
     const f = await fixture({ global: { modelRoles: initialRoles } });
-    const { Store } = await import("../src/store");
+    const { Store } = await import("../src/storage/store");
     const store = new Store(path.join(f.root, "coordination.sqlite"));
     try {
       await f.manager.initialize({ high: choice(opus), middle: choice(sonnet), low: choice(sonnet) }, store);

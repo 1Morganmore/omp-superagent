@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Inbound, Route } from "../src/contracts";
-import type { GatewayEvent } from "../src/gateway-wire";
+import type { GatewayEvent } from "../src/gateway/gateway-wire";
 import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
 
 const route: Route = { platform: "telegram", accountId: "bot", authorityId: "owner",

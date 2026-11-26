@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdtempDisposableSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "../src/config";
+import type { Config } from "../src/config/config";
 import type { Route } from "../src/contracts";
-import { CronJobs } from "../src/cron-jobs";
-import { Store } from "../src/store";
+import { CronJobs } from "../src/cron/cron-jobs";
+import { Store } from "../src/storage/store";
 
 test("an overdue weekday job admits one durable run, skips overlap, and holds an uncertain run", () => {
   using directory = mkdtempDisposableSync(join(realpathSync("/tmp"), "sa-cron-"));

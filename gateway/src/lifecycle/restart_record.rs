@@ -152,7 +152,7 @@ pub(super) async fn validate_plan(
     validate_identity(config, record, plan, session_file)?;
     validate_config(config, plan)?;
     ensure!(
-        session_id(config, &record.session_file).await?.as_deref()
+        session_id(&record.session_file).await?.as_deref()
             == Some(record.session_id.as_str()),
         "Restart session identity changed; no replacement is authorized"
     );

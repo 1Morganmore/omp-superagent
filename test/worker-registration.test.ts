@@ -6,10 +6,10 @@ import {
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { main } from "../src/cli";
-import { enrollWorker, readWorkerPolicy } from "../src/worker-enrollment";
-import { addWorker, listWorkers } from "../src/worker-registration";
-import { workerRepositoryIdentity } from "../src/worker-repository";
-import type { WorkerDescription, WorkerLaneRef } from "../src/worker-wire";
+import { enrollWorker, readWorkerPolicy } from "../src/worker/worker-enrollment";
+import { addWorker, listWorkers } from "../src/worker/worker-registration";
+import { workerRepositoryIdentity } from "../src/worker/worker-repository";
+import type { WorkerDescription, WorkerLaneRef } from "../src/worker/worker-wire";
 
 const roots: string[] = [];
 const fixturePublicKey = `ssh-ed25519 ${Buffer.concat([
@@ -241,7 +241,7 @@ test.each(["installed inside checkout", "symlinked CLI"] as const)(
     const target = { home, headKey: fixturePublicKey, executable: process.execPath, repositories: [repo] };
 
     const child = Bun.spawn([process.execPath, "--no-env-file", "--eval", `
-      import { enrollWorker } from "./src/worker-enrollment.ts";
+      import { enrollWorker } from "./src/worker/worker-enrollment.ts";
       await enrollWorker(${JSON.stringify(target)}).catch(error => {
         if (!(error instanceof Error)) throw error;
         console.error(error.message);

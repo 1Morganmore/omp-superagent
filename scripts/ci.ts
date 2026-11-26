@@ -2,7 +2,7 @@
 import { mkdtempDisposable } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { activeManagedUlw } from "../src/managed-ulw";
+import { activeManagedUlw } from "../src/omp/managed-super";
 import { nativeTestCommand } from "../test/fixtures/native-command";
 
 const root = resolve(import.meta.dir, "..");

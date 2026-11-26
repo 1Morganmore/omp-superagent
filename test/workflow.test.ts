@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { containsMagicKeyword } from "@oh-my-pi/pi-coding-agent/session/magic-keywords";
 import type { WorkflowActivation, WorkflowName } from "../src/contracts";
-import { advertisedLegacyWorkflow, advertisedWorkflow, headWorkflow, leadingWorkflow, workflowChoice, workflowContext, workflowPrompt } from "../src/workflow";
+import { advertisedLegacyWorkflow, advertisedWorkflow, headWorkflow, leadingWorkflow, workflowChoice, workflowContext, workflowPrompt } from "../src/lane/workflow";
 
 const selected = (name: WorkflowName): WorkflowActivation => ({ name, reason: "Head selected this workflow for the authorized task", sourceId: "source", provenance: "head" });
 const admitted = (name?: WorkflowName) => ({ id: "source", workflow: name === undefined ? null : {

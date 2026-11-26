@@ -4,11 +4,11 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { parseSessionEntries, type FileEntry } from "@oh-my-pi/pi-coding-agent";
-import { type Config, hostPaths, privateDirectory } from "../../src/config";
+import { type Config, hostPaths, privateDirectory } from "../../src/config/config";
 import type { Approval, Inbound, Lane, MessageReference, Messenger, OutputRecord, Route } from "../../src/contracts";
-import { HostConnection, startHost, type HostFrame, type HostOptions } from "../../src/host";
-import { Superagent } from "../../src/runtime";
-import { Store } from "../../src/store";
+import { HostConnection, startHost, type HostFrame, type HostOptions } from "../../src/omp/host";
+import { Superagent } from "../../src/runtime/controller";
+import { Store } from "../../src/storage/store";
 import { nativeDisabledProviders } from "./native-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { steeringModel, steeringRecord } from "./steering-native-extension";
@@ -96,7 +96,7 @@ export async function nativeSteeringRuntime(): Promise<void> {
   if (natives && !path.isAbsolute(natives)) throw new Error("OMP_TEST_NATIVES_DIR must be absolute");
   const managedUlwPath = process.env.OMP_TEST_ULW_EXTENSION
     ? path.dirname(await fs.realpath(path.resolve(process.env.OMP_TEST_ULW_EXTENSION)))
-    : path.resolve(import.meta.dir, "managed-ulw");
+    : path.resolve(import.meta.dir, "managed-super");
   const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "oss-"));
   await fs.chmod(root, 0o700);
   const home = path.join(root, "home");

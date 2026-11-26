@@ -3,14 +3,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import { dirname } from "node:path";
 import type { Approval, Attachment, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageReference, Messenger, OutputRecord, Route, ThreadUpdate } from "../../../src/contracts";
-import { DeliveryError } from "../../../src/delivery";
-import { discordPurposeRequest } from "../../../src/discord-context";
-import { MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_ATTACHMENT_BATCH, readGatewayJson, type GatewayResult } from "../../../src/gateway-protocol";
+import { DeliveryError } from "../../../src/messaging/delivery";
+import { discordPurposeRequest } from "../../../src/messaging/discord-context";
+import { compareMessageIds } from "../../../src/routing/message-order";
+import { MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_ATTACHMENT_BATCH, readGatewayJson, type GatewayResult } from "../../../src/gateway/gateway-protocol";
 import { GatewayStore } from "./gateway-store";
-import type { GatewayStatus } from "../../../src/gateway-wire";
+import type { GatewayStatus } from "../../../src/gateway/gateway-wire";
 import { fixtureAttachmentSpool, type AttachmentDownload } from "../../fixtures/inbound-attachments";
 
-interface HeadClient { id: string; pid: number; ready: boolean; resumed: boolean; reconciled: boolean; events?: ServerResponse; sequence?: number; reconciliation?: string }
+interface HeadClient { id: string; pid: number; ready: boolean; resumed: boolean; startupHistory: boolean; reconciled: boolean; events?: ServerResponse; sequence?: number; reconciliation?: string }
 interface ServerOptions {
   socketPath: string;
   store: GatewayStore;
@@ -36,6 +37,22 @@ function json(response: ServerResponse, value: GatewayResult, status = 200): voi
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DeliveryError("Invalid Gateway request", "rejected");
   return value as Record<string, unknown>;
+}
+
+function beforeHistoryGap(input: Inbound, before: number): boolean {
+  const { messageId, route } = input;
+  if (messageId === null) return true; // Malformed history is handled by admission.
+  if (input.id.includes(":edit:") && input.receivedAt * 1000 >= before) return false;
+  if (route.platform === "slack") {
+    const cutoff = `${Math.floor(before / 1_000_000)}.${String(before % 1_000_000).padStart(6, "0")}`;
+    const order = compareMessageIds("slack", messageId, cutoff);
+    return order === null || order < 0;
+  }
+  if (route.platform === "discord" && /^\d+$/.test(messageId)) {
+    const cutoff = (BigInt(Math.floor(before / 1000)) - 1_420_070_400_000n) << 22n;
+    return BigInt(messageId) < cutoff;
+  }
+  return true;
 }
 
 function threadTags(value: unknown): string[] {
@@ -73,6 +90,7 @@ export class GatewayServer {
   private readonly restartRuns = new Set<string>();
   private client?: HeadClient;
   private admissionReady = false;
+  private startupHistoryEnqueued = false;
   private socketIdentity?: { dev: number; ino: number };
   private closing = false;
 
@@ -155,8 +173,9 @@ export class GatewayServer {
       if (this.client && this.client.id !== id && this.connected) throw new DeliveryError("A head client is already attached", "rejected");
       if (this.client?.id === id) this.client.events?.destroy();
       const reconciled = this.client?.id === id && this.client.pid === data.pid && this.client.reconciled;
-      this.client = { id, pid: Number(data.pid), ready: false, resumed: data.resumed === true, reconciled };
-      json(response, { ok: true });
+      const startupHistory = data.startupHistory === true;
+      this.client = { id, pid: Number(data.pid), ready: false, resumed: data.resumed === true, reconciled, startupHistory };
+      json(response, { ok: true, ...(startupHistory ? { value: { admissionReady: this.admissionReady } } : {}) });
       return;
     }
     const client = this.head(request);
@@ -197,7 +216,12 @@ export class GatewayServer {
         // Its initial admission barrier must wait for head reconciliation ACK.
         if (!this.admissionReady) client.reconciliation = crypto.randomUUID();
         this.options.store.admit({ kind: "reconnect", ...(client.reconciliation ? { barrier: client.reconciliation } : {}) });
-      } else if (!client.resumed) {
+      }
+      if (!wasReady && client.startupHistory && !this.admissionReady && !this.startupHistoryEnqueued) {
+        this.options.store.admit({ kind: "reconnect", historyRecovery: true });
+        this.startupHistoryEnqueued = true;
+      }
+      if (!client.resumed) {
         // A new controller reconciled native approvals before calling /ready.
         this.openAdmission();
       }
@@ -307,8 +331,10 @@ export class GatewayServer {
   deliver(): void {
     const client = this.client;
     if (!client?.ready || !client.events || client.events.destroyed || client.sequence !== undefined) return;
-    const event = this.options.store.next();
-    if (!event) return;
+    const next = this.options.store.next();
+    if (!next) return;
+    const event = next.event.kind === "reconnect" && next.event.historyRecovery && client.reconciliation
+      ? this.options.store.reconciliationEvent(client.reconciliation) : next;
     // A lost callback receipt is ambiguous even if the head disconnects before
     // processing the frame. Reconcile the original native request on redelivery.
     if (event.event.kind === "answer") this.options.store.attempt(event.sequence);
@@ -322,7 +348,7 @@ export class GatewayServer {
       throw new DeliveryError("Invalid Gateway effect", "rejected");
     const operations: Record<string, number[]> = { send: [1], setActivity: [2], showApproval: [1], dismissApproval: [1],
       canCreateThread: [1, 2], createThread: [2, 3, 4], inspectThread: [1], updateThread: [2],
-      inspectDiscordContext: [1], discordPurpose: [1], fetchAfter: [2] };
+      inspectDiscordContext: [1], discordPurpose: [1], fetchAfter: [2, 3] };
     if (!Object.hasOwn(operations, operation) || !operations[operation]!.includes(args.length))
       throw new DeliveryError("Unknown Gateway effect", "rejected");
     const previous = this.options.store.beginEffect(id, operation, args);
@@ -370,13 +396,23 @@ export class GatewayServer {
         : operation === "updateThread" ? await messenger.updateThread?.(args[0] as Route, threadUpdate(args[1]))
         : operation === "inspectDiscordContext" ? await messenger.inspectDiscordContext?.(args[0] as Route)
         : purpose ? await messenger.discordPurpose?.(purpose)
-        : await messenger.fetchAfter(args[0] as Route, args[1] as string);
+        : await this.fetchHistory(args[0] as Route, args[1] as string, args[2]);
       result = { ok: true, value };
     } catch (error) { result = failure(error); }
     // Persistence precedes the receipt; disconnection never cancels or repeats
     // a remote mutation whose outcome may already exist.
     this.options.store.finishEffect(id, result);
     if (!response.destroyed) json(response, result);
+  }
+
+  private async fetchHistory(route: Route, cursor: string, gap: unknown): Promise<Inbound[] | null> {
+    const sequence = typeof gap === "number" && Number.isSafeInteger(gap) ? gap : undefined;
+    const before = sequence === undefined ? null : this.options.store.historyFence(sequence, route.platform);
+    if (gap !== undefined && before === null)
+      throw new DeliveryError("History gap is not pending for this platform", "rejected");
+    const history = await this.options.messenger.fetchAfter(route, cursor);
+    return history === null ? null : this.options.store.orderedHistory(route, sequence,
+      before === null ? history : history.filter(input => beforeHistoryGap(input, before)));
   }
 
   private async attachment(data: Record<string, unknown>, response: ServerResponse): Promise<void> {

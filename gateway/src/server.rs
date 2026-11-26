@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::{
-    net::UnixListener,
     sync::{Notify, mpsc, oneshot},
     task::JoinHandle,
 };
@@ -29,12 +28,15 @@ pub(crate) mod tests;
 pub(crate) mod transport;
 
 use restart::RestartCall;
-use transport::SocketIdentity;
+use transport::{SocketIdentity, StagedSocket};
 
 #[async_trait]
 pub trait Service: Send + Sync {
     fn status(&self, connected: bool, head_ready: bool, admission_ready: bool) -> Result<Value>;
     async fn authorize_head(&self, pid: u32) -> Result<()>;
+    async fn controller_ready(&self, pid: u32, _revision: u64) -> Result<()> {
+        self.authorize_head(pid).await
+    }
     async fn stop(&self) -> Result<()>;
     fn finish_stop(&self);
     async fn restart(&self, request: Value) -> std::result::Result<Value, EffectError>;
@@ -54,7 +56,9 @@ pub struct Hub {
 #[derive(Default)]
 struct Clients {
     revision: u64,
+    head_epoch: u64,
     client: Option<Client>,
+    startup_history_enqueued: bool,
     closing: bool,
 }
 
@@ -64,6 +68,7 @@ struct Client {
     pid: u32,
     ready: bool,
     resumed: bool,
+    startup_history: bool,
     reconciled: bool,
     reconciliation: Option<String>,
     stream: Option<EventStream>,
@@ -97,6 +102,25 @@ impl Hub {
 
     pub fn admission_ready(&self) -> bool {
         *self.adapters.ready.borrow()
+    }
+
+    pub(crate) fn with_ready_stream(&self, revision: u64, pid: u32, publish: impl FnOnce() -> Result<()>) -> Result<()> {
+        let state = self.state()?;
+        anyhow::ensure!(!state.closing && state.client.as_ref().is_some_and(|client|
+            client.revision == revision && client.pid == pid && client.connected()),
+            EffectError::rejected("Wake controller is detached"));
+        publish()
+    }
+
+    pub(crate) fn retire_head(&self, pid: u32) -> Result<()> {
+        let mut state = self.state()?;
+        state.head_epoch = state.head_epoch.checked_add(1).context("Gateway head epoch exhausted")?;
+        if state.client.as_ref().is_some_and(|client| client.pid == pid)
+            && let Some(client) = state.client.take()
+        {
+            client.close();
+        }
+        Ok(())
     }
 
     pub fn connected(&self) -> bool {
@@ -193,20 +217,12 @@ pub struct Server {
 
 impl Server {
     pub async fn listen(socket_path: &Path, hub: Arc<Hub>) -> Result<Self> {
-        transport::private_directory(socket_path)?;
-        let listener = UnixListener::bind(socket_path).context("Binding private Gateway socket")?;
-        let socket = SocketIdentity::capture(socket_path)?;
+        let staged = StagedSocket::bind(socket_path)?;
         // The Store holds the lifetime lock, and no attachment handler can
         // enter until the listener task starts. Status-only paths never sweep.
-        let startup = attachments::recover(hub.store.state_dir())
-            .context("Recovering the private inbound attachment spool")
-            .and_then(|()| socket.secure(&hub.store));
-        if let Err(error) = startup {
-            if socket.unlink().is_err() {
-                eprintln!("Gateway socket startup cleanup failed");
-            }
-            return Err(error);
-        }
+        attachments::recover(hub.store.state_dir())
+            .context("Recovering the private inbound attachment spool")?;
+        let (listener, socket) = staged.publish(&hub.store)?;
         let (stop, shutdown) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&hub), shutdown));
         Ok(Self {

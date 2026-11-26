@@ -7,10 +7,10 @@ import { readFile } from "node:fs/promises";
 import { IncomingMessage, Server, ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, requireMessengerCredentials } from "../../src/config";
-import { loadCredentials } from "../../src/credentials";
+import { loadConfig, requireMessengerCredentials } from "../../src/config/config";
+import { loadCredentials } from "../../src/config/credentials";
 import type { Approval, DialogResponse, Inbound, Messenger, OutputRecord, Route } from "../../src/contracts";
-import { DeliveryError } from "../../src/delivery";
+import { DeliveryError } from "../../src/messaging/delivery";
 import { processAlive, runGatewayRestart } from "../oracles/bun-gateway/gateway-restart";
 import type { GatewayService } from "../oracles/bun-gateway/gateway";
 
@@ -196,7 +196,7 @@ if (runnerRequest) {
     messenger: new RecordingMessenger(), restartRequestId: arg("--restart-request"),
     ...(["lane-failure-recovery-window", "lane-abort-recovery-window"].includes(process.env.OMP_RESTART_NATIVE_SCENARIO ?? "")
       ? { extensionPath: fileURLToPath(new URL("./restart-native-provider.ts", import.meta.url)) } : {}),
-    managedUlwPath: fileURLToPath(new URL("./managed-ulw", import.meta.url)),
+    managedUlwPath: fileURLToPath(new URL("./managed-super", import.meta.url)),
     onError: error => { record("gateway-error", { error: String(error) }); },
     launchRestartRunner: (path, requestId, fd) => spawn(process.execPath,
       ["--no-env-file", self, "--config", path, "--runner", requestId], {

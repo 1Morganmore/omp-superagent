@@ -2,17 +2,21 @@
 mod config;
 mod fs;
 mod handoff;
+mod hibernation;
 mod host_launch;
 mod host_rpc;
+mod launch_files;
 mod maintenance;
+mod managed_super;
 mod process;
 mod restart_record;
 mod restart_service;
 mod rotation;
+mod rotation_plan;
 mod rpc_wire;
 mod stock_ops;
 mod supervision;
-mod ulw;
+mod wake_retry;
 
 pub use config::LifecycleConfig;
 pub use handoff::{launch, record_runner_failure, restart_runner};
@@ -23,20 +27,22 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
     process as os_process,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     time::Duration,
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 use tokio::time::Instant;
 
-use crate::{adapter::EffectError, server::Service, store::Store};
+use crate::{adapter::EffectError, server::{Hub, Service}, store::{LAST_HEAD_ROTATION, Store}};
 
 use self::{
     fs::{Endpoint, alive, remove_dead_socket},
     host_rpc::Head,
+    launch_files::LaunchFiles,
     maintenance::Maintenance,
+    managed_super::Ulw,
     restart_record::{ACTIVE, HEAD, SOCKET, Stage},
-    ulw::Ulw,
+    wake_retry::{WakeRefusal, WakeRetry},
 };
 
 #[derive(Clone)]
@@ -55,6 +61,7 @@ struct Owner {
     maintenance: Mutex<Maintenance>,
     closing: watch::Sender<bool>,
     notify: OnceLock<Arc<Notify>>,
+    controller: OnceLock<Weak<Hub>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -63,6 +70,7 @@ enum Phase {
     Accepting,
     Accepted,
     Rotating,
+    Hibernating,
     OperatorStopping,
     Held,
 }
@@ -78,6 +86,8 @@ struct State {
     restarting: bool,
     head_error: Option<&'static str>,
     next_rotation_probe: Option<Instant>,
+    next_hibernation_probe: Option<Instant>,
+    wake_retry: Option<WakeRetry>,
 }
 
 impl Lifecycle {
@@ -92,6 +102,7 @@ impl Lifecycle {
             Store::open(&config.state_dir)?
         };
         let head: Option<Head> = restart_record::meta(store.get_meta(HEAD)?)?;
+        LaunchFiles::recover_preparation(&store)?;
         let state = State {
             head,
             launching_owner: None,
@@ -103,6 +114,8 @@ impl Lifecycle {
             restarting: false,
             head_error: None,
             next_rotation_probe: None,
+            next_hibernation_probe: None,
+            wake_retry: None,
         };
         Ok(Self(Arc::new(Owner {
             config,
@@ -115,6 +128,7 @@ impl Lifecycle {
             maintenance: Mutex::default(),
             closing: watch::channel(false).0,
             notify: OnceLock::new(),
+            controller: OnceLock::new(),
         })))
     }
 
@@ -124,6 +138,10 @@ impl Lifecycle {
 
     pub fn set_event_notifier(&self, notifier: Arc<Notify>) {
         self.0.notify.get_or_init(|| notifier);
+    }
+
+    pub(crate) fn set_controller(&self, controller: Weak<Hub>) {
+        self.0.controller.get_or_init(|| controller);
     }
 
     fn state(&self) -> Result<MutexGuard<'_, State>> {
@@ -196,17 +214,16 @@ impl Lifecycle {
     }
 
     pub async fn activate(&self, request: Option<&str>) -> Result<()> {
-        if request.is_none() && self.rotation()?.is_some_and(|plan| matches!(plan.stage,
-            rotation::Stage::Stopping | rotation::Stage::Starting | rotation::Stage::Launching))
+        if request.is_none() && self.rotation()?.is_some_and(|plan| plan.stage.active() || plan.stopped_hibernation())
         {
-            // An interrupted rotation must not stop the independent
+            // An interrupted HEAD lifecycle must not stop the independent
             // Gateway while exact native recovery is still being proved.
-            if self.reconcile_head(false).await.is_err() {
-                eprintln!("Gateway HEAD rotation requires reconciliation");
+            if self.reconcile_head(false, true).await.is_err() {
+                eprintln!("Gateway HEAD lifecycle requires reconciliation");
             }
             return Ok(());
         }
-        self.ensure_head(request).await?;
+        self.ensure_head(request, true).await?;
         if let Some(id) = request {
             let store = &self.0.store;
             let state = self.state()?;
@@ -236,18 +253,33 @@ impl Lifecycle {
         Ok(())
     }
 
-    pub async fn monitor(&self, controller_ready: bool) -> Result<()> {
+    pub(crate) async fn monitor(&self, controller_ready: bool, admission_ready: bool) -> Result<()> {
         self.schedule_maintenance()?;
-        self.reconcile_head(controller_ready).await
+        self.reconcile_head(controller_ready, !admission_ready).await
     }
 
-    async fn reconcile_head(&self, controller_ready: bool) -> Result<()> {
+    pub(crate) async fn wake_on_ingress(&self) -> Result<()> {
+        let absent = self.state()?.head.is_none();
+        if absent && self.rotation()?.is_some_and(|plan| plan.stage == rotation::Stage::Sleeping) {
+            return self.record_reconciliation(self.attempt_head(false).await);
+        }
+        Ok(())
+    }
+
+    async fn reconcile_head(&self, controller_ready: bool, startup: bool) -> Result<()> {
         let result = async {
             self.monitor_rotation(controller_ready).await?;
-            self.ensure_head(None).await
+            self.attempt_head(startup).await
         }.await;
+        self.record_reconciliation(result)
+    }
+
+    fn record_reconciliation(&self, result: Result<()>) -> Result<()> {
         if let Err(error) = result {
-            self.state()?.head_error = Some("Head ownership/startup requires reconciliation");
+            self.state()?.head_error = Some(
+                error.downcast_ref::<WakeRefusal>()
+                    .map_or("Head ownership/startup requires reconciliation", WakeRefusal::status),
+            );
             return Err(error);
         }
         Ok(())
@@ -277,19 +309,24 @@ impl Lifecycle {
                     "detail": "Waiting for authoritative native HEAD attachment, approval reconciliation and preset inspection."}));
             native["loadedSuperkitPath"] = json!(head.loaded_superkit_path.as_ref().filter(|_| live && connected));
             native["ready"] = json!(live && head_ready && head.loaded_superkit_path.is_some() && initialization["state"] == "complete"
-                && !rotation.as_ref().is_some_and(|plan| plan.stage == rotation::Stage::Stopping));
+                && !rotation.as_ref().is_some_and(|plan| plan.stage.active()));
             native["initialization"] = initialization;
         }
         if let Some(rotation) = rotation {
-            native["rotation"] = json!({
-                "id": rotation.id, "stage": rotation.stage,
-                "previousSessionId": rotation.original.session_id,
-                "replacementSessionId": rotation.replacement_session_id,
-            });
+            if rotation.mode == rotation::Mode::Hibernate {
+                native["hibernation"] = json!({
+                    "id": rotation.id, "stage": rotation.stage, "sessionId": rotation.original.session_id,
+                });
+                if let Some(previous) = restart_record::meta::<rotation::Rotation>(self.0.store.get_meta(LAST_HEAD_ROTATION)?)? {
+                    native["rotation"] = rotation_status(&previous);
+                }
+            } else {
+                native["rotation"] = rotation_status(&rotation);
+            }
         }
         let mut status = json!({
             "gateway": {"pid": os_process::id(), "ready": state.transport_ready && !closed,
-                "admissionReady": admission_ready, "stopping": state.phase != Phase::Running,
+                "admissionReady": admission_ready, "stopping": !matches!(state.phase, Phase::Running | Phase::Hibernating),
                 "pendingEvents": if closed { 0 } else { self.0.store.pending()? }},
             "head": native,
         });
@@ -306,13 +343,24 @@ impl Lifecycle {
     }
 }
 
+fn rotation_status(plan: &rotation::Rotation) -> Value {
+    json!({"id": plan.id, "stage": plan.stage, "previousSessionId": plan.original.session_id,
+        "replacementSessionId": plan.replacement_session_id})
+}
+
 #[async_trait]
 impl Service for Lifecycle {
     fn status(&self, connected: bool, head_ready: bool, admission_ready: bool) -> Result<Value> {
         self.status_value(connected, head_ready, admission_ready)
     }
     async fn authorize_head(&self, pid: u32) -> Result<()> {
-        self.authorize(pid).await
+        self.authorize(pid, None).await
+    }
+    async fn controller_ready(&self, pid: u32, revision: u64) -> Result<()> {
+        if self.rotation()?.is_some_and(|plan| plan.mode == rotation::Mode::Hibernate && plan.stage.active()) {
+            self.authorize(pid, Some(revision)).await?;
+        }
+        Ok(())
     }
     async fn stop(&self) -> Result<()> {
         self.stop_head().await

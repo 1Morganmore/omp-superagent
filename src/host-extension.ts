@@ -1,17 +1,21 @@
 import * as fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import * as net from "node:net";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { UnitScope } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
-import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDefaultThinkingLevel, cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { lookup as lookupSetting } from "@oh-my-pi/pi-coding-agent/config/registry";
-import { formatModelStringWithRouting, pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { formatModelStringWithRouting, pickDefaultAvailableModel, resolveModelRoleValue,
+  resolveSessionModelSelector } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { buildServiceTierByFamily } from "@oh-my-pi/pi-coding-agent/config/service-tier";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseSessionEntries, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, type FastModeState, type Frame, type ServiceUnit } from "./host-protocol";
+import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, type FastModeState, type Frame, type ServiceUnit } from "./omp/host-protocol";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -19,12 +23,15 @@ import type { RpcAbortAndRestoreQueueResult, RpcSessionState } from "@oh-my-pi/p
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { LanePresetSnapshot } from "./contracts";
-import { MANAGED_ULW_ENV } from "./managed-ulw";
-import { verifyHostSuperkit } from "./host-superkit";
-import { isPrReviewInferenceModel, prReviewModelChoices } from "./pr-review-models";
-import { HEAD_ROTATION_GUARD, HEAD_ROTATION_PROBE, type RotationGuardEvent,
-  type RotationNative, type RotationProbeEvent } from "./head-rotation";
-import { installReplyVoice } from "./host-reply-voice";
+import { MANAGED_ULW_ENV } from "./omp/managed-super";
+import { verifyHostSuperkit } from "./omp/host-superkit";
+import { isPrReviewInferenceModel, prReviewModelChoices } from "./pr/pr-review-models";
+import { HEAD_ROTATION_GUARD, HEAD_ROTATION_PROBE, HEAD_SLEEP_PROBE_READY, type HeadLifecycleMode,
+  type HeadSleepProbeReadyEvent, type RotationGuardEvent, type RotationNative, type RotationProbeEvent } from "./runtime/head-rotation";
+import { installReplyVoice } from "./omp/host-reply-voice";
+import { matchesPreparedLaunch } from "./omp/stock-head-launch";
+import { NATIVE_PROFILE_ENV, bindNativeProfile, matchesNativeProfile, type HostReadyEvent,
+  type NativeProfileBinding, type NativeProfilePaths } from "./omp/native-sessions";
 
 const terminalService = (state: ServiceUnit["state"]) => state === "exited" || state === "failed";
 const serviceGeneration = ({ owner, id, generation, startedAt, restartCount }: ServiceUnit) =>
@@ -88,6 +95,9 @@ export default function hostExtension(pi: ExtensionAPI): void {
   if (reviewCwd && PR_REVIEW_GITHUB_ENV.some(name => process.env[name]))
     throw new Error("Static PR review cannot load GitHub credentials from the native profile");
   let loadedSuperkitPath: string | undefined;
+  let stockLaunchReplay: true | undefined;
+  const profileBinding: NativeProfileBinding | null = JSON.parse(process.env[NATIVE_PROFILE_ENV] ?? "null");
+  let nativeProfilePaths: NativeProfilePaths | undefined;
   type ServiceStart = {
     readonly name: string; readonly scope: UnitScope; readonly owner: string;
     readonly sessionId: string; readonly toolCallId: string;
@@ -181,6 +191,17 @@ export default function hostExtension(pi: ExtensionAPI): void {
     hostPid: process.pid, sessionId: id, sessionFile: file, generation: ref.generation, instanceKey: session.instanceKey,
     ...(workerAttempt ? { workerAttempt, workerCwd: context?.cwd } : {}),
   });
+  const currentNativeProfile = (file: string | undefined) => {
+    if (!profileBinding || !nativeProfilePaths || !file) return;
+    const { profile, discoveryEntry } = profileBinding;
+    try {
+      if (matchesNativeProfile(nativeProfilePaths, profile) && realpathSync(dirname(discoveryEntry)) === dirname(discoveryEntry)
+        && realpathSync(discoveryEntry) === realpathSync(file)) return profile;
+    } catch (error) {
+      // An unavailable filesystem cannot prove a profile for shutdown or wake.
+      if (!(error instanceof Error)) throw error;
+    }
+  };
   const snapshot = () => {
     const { session } = exact();
     return { modelRoles: session.settings.getModelRoles(),
@@ -502,21 +523,49 @@ export default function hostExtension(pi: ExtensionAPI): void {
       active: session.isFastModeActive(),
     };
   };
-  const rotationState = (): RotationNative | null => {
-    if (process.env.OMP_SUPERAGENT_ROLE !== "head" || !localIdle()) return null;
+  const rotationState = (mode: HeadLifecycleMode | undefined): RotationNative | null => {
+    if (process.env.OMP_SUPERAGENT_ROLE !== "head" || !stockLaunchReplay || !localIdle()) return null;
     const { id, file, session } = exact();
+    const hibernation = mode === "hibernate" ? currentNativeProfile(file) : undefined;
+    if (mode === "hibernate") {
+      const goal = session.getGoalModeState()?.goal;
+      // A paused/budget-limited goal, an open plan or an armed native
+      // prewalk is still owned work.
+      if (!hibernation || (goal && goal.status !== "complete" && goal.status !== "dropped")
+        || session.getPlanModeState()?.enabled || session.getPrewalkState?.())
+        return null;
+    }
     const usage = session.getContextUsage();
+    const contextPercent = usage && typeof usage.tokens === "number" && Number.isFinite(usage.tokens)
+      && typeof usage.percent === "number" && Number.isFinite(usage.percent) && usage.percent >= 0
+      && Number.isFinite(usage.contextWindow) && usage.contextWindow > 0 ? usage.percent : null;
     const model = session.model;
-    if (!file || !usage || typeof usage.tokens !== "number" || !Number.isFinite(usage.tokens)
-      || typeof usage.percent !== "number" || !Number.isFinite(usage.percent) || usage.percent < 50
-      || !Number.isFinite(usage.contextWindow) || usage.contextWindow <= 0
+    if (!file || mode === undefined && (contextPercent === null || contextPercent < 50)
       || !model || typeof model.reasoning !== "boolean" || typeof session.configuredThinkingLevel !== "function") return null;
     const { modelRoles, defaultThinkingLevel } = snapshot();
     const roles = Object.fromEntries(Object.entries(modelRoles).filter((entry): entry is [string, string] =>
       typeof entry[1] === "string"));
+    const modelIdentity = formatModelStringWithRouting(model);
+    let tierSelection: Pick<RotationNative["selection"], "serviceTier" | "serviceTierDefaults" | "effectiveServiceTier"> | undefined;
+    if (mode === "hibernate") {
+      if (!session.serviceTierByFamily || typeof session.effectiveServiceTier !== "function") return null;
+      const settings = readOnly(session.settings);
+      tierSelection = {
+        serviceTier: { ...session.serviceTierByFamily }, effectiveServiceTier: session.effectiveServiceTier(model) ?? "none",
+        serviceTierDefaults: buildServiceTierByFamily(cfgTierOpenai.get(settings), cfgTierAnthropic.get(settings), cfgTierGoogle.get(settings)),
+      };
+      const manager = session.sessionManager;
+      const selectors = getRestorableSessionModels(manager.buildSessionContext().models, manager.getLastModelChangeRole());
+      const selector = selectors[0] ?? roles.default;
+      const resolved = selector && resolveSessionModelSelector(session.modelRegistry, selector)?.model;
+      // A selector ending in @upstream can instead be a literal catalog ID.
+      if (!resolved || resolved.id !== model.id || formatModelStringWithRouting(resolved) !== modelIdentity) return null;
+    }
     return { hostPid: process.pid, sessionId: id, sessionFile: file, nativeRun: runOrdinal,
-      contextPercent: usage.percent,
-      selection: { provider: model.provider, modelId: model.id, reasoning: model.reasoning,
+      contextPercent,
+      ...(hibernation ? { hibernation } : {}),
+      selection: { provider: model.provider, modelId: model.id, modelIdentity, reasoning: model.reasoning,
+        stockLaunchReplay, ...tierSelection,
         thinkingLevel: session.thinkingLevel ?? null, configuredThinkingLevel: session.configuredThinkingLevel() ?? null,
         modelSettings: { modelRoles: roles, ...(defaultThinkingLevel !== undefined ? { defaultThinkingLevel } : {}) } } };
   };
@@ -530,10 +579,18 @@ export default function hostExtension(pi: ExtensionAPI): void {
       return {};
     }
     if (command.type === "get_head_rotation") {
-      const state = rotationState();
+      const { mode } = command;
+      if (mode !== undefined && mode !== "hibernate") throw new Error("Unsupported HEAD lifecycle mode");
+      if (mode === "hibernate") {
+        if (process.env.OMP_SUPERAGENT_ROLE !== "head") return null;
+        let ready = false;
+        pi.events.emit(HEAD_SLEEP_PROBE_READY, { respond: value => { ready = value; } } satisfies HeadSleepProbeReadyEvent);
+        if (!ready) return null;
+      }
+      const state = rotationState(mode);
       if (!state) return null;
       let attestation: Parameters<RotationProbeEvent["respond"]>[0] | undefined;
-      pi.events.emit(HEAD_ROTATION_PROBE, { state, respond: value => { attestation = value; } } satisfies RotationProbeEvent);
+      pi.events.emit(HEAD_ROTATION_PROBE, { mode, state, respond: value => { attestation = value; } } satisfies RotationProbeEvent);
       return attestation ?? null;
     }
     if (command.type === "get_session_stats") return exact().session.getSessionStats();
@@ -593,6 +650,12 @@ export default function hostExtension(pi: ExtensionAPI): void {
     }
     if (command.type === "activate") {
       const identity = exact();
+      if (process.env.OMP_SUPERAGENT_ROLE === "head" && matchesPreparedLaunch(
+        process.argv.slice(2), command.replayableArgvHash, identity.session.extensionRunner?.getFlags?.(),
+      )) stockLaunchReplay = true;
+      const nativeProfile = currentNativeProfile(identity.file);
+      if (!identity.file || ((profileBinding || command.waking === true) && !nativeProfile))
+        throw new Error("Native Host profile changed before activation");
       if (reviewCwd) {
         if (command.emptyToolSelection !== true || command.noTools !== false || command.toolsExplicitlySelected !== true)
           throw new Error("Static PR review requires an explicit empty native tool selection");
@@ -603,7 +666,9 @@ export default function hostExtension(pi: ExtensionAPI): void {
       if (command.toolsExplicitlySelected === false && command.noTools === false
         && goalEnabled.get(readOnly(identity.session.settings)) === true)
         await pi.setActiveTools([...new Set([...pi.getActiveTools(), "goal"])]);
-      pi.events.emit("superagent:host-ready", { sessionId: identity.id, sessionFile: identity.file, pid: process.pid });
+      if (nativeProfile && !currentNativeProfile(identity.file)) throw new Error("Native Host profile changed before activation");
+      pi.events.emit("superagent:host-ready", { sessionId: identity.id, sessionFile: identity.file, pid: process.pid,
+        ...(nativeProfile ? { nativeProfile } : {}), ...(command.waking === true ? { waking: true } : {}) } satisfies HostReadyEvent);
       return {};
     }
     if (command.type === "observe") {
@@ -634,6 +699,14 @@ export default function hostExtension(pi: ExtensionAPI): void {
         && !session.yieldQueue.has() && !session.getGoalModeState()?.enabled && !mutationHeld && !observationHeld;
       // Only an owner that implements the cursor command can advertise it to peers.
       return { ...ownerIdentity(ownership.identity), loadedSuperkitPath, prReviewPolicy, settingsScope: "session", modelSettings: snapshot(),
+        nativeProfile: currentNativeProfile(ownership.identity.file),
+        ...(process.env.OMP_SUPERAGENT_ROLE === "head" ? {
+          stockLaunchReplay,
+          modelIdentity: session.model && formatModelStringWithRouting(session.model),
+          serviceTier: session.serviceTierByFamily,
+          effectiveServiceTier: session.model && typeof session.effectiveServiceTier === "function"
+            ? session.effectiveServiceTier(session.model) ?? "none" : undefined,
+        } : {}),
         journalCursorControlVersion: 1,
         ...(replyVoice?.available() ? { replyVoiceControlVersion: 2 } : {}),
         ...(running ? { headJobs: { running: running.map(job => job.id), awaitingOnly } } : {}),
@@ -766,6 +839,10 @@ export default function hostExtension(pi: ExtensionAPI): void {
       return { name: command.name, settingsScope: "session", preset: snapshot(), model: ownership.identity.session.model };
     }
     if (command.type === "shutdown_host") {
+      const { mode, headRotation } = command;
+      if (mode !== undefined && mode !== "hibernate") throw new Error("Unsupported HEAD lifecycle mode");
+      if (mode === "hibernate" && typeof headRotation !== "string")
+        throw new Error("Invalid guarded HEAD shutdown");
       if (!localIdle()) throw new Error("session_busy");
       const ownership = await owned(true);
       await ownership.identity.session.waitForIdle();
@@ -773,11 +850,11 @@ export default function hostExtension(pi: ExtensionAPI): void {
       const finalOwnership = await owned(true);
       if (exact().ref !== ownership.identity.ref || !localIdle() || ownership.unknown || finalOwnership.unknown
         || ownership.busy || finalOwnership.busy) throw new Error("session_busy");
-      if (typeof command.headRotation === "string") {
-        const state = rotationState();
+      if (typeof headRotation === "string") {
+        const state = rotationState(mode);
         if (!state) throw new Error("session_busy");
         let allowed = false;
-        pi.events.emit(HEAD_ROTATION_GUARD, { id: command.headRotation, state,
+        pi.events.emit(HEAD_ROTATION_GUARD, { id: headRotation, mode, state,
           respond: value => { allowed = value; } } satisfies RotationGuardEvent);
         if (!allowed) throw new Error("session_busy");
       }
@@ -885,6 +962,15 @@ export default function hostExtension(pi: ExtensionAPI): void {
     context = ctx;
     const identity = exact();
     pendingNativeWake(identity.session);
+    // Check the actual stock session before materializing or appending to its journal.
+    if (profileBinding) {
+      if (!identity.file) throw new Error("Native Host did not open its prepared journal");
+      nativeProfilePaths = await bindNativeProfile(pi.pi, {
+        agentDir: identity.session.settings.getAgentDir(), file: identity.file, id: identity.id,
+      }, profileBinding);
+      if (exact().ref !== identity.ref || !currentNativeProfile(identity.file))
+        throw new Error("Native Host profile changed before journal materialization");
+    }
     if (reviewCwd) {
       try { await armReview(identity.session, reviewCwd); }
       catch (error) {

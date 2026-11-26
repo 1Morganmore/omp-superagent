@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { discordThreadSplit } from "../src/topic-request";
+import { discordThreadSplit } from "../src/routing/topic-request";
 
 test.each([
   ["이건 따로 빼줘", ""],

@@ -4,7 +4,7 @@ import {
   ChannelType, MessageFlags, MessageReferenceType, MessageType, Routes,
   type Message, type RESTPostAPIChannelMessageJSONBody, type TextChannel,
 } from "discord.js";
-import { DeliveryError } from "../../../src/delivery.ts";
+import { DeliveryError } from "../../../src/messaging/delivery.ts";
 
 const CONFIRM = "/voice confirm";
 export const VOICE_DRAFT_HEADER = "Proposed work from the live voice session (not yet submitted).\n";

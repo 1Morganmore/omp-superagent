@@ -3,13 +3,13 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, loadStateDirectory, requireMessengerCredentials } from "./config";
-import { inspectInstalledOmp } from "./installed-omp";
-import { requireHostOwner } from "./host-owner-path";
-import { loadCredentials } from "./credentials";
+import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, loadStateDirectory, requireMessengerCredentials } from "./config/config";
+import { inspectInstalledOmp } from "./omp/installed-omp";
+import { requireHostOwner } from "./omp/host-owner-path";
+import { loadCredentials } from "./config/credentials";
 import { WORKFLOW_NAMES, type Lane } from "./contracts";
-import type { HostConnection } from "./host";
-import { readLaneRows } from "./lane-rows";
+import type { HostConnection } from "./omp/host";
+import { readLaneRows } from "./lane/lane-rows";
 
 // Keep Host/SDK imports out of setup, doctor and command registration:
 // OMP's dotenv loader must not choose their credential sources.
@@ -66,6 +66,7 @@ Add a messenger to an existing installation:
   Editing FILE does not reload a running service. The next Gateway start activates all configured blocks.
   Other FILE settings: command (stock OMP argv), headCwd, stateDir, maxHosts (includes HEAD),
   maxSubagents (shared budget), idleMs (idle lane eviction), optional model (HEAD startup model).
+  headIdleMs: park a fully idle HEAD after this many milliseconds (default 30 minutes; 0 keeps it resident).
 
 Command registration:
 discord-commands uses Discord REST only: dry-run by default, with no Gateway or native runtime activation.
@@ -189,8 +190,8 @@ async function workerCommand(args: string[]): Promise<void> {
       }
       if (localRepo && !preferred) throw new Error(usage);
       const config = await loadConfig(configPath ?? "config.local.json");
-      const { addWorker } = await import("./worker-registration");
-      const { workerDescribe } = await import("./worker-wire");
+      const { addWorker } = await import("./worker/worker-registration");
+      const { workerDescribe } = await import("./worker/worker-wire");
       const result = await addWorker({ destination, stateDir: config.stateDir,
         ...(preferred ? { defaultRepositoryRoot: localRepo ?? config.headCwd } : {}) }, workerDescribe);
       console.log(JSON.stringify(result, null, 2));
@@ -208,7 +209,7 @@ async function workerCommand(args: string[]): Promise<void> {
       if (flags.length !== 0 && (flags.length !== 2 || flag !== "--config" || !file || file.startsWith("-")))
         throw new Error(usage);
       const stateDir = await loadStateDirectory(file ?? "config.local.json");
-      const { workerInventory, workerDoctor } = await import("./worker-doctor");
+      const { workerInventory, workerDoctor } = await import("./worker/worker-doctor");
       if (destination) {
         const report = await workerDoctor(stateDir, destination);
         console.log(JSON.stringify(report, null, 2));
@@ -231,10 +232,10 @@ async function workerCommand(args: string[]): Promise<void> {
       }
       if (!headKey || !repositories.length) throw new Error(usage);
       if (process.platform !== "darwin" && process.platform !== "linux") throw new Error("Worker init requires macOS or Linux");
-      const { workerPublicKey } = await import("./worker-registration");
+      const { workerPublicKey } = await import("./worker/worker-registration");
       const publicKey = workerPublicKey(headKey);
-      const { enrollWorker } = await import("./worker-enrollment");
-      const { activeManagedUlw } = await import("./managed-ulw");
+      const { enrollWorker } = await import("./worker/worker-enrollment");
+      const { activeManagedUlw } = await import("./omp/managed-super");
       await requireHostOwner();
       activeManagedUlw();
       const { executable } = await inspectInstalledOmp(["omp"]);
@@ -247,9 +248,9 @@ async function workerCommand(args: string[]): Promise<void> {
       if (operands.length !== 2 || flag !== "--policy" || !path || !isAbsolute(path) ||
           process.env.SSH_ORIGINAL_COMMAND !== "omp-sa-worker-v1")
         throw new Error("Worker serve requires the enrolled SSH forced command");
-      const { readWorkerPolicy } = await import("./worker-enrollment");
+      const { readWorkerPolicy } = await import("./worker/worker-enrollment");
       const policy = readWorkerPolicy(homedir(), path);
-      const { execWorkerBridge } = await import("./worker-bridge");
+      const { execWorkerBridge } = await import("./worker/worker-bridge");
       return execWorkerBridge(policy, path);
     }
     default:
@@ -271,12 +272,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (args.length !== 3 || configAt !== 1 || args[2]!.startsWith("-"))
       throw new Error(`Usage: ${command} --config FILE`);
     const config = await loadConfig(args[2]!);
-    const { installAutostart, uninstallAutostart } = await import("./autostart");
+    const { installAutostart, uninstallAutostart } = await import("./operator/autostart");
     console.log(JSON.stringify(await (command === "install" ? installAutostart(config) : uninstallAutostart(config)), null, 2));
     return;
   }
   if (command === "setup") {
-    const { setup } = await import("./setup");
+    const { setup } = await import("./operator/setup");
     await setup(args[configAt + 1]!);
     return;
   }
@@ -302,13 +303,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const config = await loadConfig(configPath);
     let report: unknown;
     if (command === "discord-commands") {
-      const { registerDiscordCommands } = await import("./discord-command-registration");
+      const { registerDiscordCommands } = await import("./messaging/discord-command-registration");
       report = await registerDiscordCommands(config, { apply });
     } else if (command === "telegram-commands") {
-      const { registerTelegramCommands } = await import("./telegram-command-registration");
+      const { registerTelegramCommands } = await import("./messaging/telegram-command-registration");
       report = await registerTelegramCommands(config, { apply, languageCode: values.get("--language") });
     } else {
-      const { registerSlackCommands } = await import("./slack-command-registration");
+      const { registerSlackCommands } = await import("./messaging/slack-command-registration");
       report = await registerSlackCommands(config, { apply, manifestTokenEnv: manifestTokenEnv! });
     }
     console.log(JSON.stringify(report, null, 2));
@@ -320,14 +321,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!((configAt === 1 && args.length === 3) || (configAt === 2 && args.length === 4 && !args[1]?.startsWith("-")))) {
       throw new Error("Usage: group [REQUEST_ID] --config FILE");
     }
-    const { groupRequests } = await import("./group-access");
+    const { groupRequests } = await import("./group/group-access");
     console.log(JSON.stringify(groupRequests(config.stateDir, configAt === 2 ? args[1] : undefined), null, 2));
     return;
   }
   const target = args[1] && !args[1]!.startsWith("-") ? args[1]! : "main";
   if (command === "doctor") {
-    const { requireGateway } = await import("./gateway-native");
-    const { inspectManagedMemory, memoryBlockReason } = await import("./managed-memory");
+    const { requireGateway } = await import("./gateway/gateway-native");
+    const { inspectManagedMemory, memoryBlockReason } = await import("./omp/managed-memory");
     loadCredentials(config);
     const omp = await inspectInstalledOmp(config.command, credentialEnvNames(config));
     const memory = await inspectManagedMemory(config);
@@ -345,10 +346,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "status") {
-    const { gatewayStatus } = await import("./gateway-protocol");
-    const { autostartStatus } = await import("./autostart");
-    const { listWorkers } = await import("./worker-registration");
-    const { lanePlacement } = await import("./lane-rows");
+    const { gatewayStatus } = await import("./gateway/gateway-protocol");
+    const { autostartStatus } = await import("./operator/autostart");
+    const { listWorkers } = await import("./worker/worker-registration");
+    const { lanePlacement } = await import("./lane/lane-rows");
     console.log(JSON.stringify({
       gateway: await gatewayStatus(config),
       autostart: await autostartStatus(config),
@@ -367,7 +368,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   }
   if (command === "stop") {
     if (target === "main") {
-      const { stopGateway } = await import("./gateway-native");
+      const { stopGateway } = await import("./gateway/gateway-native");
       await stopGateway(config);
       console.log("Gateway and supervised main host accepted graceful shutdown.");
       return;
@@ -377,13 +378,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const remote = lane.remote;
     let host: HostConnection;
     if (remote) {
-      const { lookupWorker, remoteLanePaths, workerConnect, workerRef } = await import("./worker-wire");
+      const { lookupWorker, remoteLanePaths, workerConnect, workerRef } = await import("./worker/worker-wire");
       const paths = remoteLanePaths(remote, lane.id);
       if (lane.pid === null || !lane.sessionId || lane.sessionFile !== paths.sessionFile || lane.socketPath !== paths.socketPath)
         throw new Error("Remote lane has no recorded Host identity eligible for shutdown");
       host = await workerConnect(await lookupWorker(config.stateDir, remote), workerRef(lane));
     } else {
-      const { connect } = await import("./host");
+      const { connect } = await import("./omp/host");
       host = await connect(hostPaths(config, target).socketPath);
     }
     try {
@@ -405,8 +406,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   loadCredentials(config);
   // Only pass validated messenger credentials to the native launcher.
   requireMessengerCredentials(config);
-  const { gatewayPaths } = await import("./gateway-protocol");
-  const { launchGateway } = await import("./gateway-native");
+  const { gatewayPaths } = await import("./gateway/gateway-protocol");
+  const { launchGateway } = await import("./gateway/gateway-native");
   const status = await launchGateway(config);
   console.log(JSON.stringify({ ...status, gatewaySocketPath: gatewayPaths(config).socketPath,
     gatewayLogPath: gatewayPaths(config).logPath,

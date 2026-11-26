@@ -256,6 +256,13 @@ OMP 19's per-user daemon does not take over services from the previous broker. A
 in the new daemon is not evidence that you may stop or reclaim work whose completion was
 never confirmed in the old session.
 
+**Upgrading from the Bun journal verifier:** before replacing an installation in
+place, let work settle and gracefully stop its resident lane Hosts (including
+remote workers) and its Gateway/HEAD using the old installation. Check their
+exit receipts and verify the owners have exited. `stop main` alone does not stop
+independent lanes. Old owners still need their original helper files until exit;
+the new owners verify their journals in Rust. Keep the state and session files.
+
 The default `command: ["omp"]` looks up OMP on PATH. To use a different installation, put
 its OMP path in the first entry of `command`. A relative path is resolved against the
 configuration file's directory, and all lanes use the same path. This repository does not
@@ -316,7 +323,7 @@ previous layout still work. To prepare only omp-superkit again, run:
 bun run prepare:ulw
 ```
 
-`upstream/ulw.json` specifies the official remote and `checkIntervalMs: 3600000` (one hour).
+`upstream/super.json` specifies the official remote and `checkIntervalMs: 3600000` (one hour).
 Installation checks the remote's **default branch HEAD**. A production Gateway needs a
 valid active installation before startup. Once it confirms that, it starts IPC and the
 head first, checks the remote in the background, and then checks hourly for new commits
@@ -432,7 +439,7 @@ bun --no-env-file src/cli.ts discord-commands --config config.local.json --apply
 
 The first command previews changes without writing. `--apply` **replaces this bot's entire
 global command list**; use it only with a dedicated Superagent app. It removes Hermes-only
-commands and registers the [shared commands (including `/head`) and Discord-only `/usage-reset`](../src/messenger-command-catalog.json).
+commands and registers the [shared commands (including `/head`) and Discord-only `/usage-reset`](../src/messaging/messenger-command-catalog.json).
 If separate guild commands shadow global commands, registration reports the conflict
 rather than silently deleting them. Registration does not start the model or open a
 messenger connection, and is not a side effect of `setup`, `doctor`, or `start`.
@@ -930,6 +937,7 @@ completed. Do not add a separate preset block to this configuration file.
 | `maxHosts` | Budget for resident Hosts, including one head. Required integer, minimum 2. Work above that limit waits. |
 | `maxSubagents` | Native task concurrency budget distributed across all Hosts. Required integer, at least `maxHosts`. The per-Host limit is `floor(maxSubagents / maxHosts)`. |
 | `idleMs` | Time in milliseconds before safely settled idle lanes are reclaimed. Required nonnegative integer. Does not apply to the head and does not remove session history. |
+| `headIdleMs` | How long to keep a fully idle HEAD resident (milliseconds). Default `1800000` (30 minutes); `0` keeps it resident. This does not change lane eviction or erase history. |
 | `model` | Optional OMP model identifier for starting the head. If omitted, existing OMP settings apply. This is not the default for all new lanes: select each new lane's model or preset through `lane_start`. Resuming a lane keeps its saved selection. |
 | `discord` | Optional block. If present, `tokenEnv`, `ownerId`, `allowedGuildIds`, and `allowedChannelIds` are all required. |
 | `discord.requireAddressing` | Optional boolean, default `false`. With `true`, in parent channels of allowed servers and threads not created by this bot, only ordinary messages from the owner with an actual mention of this bot or a reply to a message it sent are accepted. |
@@ -1563,6 +1571,27 @@ or other unresolved work, or if usage is unknown. This is separate from the lane
 `idleMs` setting. See `head.rotation` in `status` for the old and new session IDs
 and the rotation stage. Unlike automatic rotation, `/restart` restores the same
 HEAD session.
+
+When `head.hibernation.stage` is `sleeping`, `head.pid: null` and
+`head.ready: false` are expected. The Gateway is still listening. Its next
+accepted input wakes the same session, so the first reply includes Host startup
+time. A fresh Discord session after a disconnect or a Slack reconnect also wakes
+HEAD to recover missed history. `omp-sa status` does not wake it. Set `headIdleMs: 0` if a warm first
+reply matters more than idle memory. A resident lane, scheduled work or an
+unsettled operation can keep HEAD awake even after the configured time.
+HEAD stays resident if the journal is a symlink, the Host cannot attest to
+safe sleep, or stock OMP cannot restore the active selection. Sleep must not
+re-enable a paid service tier, reset a `--max-time` budget, or rearm a completed
+`--plan-yolo`. Keep the native OMP profile and session storage location unchanged.
+The same agent directory with a different effective `XDG_DATA_HOME` is not sufficient.
+`launching` can mean the native process is up but its controller is not ready.
+If the config was edited during launch, restore its exact original bytes. The
+same HEAD can then process its queued input; do not resend the message.
+If HEAD reports that the Gateway cannot order startup history, stop and
+start the Gateway and HEAD from the same installation before resuming work.
+To change messenger policy while HEAD sleeps, stop the Gateway normally, edit
+the config, and explicitly start it again. A message cannot authorize a wake
+under a changed policy.
 
 `/usage` with no arguments does not call a model. It sends only the numbers the
 installed OMP reports to the original conversation. Remaining limits and reset

@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 
 use super::{
     Hub,
+    events::safe_integer,
     protocol::{Fault, WireResult, effect_id, object, rejected},
 };
 use crate::{
@@ -41,7 +42,8 @@ impl Hub {
             | "inspectDiscordContext"
             | "discordPurpose"
             | PRESENCE => args.len() == 1,
-            "setActivity" | "updateThread" | "fetchAfter" => args.len() == 2,
+            "setActivity" | "updateThread" => args.len() == 2,
+            "fetchAfter" => (2..=3).contains(&args.len()),
             "canCreateThread" => (1..=2).contains(&args.len()),
             "createThread" => (2..=4).contains(&args.len()),
             _ => false,
@@ -170,6 +172,20 @@ impl Hub {
     }
 
     async fn dispatch_effect(&self, operation: &str, args: &[Value]) -> WireResult<Value> {
+        if let ("fetchAfter", [route, cursor, gap]) = (operation, args) {
+            let sequence = safe_integer(gap).filter(|sequence| *sequence > 0)
+                .ok_or_else(|| rejected("Invalid history gap sequence"))?;
+            let platform = route["platform"].as_str().ok_or_else(|| rejected("Invalid history route"))?;
+            let before = self.store.history_fence(sequence, platform)?
+                .ok_or_else(|| rejected("History gap is not pending for this platform"))?;
+            if matches!(platform, "discord" | "slack") {
+                return self.fetch_history(&[route.clone(), cursor.clone(), json!(before)], Some(sequence)).await;
+            }
+            return self.fetch_history(&args[..2], Some(sequence)).await;
+        }
+        if operation == "fetchAfter" {
+            return self.fetch_history(args, None).await;
+        }
         match (operation, args) {
             ("send", [output]) => validate_reply(output)?,
             ("setActivity", [message, state]) => {
@@ -194,10 +210,17 @@ impl Hub {
             }
             _ => {}
         }
-        self.adapters
-            .effect(operation, args)
-            .await
-            .map_err(Fault::from)
+        self.adapters.effect(operation, args).await.map_err(Fault::from)
+    }
+
+    async fn fetch_history(&self, args: &[Value], sequence: Option<i64>) -> WireResult<Value> {
+        let value = self.adapters.effect("fetchAfter", args).await?;
+        match value {
+            // A live receipt already at the Gateway owns its original
+            // ordering, including relative to slash commands without IDs.
+            Value::Array(history) => Ok(Value::Array(self.store.ordered_history(&args[0], sequence, history)?)),
+            value => Ok(value),
+        }
     }
 }
 

@@ -3,11 +3,11 @@ import { LogLevel, WebClient, type WebClientOptions } from "@slack/web-api";
 import { SocketModeClient } from "@slack/socket-mode";
 import { physicalRoute, physicalRouteKey, routeKey, type Approval, type Attachment, type DialogResponse, type Inbound, type MessageActivity, type MessageReference, type OutputRecord, type Route } from "../../../src/contracts.ts";
 import type { DownloadMessenger as Messenger } from "../../fixtures/inbound-attachments";
-import { parseDialog, type Dialog } from "../../../src/dialog.ts";
-import { validateDecisionAnswer, validateDecisionResponse } from "../../../src/decisions";
-import { approvalCardToken, DeliveryError } from "../../../src/delivery.ts";
-import { compareMessageIds } from "../../../src/message-order.ts";
-import { MESSENGER_COMMANDS } from "../../../src/messenger-commands.ts";
+import { parseDialog, type Dialog } from "../../../src/messaging/dialog.ts";
+import { validateDecisionAnswer, validateDecisionResponse } from "../../../src/lane/decisions";
+import { approvalCardToken, DeliveryError } from "../../../src/messaging/delivery.ts";
+import { compareMessageIds } from "../../../src/routing/message-order.ts";
+import { MESSENGER_COMMANDS } from "../../../src/messaging/messenger-commands.ts";
 import { parseSlackCommand } from "./slack-commands.ts";
 
 type RecordValue = Record<string, unknown>;

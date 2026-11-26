@@ -23,13 +23,14 @@ use crate::store::GatewayReceipt;
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 impl Hub {
-    pub(super) async fn attach(&self, id: String, data: &Map<String, Value>) -> WireResult<()> {
+    pub(super) async fn attach(&self, id: String, data: &Map<String, Value>) -> WireResult<bool> {
         let pid = data
             .get("pid")
             .and_then(safe_integer)
             .and_then(|pid| u32::try_from(pid).ok())
             .filter(|pid| *pid > 0)
             .ok_or_else(|| rejected("Invalid head PID"))?;
+        let epoch = self.state()?.head_epoch;
         self.service.authorize_head(pid).await.map_err(|error| {
             let fault = Fault::from(error);
             if fault.is_rejected() {
@@ -41,6 +42,9 @@ impl Hub {
         let mut state = self.state()?;
         if state.closing {
             return Err(rejected("Gateway is stopping"));
+        }
+        if state.head_epoch != epoch {
+            return Err(rejected("Gateway head changed during authorization"));
         }
         if state
             .client
@@ -61,11 +65,12 @@ impl Hub {
             pid,
             ready: false,
             resumed: data.get("resumed") == Some(&Value::Bool(true)),
+            startup_history: data.get("startupHistory") == Some(&Value::Bool(true)),
             reconciled,
             reconciliation: None,
             stream: None,
         });
-        Ok(())
+        Ok(self.admission_ready())
     }
 
     pub(super) fn open_events(self: &Arc<Self>, revision: u64) -> WireResult<Response> {
@@ -114,9 +119,12 @@ impl Hub {
 
     pub(super) fn mark_ready(&self, revision: u64) -> WireResult<()> {
         let mut state = self.state()?;
+        let admission_ready = self.admission_ready();
+        let can_enqueue_startup = !admission_ready && !state.startup_history_enqueued;
         let client = state.controller(revision)?;
+        let enqueue_startup = !client.ready && client.startup_history && can_enqueue_startup;
         if !client.ready && client.resumed {
-            let event = if self.admission_ready() {
+            let event = if admission_ready {
                 json!({"kind": "reconnect"})
             } else {
                 // Reuse the outstanding durable barrier after a lost/rejected
@@ -129,13 +137,20 @@ impl Hub {
                 json!({"kind": "reconnect", "barrier": barrier})
             };
             self.store.admit(&event)?;
-        } else if !client.resumed {
+        }
+        // The startup sweep follows already durable events (and any resumed
+        // approval barrier) but precedes opening new adapter admission.
+        if enqueue_startup {
+            self.store.admit(&json!({"kind": "reconnect", "historyRecovery": true}))?;
+        }
+        if !client.resumed {
             self.adapters.ready.send_replace(true);
         }
         client.ready = true;
         if client.reconciliation.is_none() {
             client.reconciled = true;
         }
+        state.startup_history_enqueued |= enqueue_startup;
         drop(state);
         self.deliver()?;
         Ok(())
@@ -222,9 +237,16 @@ impl Hub {
             return Ok(());
         }
         let frame = loop {
-            let Some(frame) = self.store.next(None)? else {
+            let Some(mut frame) = self.store.next(None)? else {
                 return Ok(());
             };
+            // An older, durable history marker may predate this server's
+            // approval barrier. Do not run it against unreconciled adapters.
+            if frame.event["historyRecovery"] == true
+                && let Some(barrier) = &client.reconciliation
+            {
+                frame = self.store.reconciliation_event(barrier)?;
+            }
             if self.adapters.rooms.allows_event(&frame.event) {
                 break frame;
             }
