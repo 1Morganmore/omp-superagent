@@ -1599,6 +1599,15 @@ export class Store implements StorePort {
     }).immediate();
   }
 
+  saveHeadJobs(bindingKey: string, owners: readonly (readonly [string, string, string])[],
+    outputs: readonly Pick<OutputRecord, "id" | "sourceId" | "route" | "text">[] = []): void {
+    this.db.transaction(() => {
+      for (const output of outputs) this.queueOutput(output);
+      if (owners.length) this.setMeta(bindingKey, JSON.stringify(owners));
+      else this.db.query("DELETE FROM metadata WHERE key = ?").run(bindingKey);
+    }).immediate();
+  }
+
   recordRestartCheckpointFailure(expectedFence: string, stopBoundary: string | null, failedFence: string,
     output: Pick<OutputRecord, "id" | "sourceId" | "route" | "text">): boolean {
     return this.db.transaction(() => {

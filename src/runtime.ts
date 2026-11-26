@@ -209,10 +209,12 @@ export interface RuntimeState {
   modelSettings?: LanePresetSnapshot;
   mutationHeld?: boolean;
   hostPid?: number;
+  readonly instanceKey?: string;
   isSettled: boolean;
   isStreaming: boolean;
   hasPendingAsyncWork?: boolean;
   hasOwnedRunningWork?: boolean;
+  headJobs?: { running: readonly string[]; awaitingOnly: boolean };
   pendingUiRequests?: Record<string, unknown>[];
   goal?: { enabled?: boolean; mode?: string; goal?: { id?: string; status?: string } } | null;
 }
@@ -285,6 +287,15 @@ interface Live {
   finishing?: Promise<void>;
   finishAgain?: boolean;
   settlementReadPending?: boolean;
+  headJobBindingKey?: string;
+  headJobOwners?: Map<string, { input: InputRecord; callId: string }>;
+  headJobStarts?: Map<string, string>;
+  headJobYield?: { answer: string | null };
+  headJobLoop?: "foreground" | "background";
+  headJobPromptSeen?: boolean;
+  headJobBatch?: Map<string, string>;
+  headJobMixed?: boolean;
+  headJobCleanAnswer?: string;
   releasing?: boolean;
   lostDuringRelease?: boolean;
   nextReleaseProbe?: number;
@@ -799,7 +810,7 @@ export class Superagent {
       await this.reconcileRestart();
       await this.flushOutputs();
       await this.reconcileHeadRecovery();
-      for (const live of this.live.values()) if (live.input) await this.finish(live);
+      for (const live of this.live.values()) if (live.input || !live.busy && live.headJobOwners?.size) await this.finish(live);
       this.timer = setInterval(() => {
         this.reconnectRemoteLane();
         this.retryDiscordCatchup();
@@ -2373,7 +2384,7 @@ export class Superagent {
         || frame.type === "extension_ui_request" && frame.method === "cancel";
       // Approval presentation/lifecycle must stay live while a journal read is
       // pending. Only observation mutations wait for chronological replay.
-      if (!live || !observing && observation) buffered.push(frame);
+      if (!live || !observing && (observation || id === "main")) buffered.push(frame);
       else this.observe(live, frame);
     });
     try {
@@ -2391,6 +2402,21 @@ export class Superagent {
         admitted: new Map(), running: false, preparing: 0, unsubscribe,
         goalId: state.goal?.goal?.id,
       };
+      if (id === "main" && typeof state.hostPid === "number" && Number.isSafeInteger(state.hostPid) && state.hostPid > 0
+        && typeof state.instanceKey === "string" && state.instanceKey) {
+        // A resumed journal or a recycled PID is not the same execution. Native
+        // job IDs are meaningful only inside the verified SDK instance.
+        live.headJobBindingKey = `head:jobs:${key(JSON.stringify([generation, state.sessionId, state.sessionFile, state.hostPid, state.instanceKey]))}`;
+        const saved = this.store.getMeta(live.headJobBindingKey);
+        if (saved) {
+          live.headJobOwners = new Map();
+          for (const [job, sourceId, callId] of JSON.parse(saved) as [string, string, string][]) {
+            const input = this.store.input(sourceId);
+            if (input?.target === "main" && input.state === "done" && input.generation === generation
+              && this.store.getMeta(`user-source:${sourceId}`) === "true") live.headJobOwners.set(job, { input, callId });
+          }
+        }
+      }
       const residentCheckpoint = this.restartFence()?.checkpoint?.residents ?? this.rotatedResidents();
       const recovery = id === "main" ? undefined : residentCheckpoint?.find(saved =>
         saved.id === id && saved.generation === generation && saved.sessionId === state.sessionId && saved.pid === state.hostPid);
@@ -2448,9 +2474,15 @@ export class Superagent {
           }
         } finally { live.preparing--; }
       }
+      if (live.headJobOwners?.size) {
+        live.preparing++;
+        try { await this.recoverHeadJobs(live); }
+        finally { live.preparing--; }
+        if (state.headJobs?.awaitingOnly && live.headJobOwners.size) live.headJobYield = { answer: null };
+      }
       observing = true;
       for (const frame of buffered) this.observe(live, frame);
-      if (recovery) this.background(this.finish(live));
+      if (recovery || live.headJobOwners?.size && state.isSettled) this.background(this.finish(live));
       const attached = live;
       void connection.exited.then(() => this.disconnected(attached), () => this.disconnected(attached));
       return live;
@@ -5658,7 +5690,10 @@ export class Superagent {
       || hold && this.store.getMeta("gateway:operator-stop") !== (restart.stopBoundary ?? null)) return;
     this.store.setMeta(`head:restart:${restart.inputId}`, JSON.stringify(restart));
     this.store.setMeta("head:restart-fence", hold ? JSON.stringify(restart) : "");
-    if (!hold && this.ready && !this.stopped) this.resumeRouting();
+    if (!hold && this.ready && !this.stopped) {
+      this.resumeRouting();
+      this.wakeOutputs();
+    }
     if (!hold) this.observePresetRoles();
   }
 
@@ -7985,12 +8020,13 @@ export class Superagent {
             if (steering) {
               if (!this.canSteer(live, input)) continue;
             } else {
-              if (heldTargets.has(input.target) || live.busy) {
+              if (heldTargets.has(input.target) || live.busy && !(live.headJobYield && live.headJobOwners?.size)) {
                 if (live.id === "main" && heldTargets.has("main")) this.noticeHeadHold(input);
                 continue;
               }
               const state = await this.state(live);
-              if (!state.isSettled || state.pendingUiRequests?.length || this.store.approvals(live.id).length) {
+              const idle = this.promptIdle(live, state, input);
+              if (!idle || state.pendingUiRequests?.length || this.store.approvals(live.id).length) {
                 live.busy = !state.isSettled;
                 continue;
               }
@@ -8071,6 +8107,24 @@ export class Superagent {
       } finally { await file.close(); }
     }
     return { descriptions, images };
+  }
+
+  private headJobPause(live: Live, state: RuntimeState): readonly string[] | undefined {
+    const jobs = state.headJobs;
+    if (live.id !== "main" || !live.headJobYield || live.running || jobs?.awaitingOnly !== true
+      || state.hasPendingAsyncWork !== true || state.hasOwnedRunningWork !== true
+      || state.isStreaming || state.isCompacting || state.queuedMessageCount !== 0
+      || state.goal?.enabled || state.mutationHeld || state.pendingUiRequests?.length
+      || this.store.approvals("main").length || this.stopped || this.headStopping || this.restartFence()) return;
+    if (Array.isArray(jobs.running) && jobs.running.length > 0
+      && jobs.running.every(id => typeof id === "string" && id.length > 0)) return jobs.running;
+  }
+
+  private promptIdle(live: Live, state: RuntimeState, input: InputRecord): boolean {
+    if (state.isSettled) return true;
+    const jobs = this.headJobPause(live, state);
+    return !!jobs && jobs.every(id => live.headJobOwners?.has(id))
+      && !this.scopeReviewActive() && this.store.getMeta(`user-source:${input.id}`) === "true";
   }
 
   private canSteer(live: Live, input: InputRecord): boolean {
@@ -8268,7 +8322,8 @@ export class Superagent {
     }
     if (steering && (!this.canSteer(live, input) || !actual.isStreaming || actual.isCompacting
       || actual.pendingUiRequests?.length || this.store.approvals(live.id).length)) return;
-    if (!steering && (!actual.isSettled || actual.pendingUiRequests?.length || this.store.approvals(live.id).length)) {
+    const idle = steering ? actual.isSettled : this.promptIdle(live, actual, input);
+    if (!steering && (!idle || actual.pendingUiRequests?.length || this.store.approvals(live.id).length)) {
       live.busy = !actual.isSettled;
       return;
     }
@@ -8289,7 +8344,7 @@ export class Superagent {
       }
       const confirmedInput = this.store.input(input.id);
       if (!this.current(live) || live.input !== owner || version !== live.nativeVersion
-        || !confirmed.isSettled || confirmed.isStreaming || confirmed.isCompacting
+        || !this.promptIdle(live, confirmed, input) || confirmed.isStreaming || confirmed.isCompacting
         || confirmed.pendingUiRequests?.length || this.store.approvals("main").length
         || this.restartFence() || this.headRecoveryActive() || this.headStopping || this.headCompaction || this.pendingHeadModel()
         || confirmedInput?.state !== "pending" || confirmedInput.target !== live.id || this.kickoffHeld(live.id)) return;
@@ -8366,6 +8421,9 @@ export class Superagent {
       live.scopeReviewStart = undefined;
       live.scopeReviewDialog = undefined;
       live.scopeReviewRequested = false;
+      live.headJobStarts = undefined;
+      live.headJobMixed = false;
+      live.headJobCleanAnswer = undefined;
       live.scopeReviewUnsafe = false;
       if (live.id === "main") this.markActiveLaneReview(this.isLaneRecoveryReport(input.id) || input.id.startsWith(scopeReviewPrefix)
         ? input.id : undefined);
@@ -8512,6 +8570,133 @@ export class Superagent {
     } catch (error) { this.report(error); }
   }
 
+  private observeHeadJobMessage(live: Live, message: Record<string, unknown>): void {
+    // A reconnect can join the native loop after its agent_start. Only an
+    // exact, previously bound completion is actionable without that boundary.
+    if (!live.headJobLoop && !(message.role === "custom" && message.customType === "async-result"
+      && live.headJobOwners?.size)) return;
+    const input = live.input;
+    if (message.role === "user" && !message.synthetic && input) {
+      const first = Array.isArray(message.content)
+        ? record(message.content.find(part => record(part).type === "text")).text : message.content;
+      if (typeof first === "string") {
+        for (const match of first.matchAll(/^`{3,}superagent-runtime-context\r?\nRequest ID: ([^\r\n]+)\r?\n/gm)) {
+          if (!input.workflow && match.index !== 0) break;
+          if (match[1] === input.id) { live.headJobPromptSeen = true; break; }
+        }
+      }
+    }
+    if (message.role === "assistant" && live.headJobPromptSeen && live.running && !live.headJobMixed) {
+      // Once a foreign result enters the run, only the final answer that
+      // was already observed can still be attributed to the input.
+      if (message.stopReason === "stop")
+        live.headJobCleanAnswer = assistantText(message) ?? live.headJobCleanAnswer;
+      else if (message.stopReason === "error" || message.stopReason === "aborted")
+        live.headJobCleanAnswer = undefined;
+    }
+    if (message.role === "toolResult" && live.headJobPromptSeen && live.running && message.isError !== true) {
+      const job = record(record(message.details).async);
+      if (job.state === "running" && typeof job.jobId === "string" && job.type === message.toolName
+        && typeof message.toolCallId === "string" && message.toolCallId
+        && (job.type === "bash" || job.type === "eval" || job.type === "task"))
+        (live.headJobStarts ??= new Map()).set(job.jobId, message.toolCallId);
+    }
+    if (message.role !== "custom" || message.customType !== "async-result" || !live.headJobOwners?.size) return;
+    const items = this.headJobResults(message);
+    if (!items.size) return;
+    const batch = live.headJobBatch ??= new Map();
+    for (const [id, text] of items) batch.set(id, text);
+    if (input && [...batch.keys()].some(id => {
+      const owner = live.headJobOwners?.get(id)?.input;
+      return owner ? routeKey(owner.route) !== routeKey(input.route) : !live.headJobStarts?.has(id);
+    })) live.headJobMixed = true;
+  }
+
+  private headJobResults(message: Record<string, unknown>): Map<string, string> {
+    const batch = new Map<string, string>();
+    const jobs = record(message.details).jobs;
+    if (!Array.isArray(jobs) || !jobs.length) return batch;
+    const content = typeof message.content === "string" ? message.content
+      : Array.isArray(message.content) ? message.content.filter(part => record(part).type === "text")
+        .map(part => String(record(part).text ?? "")).join("") : "";
+    for (const job of jobs) {
+      const { jobId, status } = record(job);
+      if (typeof jobId !== "string") { batch.set("", ""); continue; }
+      batch.set(jobId, jobs.length === 1 && content.trim() ? content
+        : `백그라운드 작업 ${jobId}: ${typeof status === "string" ? status : "결과 도착"}`);
+    }
+    return batch;
+  }
+
+  private async recoverHeadJobs(live: Live): Promise<void> {
+    if (!live.headJobOwners?.size) return;
+    // Anchor at the original pre-dispatch cursor, then match the observed
+    // launch call before its receipt. A cursor read at release could race an
+    // already-journaled completion whose socket frame has not arrived yet.
+    for (const sourceId of new Set([...live.headJobOwners.values()].map(owner => owner.input.id))) {
+      const source = this.store.input(sourceId);
+      const owner = record(JSON.parse(this.store.getMeta(`head-native-owner:${sourceId}`) ?? "null"));
+      if (!source?.requestId || owner.requestId !== source.requestId || owner.generation !== live.generation
+        || owner.sessionId !== live.sessionId || owner.sessionFile !== this.headSessionFile()
+        || owner.cursor !== null && typeof owner.cursor !== "string") continue;
+      let entries: unknown;
+      try { entries = await this.readLaneObservationEntries(live, owner.cursor, "recover HEAD job results"); }
+      catch (error) {
+        // Compaction may remove a cursor. Never substitute the whole transcript.
+        if (!(error instanceof UnknownObservationCursor)) throw error;
+        continue;
+      }
+      if (!this.current(live) || this.stopped || !Array.isArray(entries)) throw new Error("Native HEAD job journal is unavailable");
+      const launched = new Set<string>();
+      for (const entry of entries.map(record)) {
+        const message = entry.type === "custom_message" ? entry : entry.type === "message" ? record(entry.message) : {};
+        if (entry.type === "message" && message.role === "toolResult" && message.isError !== true) {
+          const job = record(record(message.details).async);
+          if (job.state === "running" && job.type === message.toolName && typeof job.jobId === "string") {
+            const bound = live.headJobOwners.get(job.jobId);
+            if (bound?.input.id === sourceId && bound.callId === message.toolCallId) launched.add(job.jobId);
+            else launched.delete(job.jobId);
+          }
+        }
+        if (message.customType !== "async-result" || entry.type === "message" && message.role !== "custom") continue;
+        const batch = new Map([...this.headJobResults(message)].filter(([id]) => launched.has(id) && live.headJobOwners?.has(id)));
+        if (!batch.size) continue;
+        live.headJobBatch = batch;
+        this.deliverHeadJobBatch(live, null); // Only the scoped native result, not a detached turn's assistant text.
+      }
+    }
+    this.wakeOutputs();
+  }
+
+  private deliverHeadJobBatch(live: Live, answer: string | null): void {
+    const batch = live.headJobBatch;
+    if (!batch || !live.headJobBindingKey || !live.headJobOwners || this.stopped) return;
+    const remaining = new Map(live.headJobOwners);
+    const outputs: Pick<OutputRecord, "id" | "sourceId" | "route" | "text">[] = [];
+    const owners = new Map<string, { input: InputRecord; jobs: string[] }>();
+    let unknown = false;
+    for (const id of batch.keys()) {
+      const owner = live.headJobOwners?.get(id)?.input;
+      if (!owner || this.store.input(owner.id)?.state !== "done") { unknown = true; continue; }
+      const group = owners.get(owner.id);
+      if (group) group.jobs.push(id);
+      else owners.set(owner.id, { input: owner, jobs: [id] });
+    }
+    for (const { input, jobs } of owners.values()) {
+      jobs.sort();
+      const id = `${input.id}:job-result:${key(JSON.stringify([live.sessionId, jobs]))}`;
+      const text = !live.input && !unknown && owners.size === 1 && answer
+        ? answer : jobs.map(job => batch.get(job)).join("\n\n");
+      if (text && !this.store.output(id)) outputs.push({ id, sourceId: input.id, route: input.route, text });
+      for (const job of jobs) remaining.delete(job);
+    }
+    if (remaining.size !== live.headJobOwners.size) {
+      this.store.saveHeadJobs(live.headJobBindingKey, [...remaining].map(([job, owner]) => [job, owner.input.id, owner.callId]), outputs);
+      live.headJobOwners = remaining;
+    }
+    live.headJobBatch = undefined;
+  }
+
   private observe(live: Live, frame: Record<string, unknown>): void {
     if (!this.current(live)) return;
     if (live.id === "main" && frame.type !== "response" && frame.type !== "ready")
@@ -8530,6 +8715,15 @@ export class Superagent {
       live.modelIdleVersion++;
     }
     if (live.id === "main" && (this.headRecoveryActive() || this.store.hasHeadRecoveryInput())) {
+      // This fence quarantines the interrupted foreground input, not the
+      // native receipts of already released jobs with independently bound owners.
+      const message = record(frame.message);
+      if (live.headJobOwners?.size && frame.type === "message_end" && message.role === "custom" && message.customType === "async-result")
+        this.observeHeadJobMessage(live, message);
+      if (live.headJobBatch && (frame.type === "message_end" || frame.type === "agent_end")) {
+        this.deliverHeadJobBatch(live, null);
+        this.wakeOutputs();
+      }
       // Native journal evidence owns reconciliation. Delayed original frames
       // and recovery messages never become progress/answers for live.input.
       if (frame.type === "prompt_result" || frame.type === "agent_end" || frame.type === "session_settled")
@@ -8554,6 +8748,11 @@ export class Superagent {
       }
     }
     if (frame.type === "agent_start") {
+      if (live.id === "main") {
+        live.headJobYield = undefined;
+        live.headJobPromptSeen = false;
+        live.headJobLoop = live.input ? "foreground" : "background";
+      }
       live.resultAttachmentStarts = undefined;
       live.scopeReviewStart = undefined;
       live.busy = true;
@@ -8566,6 +8765,20 @@ export class Superagent {
       for (const { input } of live.admitted.values()) this.activity(input, true);
     }
     if (frame.type === "agent_end") {
+      if (live.id === "main") {
+        const standalone = live.headJobLoop === "background";
+        live.headJobLoop = undefined;
+        const hadJobBatch = !!live.headJobBatch;
+        const message = Array.isArray(frame.messages) ? frame.messages.findLast(value => record(value).role === "assistant") : undefined;
+        const answer = record(message).stopReason === "stop" ? assistantText(message) : null;
+        live.headJobYield = frame.isTerminal === false && frame.yielded === true && frame.awaitingAsyncWork === true ? { answer } : undefined;
+        if (hadJobBatch) {
+          try { this.deliverHeadJobBatch(live, standalone && !this.headStopping && !this.store.hasInput("main", "uncertain") ? answer : null); }
+          catch (error) { this.report(error); }
+          this.background(this.flushOutputs());
+          this.background(this.finish(live));
+        }
+      }
       live.running = false;
       live.resultAttachmentStarts = undefined;
       live.scopeReviewStart = undefined;
@@ -8606,6 +8819,7 @@ export class Superagent {
         if (changed) this.background(this.kick());
       } catch (error) { this.report(error); }
     }
+    if (frame.type === "message_end" && live.id === "main") this.observeHeadJobMessage(live, record(frame.message));
     if (frame.type === "message_end" && live.input) {
       const message = record(frame.message);
       if (message.role === "toolResult") {
@@ -8621,6 +8835,7 @@ export class Superagent {
       if (progress && !isPrObservation(live.input.id) && !live.input.id.startsWith(laneDecisionReview)
         && !live.input.id.startsWith(scopeReviewPrefix) && !this.stopped && !this.restartFence()
         && (live.id !== "main" || this.headStopping === 0)) {
+        if (live.id === "main" && live.headJobMixed) return;
         const eventId = key(JSON.stringify([live.sessionId, live.generation, progress.identity]));
         try {
           if (this.store.progress(live.input.id, live.generation, live.sessionId, eventId, progress.text, this.config.discord?.editProgressInPlace === true)) {
@@ -8661,7 +8876,8 @@ export class Superagent {
         if (live.input?.requestId === frame.id) live.result = admitted.result;
         this.background(this.finish(live));
       }
-    } else if (frame.type === "session_settled") {
+    } else if (frame.type === "session_settled" || frame.type === "agent_end" && live.id === "main"
+      && live.headJobYield && live.result) {
       this.background(this.finish(live));
     } else if (frame.type === "extension_ui_request") {
       this.background(this.frame(live, frame));
@@ -8703,8 +8919,11 @@ export class Superagent {
     const admissions = [...live.admitted.values()];
     const nativeVersion = live.nativeVersion;
     const state = await this.settlementState(live);
-    if (!this.current(live) || !state.isSettled || live.preparing || live.input !== input
+    if (!this.current(live) || live.preparing || live.input !== input
       || admissions.length !== live.admitted.size || live.nativeVersion !== nativeVersion) return;
+    const settled = state.isSettled;
+    const jobs = settled ? undefined : this.headJobPause(live, state);
+    if (!settled && !jobs) return;
     if (live.id === "main" && !input) this.markActiveLaneReview(undefined);
     if (live.recovery) {
       // Reconcile every recovered settlement, even with an earlier completed
@@ -8732,6 +8951,30 @@ export class Superagent {
     // observed assistant outcome; a zero-run refusal is not completion.
     const outcome = !settling ? undefined : cancelled ? "aborted" : result!.goalResume ? live.assistantOutcome?.status ?? "error"
       : live.assistantOutcome && live.assistantOutcome.run > 1 ? live.assistantOutcome.status : result!.status;
+    const earlyAnswer = jobs && input ? live.headJobYield?.answer : undefined;
+    if (jobs) {
+      if (input) {
+        if (!live.headJobBindingKey || !earlyAnswer || !live.headJobPromptSeen || outcome !== "completed" || result?.status !== "completed"
+          || !result.agentInvoked || result.goalResume || live.recovery || admissions.length !== 1
+          || this.store.input(input.id)?.state !== "submitted"
+          || this.store.getMeta(`user-source:${input.id}`) !== "true"
+          || live.scopeReviewRequested || this.scopeReviewActive()
+          || jobs.some(id => !live.headJobStarts?.has(id) && !live.headJobOwners?.has(id))) return;
+        if (jobs.some(id => !live.headJobOwners?.has(id))) {
+          const owners = new Map(live.headJobOwners);
+          for (const id of jobs) if (!owners.has(id)) owners.set(id, { input, callId: live.headJobStarts!.get(id)! });
+          this.store.saveHeadJobs(live.headJobBindingKey, [...owners].map(([job, owner]) => [job, owner.input.id, owner.callId]));
+          live.headJobOwners = owners;
+        }
+      } else if (jobs.some(id => !live.headJobOwners?.has(id))) return;
+    }
+    if (settled && !live.headJobLoop && !live.headJobBatch && live.headJobBindingKey && live.headJobOwners?.size) {
+      // Native settlement proves there is no remaining work, not a successful
+      // result. Surface missing evidence to its original owner without a rerun.
+      live.headJobBatch = new Map([...live.headJobOwners.keys()].map(id => [id,
+        `백그라운드 작업 ${id}: HEAD 실행이 종료됐지만 작업 결과를 확인할 수 없습니다. 다시 실행하지 않았습니다.`]));
+      this.deliverHeadJobBatch(live, null);
+    }
     const scopeDialog = live.scopeReviewDialog;
     // Tool output can arrive before the controller's separate UI readback.
     // The exact callback wakes settlement once it confirms or fails that read.
@@ -8789,7 +9032,7 @@ export class Superagent {
         && this.recoveryControllerIdle() && this.toolFreeHeadFailure(input.id, evidence);
     }
     const wasBusy = live.busy;
-    live.busy = false;
+    live.busy = !settled;
     live.running = false;
     live.lastActivity = Date.now();
     if (live.id !== "main") this.store.updateLane(live.id, live.generation, { runtimeState: "idle", lastActivityAt: live.lastActivity });
@@ -8798,7 +9041,9 @@ export class Superagent {
       const completed = outcome === "completed";
       const state = completed ? "done" : outcome === "aborted" || toolFree ? "cancelled" : "uncertain";
       headFailed = live.id === "main" && state === "uncertain";
-      const text = completed ? (result!.agentInvoked || result!.goalResume && live.ownedRuns > 0 ? live.text : "") : outcome === "aborted"
+      const text = completed ? (live.headJobMixed
+        ? live.headJobCleanAnswer ?? "다른 요청의 백그라운드 결과와 함께 생성된 응답이라 이 대화에 전달하지 않았습니다. HEAD 세션에서 확인할 수 있습니다."
+        : result!.agentInvoked || result!.goalResume && live.ownedRuns > 0 ? earlyAnswer ?? live.text : "") : outcome === "aborted"
         ? "실행이 중단되었습니다. 작업 완료로 처리하지 않았습니다."
         : laneError
           ? laneFailureNotice(this.store, input, { quota: !!quota, toolFree, result: continuation ? undefined : result })
@@ -9255,9 +9500,13 @@ export class Superagent {
     if (pending?.state === "sending") await this.routeOutbounds.get(physicalRouteKey(pending.route));
   }
 
+  private headJobDeliveryHeld(output: OutputRecord): boolean {
+    return output.id.startsWith(`${output.sourceId}:job-result:`) && (!!this.headStopping || !!this.restartFence());
+  }
+
   private filterFlushable(outputs: OutputRecord[]): OutputRecord[] {
-    return outputs.filter(output => this.watchDeliveryReady
-      || !(isLaneWatchNotice(output.id) || isPrIntakeOffer(output.id) || isPrObservation(output.sourceId)));
+    return outputs.filter(output => !this.headJobDeliveryHeld(output) && (this.watchDeliveryReady
+      || !(isLaneWatchNotice(output.id) || isPrIntakeOffer(output.id) || isPrObservation(output.sourceId))));
   }
 
   private async awaitInflightOutputs(): Promise<void> {
@@ -9325,6 +9574,7 @@ export class Superagent {
         return delivered;
       }
       for (const output of outputs) {
+        if (this.headJobDeliveryHeld(output)) continue; // the fence may have changed since this route's first read
         if (isPrIntakeOffer(output.id) && this.restartFence()) {
           deferredLaneNotices.add(output.id);
           continue;

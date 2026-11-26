@@ -176,6 +176,31 @@ missing/invalid observation time or clock rollback. Stable message and
 callback-query identities, not a presumed globally monotonic update ID, deduplicate
 redeliveries and approval progress.
 
+### HEAD replies while jobs are running
+
+A completed HEAD prompt with a final answer can release its messenger request
+at a native yielded pause. The managed Host must attest that all remaining
+wakes are running root jobs, and the controller must have observed each job's
+launch under this or a previously released request. Another owner prompt can
+enter using fresh state and journal evidence. The native session remains
+busy for restart, reaping, recovery, and model maintenance; the jobs keep
+running.
+
+Before release the controller persists the job, its observed launch call and original
+input under the exact HEAD generation, session, PID and SDK instance. Reattachment
+uses the original request’s journal cursor and matching launch to recover missed receipts without replaying
+a prompt or sending an unverified assistant reply. A restart fence delays messenger
+delivery, not the durable recording of a completion.
+
+Structured completion IDs link a later job turn to its originating request
+and route. A standalone reply for one proven origin uses the durable outbox
+for that origin. If a completion is folded into another conversation's
+foreground turn, the controller sends the attributable native result to the
+job's origin, not the mixed assistant text. A foreground answer observed
+before the foreign completion is still sent to its own conversation. If a
+native batch cannot be split by origin, only individually identified job
+receipts are sent.
+
 ### Uncertain submissions
 
 Do not replay an ambiguous native prompt, approval response or external mutation.
