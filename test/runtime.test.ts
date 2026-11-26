@@ -12496,7 +12496,7 @@ describe("real Store runtime coordination", () => {
     expect(main.prompts).toHaveLength(1);
   });
 
-  test.each(["reconnect mid-turn", "journaled while detached", "foreign PID", "foreign instance", "restart ACK rejected"] as const)
+  test.each(["reconnect mid-turn", "journaled while detached", "interrupted second request", "stopped second request", "foreign PID", "foreign instance", "restart ACK rejected"] as const)
   ("HEAD background job keeps its source across %s without replay", async scenario => {
     const { runtime, main, hosts, config, store, messenger, requests, launched } = restartFixture();
     const original = headMessage("job-owner", route("51"));
@@ -12510,8 +12510,10 @@ describe("real Store runtime coordination", () => {
     await admit(runtime, original);
     const [prompt] = main.prompts;
     main.emit({ type: "message_end", message: { role: "user", content: prompt!.command.message } });
-    main.emit({ type: "message_end", message: { role: "toolResult", toolName: "bash", toolCallId: "launch",
-      details: { async: { state: "running", jobId, type: "bash" } } } });
+    const launch = { role: "toolResult", toolName: "bash", toolCallId: "launch", details: { async: { state: "running", jobId, type: "bash" } } };
+    main.entries.push({ type: "custom_message", id: "before-launch", ...receipt, content: "Before the verified launch" },
+      { type: "message", id: "real-launch", message: launch });
+    main.emit({ type: "message_end", message: launch });
     Object.assign(main.state, { isSettled: false, isStreaming: false, hasOwnedRunningWork: true, hasPendingAsyncWork: true,
       headJobs: { running: [jobId], awaitingOnly: true } });
     main.emit({ type: "agent_end", isTerminal: false, yielded: true, awaitingAsyncWork: true, messages: [final] });
@@ -12528,7 +12530,21 @@ describe("real Store runtime coordination", () => {
       host.emit({ type: "session_settled" });
     };
     const results = (outputs: OutputRecord[]) => outputs.filter(output => output.id.startsWith(`${original.id}:job-result:`));
-    if (scenario === "restart ACK rejected") {
+    if (scenario === "stopped second request") {
+      const second = headMessage("stopped-second", route("52"));
+      await admit(runtime, second);
+      const aborting = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      main.beforeAbort = () => { aborting.resolve(); return release.promise; };
+      await runtime.receive(message("stop-second", second.route, "/stop head"));
+      await aborting.promise;
+      expect(store.input(second.id)?.state).toBe("cancelled");
+      emitReceipt(main);
+      // The cleared foreground input does not make its assistant reply safe for the job owner.
+      expect(results(store.outputs())).toMatchObject([{ route: original.route, text: receipt.content, state: "pending" }]);
+      release.resolve();
+      await runtime.kick();
+      expect(results(messenger.attempted)).toMatchObject([{ sourceId: original.id, route: original.route, text: receipt.content }]);
+    } else if (scenario === "restart ACK rejected") {
       const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
       const restart = message("job-restart", route("other"), "/restart");
       messenger.beforeSend = async output => {
@@ -12552,6 +12568,11 @@ describe("real Store runtime coordination", () => {
       await runtime.kick();
       expect(results(messenger.attempted)).toMatchObject([{ sourceId: original.id, route: original.route, text: "Reply in this live turn" }]);
     } else {
+      const second = headMessage("interrupted-other-source", route("52"));
+      if (scenario === "interrupted second request") {
+        await admit(runtime, second);
+        expect(store.input(second.id)?.state).toBe("submitted");
+      }
       const replacement = new HostTransport(main.state.sessionFile!, main.state.sessionId);
       replacement.state = { ...structuredClone(main.state), isStreaming: true };
       if (scenario === "foreign PID") replacement.state.hostPid = process.pid + 1;
@@ -12568,6 +12589,7 @@ describe("real Store runtime coordination", () => {
       await main.close();
       await reattached.promise;
       if (scenario === "journaled while detached") await messenger.whenSent(2);
+      if (scenario === "interrupted second request") expect(store.input(second.id)?.state).toBe("uncertain");
       // No agent_start after mid-turn reconnect. A duplicate live receipt after
       // journal recovery must likewise produce no second messenger attempt.
       emitReceipt(replacement);
@@ -12576,7 +12598,7 @@ describe("real Store runtime coordination", () => {
       expect(results(messenger.attempted)).toMatchObject(scenario.startsWith("foreign") ? []
         : [{ sourceId: original.id, route: original.route, text: receipt.content }]);
     }
-    expect(main.prompts).toHaveLength(1);
+    expect(main.prompts).toHaveLength(scenario.endsWith("second request") ? 2 : 1);
     expect(launched).toEqual([]);
   });
 

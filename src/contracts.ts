@@ -451,7 +451,7 @@ export interface StorePort {
   commitHeadRecovery(expected: HeadRecoveryAttempt, decided: HeadRecoveryAttempt): boolean;
   queueOutput(output: Omit<OutputRecord, "state" | "remoteId" | "error" | "editOf">): boolean;
   /** Atomically replace this native Host's outstanding job bindings and enqueue observed results. */
-  saveHeadJobs(bindingKey: string, owners: readonly (readonly [string, string, string | null])[],
+  saveHeadJobs(bindingKey: string, owners: readonly (readonly [string, string, string])[],
     outputs?: readonly Pick<OutputRecord, "id" | "sourceId" | "route" | "text">[]): void;
   recordRestartCheckpointFailure(expectedFence: string, stopBoundary: string | null, failedFence: string,
     output: Pick<OutputRecord, "id" | "sourceId" | "route" | "text">): boolean;

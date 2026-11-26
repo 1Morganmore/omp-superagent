@@ -1599,7 +1599,7 @@ export class Store implements StorePort {
     }).immediate();
   }
 
-  saveHeadJobs(bindingKey: string, owners: readonly (readonly [string, string, string | null])[],
+  saveHeadJobs(bindingKey: string, owners: readonly (readonly [string, string, string])[],
     outputs: readonly Pick<OutputRecord, "id" | "sourceId" | "route" | "text">[] = []): void {
     this.db.transaction(() => {
       for (const output of outputs) this.queueOutput(output);

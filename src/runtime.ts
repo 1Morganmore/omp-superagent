@@ -288,10 +288,10 @@ interface Live {
   finishAgain?: boolean;
   settlementReadPending?: boolean;
   headJobBindingKey?: string;
-  headJobOwners?: Map<string, { input: InputRecord; cursor: string | null }>;
-  headJobStarts?: Set<string>;
+  headJobOwners?: Map<string, { input: InputRecord; callId: string }>;
+  headJobStarts?: Map<string, string>;
   headJobYield?: { answer: string | null };
-  headJobLoop?: boolean;
+  headJobLoop?: "foreground" | "background";
   headJobPromptSeen?: boolean;
   headJobBatch?: Map<string, string>;
   headJobMixed?: boolean;
@@ -2402,7 +2402,7 @@ export class Superagent {
         admitted: new Map(), running: false, preparing: 0, unsubscribe,
         goalId: state.goal?.goal?.id,
       };
-      if (id === "main" && Number.isSafeInteger(state.hostPid) && state.hostPid! > 0
+      if (id === "main" && typeof state.hostPid === "number" && Number.isSafeInteger(state.hostPid) && state.hostPid > 0
         && typeof state.instanceKey === "string" && state.instanceKey) {
         // A resumed journal or a recycled PID is not the same execution. Native
         // job IDs are meaningful only inside the verified SDK instance.
@@ -2410,10 +2410,10 @@ export class Superagent {
         const saved = this.store.getMeta(live.headJobBindingKey);
         if (saved) {
           live.headJobOwners = new Map();
-          for (const [job, sourceId, cursor] of JSON.parse(saved) as [string, string, string | null][]) {
+          for (const [job, sourceId, callId] of JSON.parse(saved) as [string, string, string][]) {
             const input = this.store.input(sourceId);
             if (input?.target === "main" && input.state === "done" && input.generation === generation
-              && this.store.getMeta(`user-source:${sourceId}`) === "true") live.headJobOwners.set(job, { input, cursor });
+              && this.store.getMeta(`user-source:${sourceId}`) === "true") live.headJobOwners.set(job, { input, callId });
           }
         }
       }
@@ -8597,8 +8597,9 @@ export class Superagent {
     if (message.role === "toolResult" && live.headJobPromptSeen && live.running && message.isError !== true) {
       const job = record(record(message.details).async);
       if (job.state === "running" && typeof job.jobId === "string" && job.type === message.toolName
+        && typeof message.toolCallId === "string" && message.toolCallId
         && (job.type === "bash" || job.type === "eval" || job.type === "task"))
-        (live.headJobStarts ??= new Set()).add(job.jobId);
+        (live.headJobStarts ??= new Map()).set(job.jobId, message.toolCallId);
     }
     if (message.role !== "custom" || message.customType !== "async-result" || !live.headJobOwners?.size) return;
     const items = this.headJobResults(message);
@@ -8629,21 +8630,36 @@ export class Superagent {
 
   private async recoverHeadJobs(live: Live): Promise<void> {
     if (!live.headJobOwners?.size) return;
-    // The cursor was captured *after* these launches, in this exact SDK
-    // instance. Earlier journal entries (including reused names) have no authority.
-    for (const cursor of new Set([...live.headJobOwners.values()].map(owner => owner.cursor))) {
+    // Anchor at the original pre-dispatch cursor, then match the observed
+    // launch call before its receipt. A cursor read at release could race an
+    // already-journaled completion whose socket frame has not arrived yet.
+    for (const sourceId of new Set([...live.headJobOwners.values()].map(owner => owner.input.id))) {
+      const source = this.store.input(sourceId);
+      const owner = record(JSON.parse(this.store.getMeta(`head-native-owner:${sourceId}`) ?? "null"));
+      if (!source?.requestId || owner.requestId !== source.requestId || owner.generation !== live.generation
+        || owner.sessionId !== live.sessionId || owner.sessionFile !== this.headSessionFile()
+        || owner.cursor !== null && typeof owner.cursor !== "string") continue;
       let entries: unknown;
-      try { entries = await this.readLaneObservationEntries(live, cursor, "recover HEAD job results"); }
+      try { entries = await this.readLaneObservationEntries(live, owner.cursor, "recover HEAD job results"); }
       catch (error) {
         // Compaction may remove a cursor. Never substitute the whole transcript.
         if (!(error instanceof UnknownObservationCursor)) throw error;
         continue;
       }
       if (!this.current(live) || this.stopped || !Array.isArray(entries)) throw new Error("Native HEAD job journal is unavailable");
+      const launched = new Set<string>();
       for (const entry of entries.map(record)) {
         const message = entry.type === "custom_message" ? entry : entry.type === "message" ? record(entry.message) : {};
+        if (entry.type === "message" && message.role === "toolResult" && message.isError !== true) {
+          const job = record(record(message.details).async);
+          if (job.state === "running" && job.type === message.toolName && typeof job.jobId === "string") {
+            const bound = live.headJobOwners.get(job.jobId);
+            if (bound?.input.id === sourceId && bound.callId === message.toolCallId) launched.add(job.jobId);
+            else launched.delete(job.jobId);
+          }
+        }
         if (message.customType !== "async-result" || entry.type === "message" && message.role !== "custom") continue;
-        const batch = new Map([...this.headJobResults(message)].filter(([id]) => live.headJobOwners?.get(id)?.cursor === cursor));
+        const batch = new Map([...this.headJobResults(message)].filter(([id]) => launched.has(id) && live.headJobOwners?.has(id)));
         if (!batch.size) continue;
         live.headJobBatch = batch;
         this.deliverHeadJobBatch(live, null); // Only the scoped native result, not a detached turn's assistant text.
@@ -8675,7 +8691,7 @@ export class Superagent {
       for (const job of jobs) remaining.delete(job);
     }
     if (remaining.size !== live.headJobOwners.size) {
-      this.store.saveHeadJobs(live.headJobBindingKey, [...remaining].map(([job, owner]) => [job, owner.input.id, owner.cursor]), outputs);
+      this.store.saveHeadJobs(live.headJobBindingKey, [...remaining].map(([job, owner]) => [job, owner.input.id, owner.callId]), outputs);
       live.headJobOwners = remaining;
     }
     live.headJobBatch = undefined;
@@ -8699,6 +8715,15 @@ export class Superagent {
       live.modelIdleVersion++;
     }
     if (live.id === "main" && (this.headRecoveryActive() || this.store.hasHeadRecoveryInput())) {
+      // This fence quarantines the interrupted foreground input, not the
+      // native receipts of already released jobs with independently bound owners.
+      const message = record(frame.message);
+      if (live.headJobOwners?.size && frame.type === "message_end" && message.role === "custom" && message.customType === "async-result")
+        this.observeHeadJobMessage(live, message);
+      if (live.headJobBatch && (frame.type === "message_end" || frame.type === "agent_end")) {
+        this.deliverHeadJobBatch(live, null);
+        this.wakeOutputs();
+      }
       // Native journal evidence owns reconciliation. Delayed original frames
       // and recovery messages never become progress/answers for live.input.
       if (frame.type === "prompt_result" || frame.type === "agent_end" || frame.type === "session_settled")
@@ -8726,7 +8751,7 @@ export class Superagent {
       if (live.id === "main") {
         live.headJobYield = undefined;
         live.headJobPromptSeen = false;
-        live.headJobLoop = true;
+        live.headJobLoop = live.input ? "foreground" : "background";
       }
       live.resultAttachmentStarts = undefined;
       live.scopeReviewStart = undefined;
@@ -8741,14 +8766,14 @@ export class Superagent {
     }
     if (frame.type === "agent_end") {
       if (live.id === "main") {
-        const observedStart = live.headJobLoop;
-        live.headJobLoop = false;
+        const standalone = live.headJobLoop === "background";
+        live.headJobLoop = undefined;
         const hadJobBatch = !!live.headJobBatch;
         const message = Array.isArray(frame.messages) ? frame.messages.findLast(value => record(value).role === "assistant") : undefined;
         const answer = record(message).stopReason === "stop" ? assistantText(message) : null;
         live.headJobYield = frame.isTerminal === false && frame.yielded === true && frame.awaitingAsyncWork === true ? { answer } : undefined;
         if (hadJobBatch) {
-          try { this.deliverHeadJobBatch(live, observedStart && !this.store.hasInput("main", "uncertain") ? answer : null); }
+          try { this.deliverHeadJobBatch(live, standalone && !this.headStopping && !this.store.hasInput("main", "uncertain") ? answer : null); }
           catch (error) { this.report(error); }
           this.background(this.flushOutputs());
           this.background(this.finish(live));
@@ -8936,12 +8961,9 @@ export class Superagent {
           || live.scopeReviewRequested || this.scopeReviewActive()
           || jobs.some(id => !live.headJobStarts?.has(id) && !live.headJobOwners?.has(id))) return;
         if (jobs.some(id => !live.headJobOwners?.has(id))) {
-          const cursor = await this.readJournalCursor(live, "checkpoint HEAD job ownership");
-          if (!this.current(live) || live.nativeVersion !== nativeVersion || live.input !== input || live.preparing
-            || this.stopped || this.headStopping || this.restartFence() || this.store.input(input.id)?.state !== "submitted") return;
           const owners = new Map(live.headJobOwners);
-          for (const id of jobs) if (!owners.has(id)) owners.set(id, { input, cursor });
-          this.store.saveHeadJobs(live.headJobBindingKey, [...owners].map(([job, owner]) => [job, owner.input.id, owner.cursor]));
+          for (const id of jobs) if (!owners.has(id)) owners.set(id, { input, callId: live.headJobStarts!.get(id)! });
+          this.store.saveHeadJobs(live.headJobBindingKey, [...owners].map(([job, owner]) => [job, owner.input.id, owner.callId]));
           live.headJobOwners = owners;
         }
       } else if (jobs.some(id => !live.headJobOwners?.has(id))) return;
