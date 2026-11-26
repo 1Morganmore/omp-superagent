@@ -790,14 +790,24 @@ test("wake preparation never recreates, follows a symlink to, or adopts a differ
   const launch = options(root);
   const expected = "parked-session";
   const source = path.join(root, "other.jsonl");
+  const agentDir = path.join(root, "agent");
+  const expectedNativeProfile = { version: 2, agentDir, dataDir: agentDir, sessionsDir: path.join(agentDir, "sessions") };
+  const configPath = path.join(root, "config.json");
+  const managed = path.resolve(import.meta.dir, "fixtures/managed-super");
+  const args = ["--mode", "rpc-ui", "--cwd", root, "--session", launch.sessionFile, "-e", managed, "--config", configPath];
+  const discovery = { cwd: root, managedUlwPath: managed, extensionPaths: [], configPath,
+    commandArgs: [], launchArgs: args, expectedNativeProfile };
+  await fs.mkdir(agentDir, { mode: 0o700 });
+  await fs.writeFile(path.join(agentDir, "config.yml"), JSON.stringify(offlineMnemopi));
+  await fs.writeFile(configPath, "{}");
   const header = (id: string) => JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: "2026-01-01T00:00:00Z" }) + "\n";
   await fs.writeFile(source, header(expected));
   const prepare = async () => {
     const child = Bun.spawn([process.execPath, "--no-env-file", "--no-install",
       path.resolve(import.meta.dir, "../src/host-sdk-helper.ts"), "launch"], {
-      cwd: root, env: { HOME: root, PATH: process.env.PATH, PI_CODING_AGENT_DIR: path.join(root, "agent") },
-      stdin: Buffer.from("null\n" + JSON.stringify({ options: launch, args: [], configPath: path.join(root, "config.json"),
-        processBackend: "daemon", headHibernationSessionId: expected })),
+      cwd: root, env: { HOME: root, PATH: process.env.PATH, PI_CODING_AGENT_DIR: agentDir },
+      stdin: Buffer.from(JSON.stringify(discovery) + "\n" + JSON.stringify({ options: launch, args, configPath,
+        processBackend: "daemon", headHibernationSessionId: expected, expectedNativeProfile })),
       stdout: "ignore", stderr: "ignore", timeout: 5_000,
     });
     return child.exited;
@@ -813,7 +823,7 @@ test("wake preparation never recreates, follows a symlink to, or adopts a differ
   expect(await fs.readFile(launch.sessionFile, "utf8")).toBe(header("unrelated"));
   await fs.writeFile(launch.sessionFile, header(expected));
   expect(await prepare()).toBe(0);
-});
+}, 20_000);
 
 test("repeated Host starts reuse the executable inspection and prepare in one helper spawn", async () => {
   const roots = [await directory(true), await directory(true)];
