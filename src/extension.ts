@@ -64,7 +64,7 @@ async function loadWorkerMemoryDestination() {
 const managerTools: Record<string, true> = {
   head_recovery: true, head_set_model: true, cron_create: true, soul_update: true,
   lane_models: true, lane_init_presets: true, lane_set_model: true, lane_review_decision: true,
-  lane_start: true, lane_inspect: true, lane_message: true, lane_scope_accept: true,
+  lane_start: true, lane_inspect: true, lane_message: true,
   lane_pause: true, lane_resume: true, lane_close: true,
   lane_watch: true,
   thread_inspect: true, lane_thread_update: true,
@@ -121,11 +121,6 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     if (!runtime) throw new Error(startupError ? `Superagent startup failed: ${String(startupError)}` : "Superagent is starting; retry once startup completes");
     return runtime;
   };
-  const requireScopeRuntime = (ctx: ExtensionContext) => {
-    if (ctx.agent.kind === "main" && !pi.getActiveTools().includes("lane_message"))
-      throw new Error("Assignment scope correction is disabled by the active tool selection (lane_message is disabled)");
-    return requireRuntime(ctx);
-  };
   registerResultAttach(pi, intent => {
     if (!runtime) throw new Error("The head controller is unavailable for result delivery");
     return runtime.requestResultAttachment(intent);
@@ -174,8 +169,6 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   pi.on("tool_call", (event, ctx) => {
     if (runtime?.laneDecisionReviewActive() && (ctx.agent.kind !== "main" || event.toolName !== "lane_review_decision"))
       return { block: true, reason: "A lane question permits only answering or escalating its original decision" };
-    if (runtime?.scopeReviewActive() && (ctx.agent.kind !== "main" || event.toolName !== "lane_scope_accept"))
-      return { block: true, reason: "This assignment review permits only a direct same-lane correction from its verified owner message" };
     if (event.toolName === "soul_update") {
       try { requireRuntime(ctx).authorizeSoulUpdate(event.input, ctx.sessionManager.getSessionId()); }
       catch (error) {
@@ -210,13 +203,6 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     if (runtime?.headRecoveryActive() && (ctx.agent.kind !== "main" || event.toolName !== "head_recovery")) {
       runtime.blockHeadRecoveryTool();
       return { block: true, reason: "The isolated HEAD recovery turn permits only head_recovery; original work is not replayed" };
-    }
-    if (event.toolName === "lane_scope_accept") {
-      try { requireScopeRuntime(ctx).assertScopeReview(event.input.reviewId, ctx.sessionManager.getSessionId()); }
-      catch (error) {
-        if (!(error instanceof Error)) throw error;
-        return { block: true, reason: error.message };
-      }
     }
   });
   pi.on("turn_end", (_event, ctx) => {
@@ -526,15 +512,6 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       return result(await requireRuntime(ctx).watchLane(params));
-    },
-  });
-  pi.registerTool({
-    name: "lane_scope_accept", label: "Accept the current lane scope correction", loadMode: "essential", approval: "exec",
-    legacyName: "lane_message",
-    description: "Only during the isolated assignment scope review and only if the authenticated original owner message explicitly supersedes the conflicting assignment. Supply just the current review ID. The controller binds the original text and lane; no text, destination or workflow can be selected. Records intent, not dispatch. The correction may be admitted only after successful settlement of this review.",
-    parameters: Type.Object({ reviewId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      return result(requireScopeRuntime(ctx).acceptScopeReview(params.reviewId, ctx.sessionManager.getSessionId()));
     },
   });
   pi.registerTool({

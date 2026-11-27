@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import type { ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import { type LaneEvidence, type LaneReportEvent, type ScopeReviewReceipt, parseLaneReportResult } from "./lane/lane-report";
+import { type LaneEvidence, type LaneReportEvent, parseLaneReportResult } from "./lane/lane-report";
 import { registerResultAttach, RESULT_ATTACH_TOOL } from "./messaging/result-attachment";
 import { registerDecisionAsk } from "./lane/decision-tool";
 
@@ -29,7 +29,6 @@ const parameters = Type.Union([
     { additionalProperties: false }),
   Type.Object({ status: Type.Literal("resolved"), summary, waiting, evidence: requiredEvidence },
     { additionalProperties: false }),
-  Type.Object({ status: Type.Literal("scope_review"), sourceId: nonempty }, { additionalProperties: false }),
 ]);
 // Resumed native journals can still contain retired board tools. They were never work evidence.
 const coordinationTool = (name: string) =>
@@ -43,10 +42,6 @@ const keys = (value: Record<string, unknown>, names: string[]) =>
 // Direct native/custom-tool dispatch can bypass model argument validation.
 function validInput(input: unknown): input is Static<typeof parameters> {
   if (!record(input)) return false;
-  if (input.status === "scope_review") {
-    return Object.hasOwn(input, "status") && Object.hasOwn(input, "sourceId") &&
-      keys(input, ["status", "sourceId"]) && text(input.sourceId);
-  }
   if (!keys(input, ["status", "summary", "waiting", "evidence"]) ||
       !text(input.summary) || input.summary.length > 4000 ||
       !["progress", "waiting", "resolved"].includes(input.status as string)) return false;
@@ -119,8 +114,7 @@ function toolEvidence(id: string, records: ReturnType<typeof toolRecords>): Lane
   if (!call || !result || result.toolName !== call.name || result.isError !== false ||
       coordinationTool(call.name) || (typeof call.arguments.path === "string" &&
         /^xd:\/\/(?:lane_report|board_[a-z_]+)(?:[/?#]|$)/.test(call.arguments.path)) ||
-      parseLaneReportResult(result) || (record(result.details) && result.details.type === "superagent-scope-review") ||
-      transportedCoordination(call, result)) {
+      parseLaneReportResult(result) || transportedCoordination(call, result)) {
     throw new Error("Lane tool evidence requires a completed successful native tool call, not a coordination receipt");
   }
   // Native identity/time envelopes are not evidence of changed work.
@@ -148,12 +142,10 @@ export default function laneExtension(pi: ExtensionAPI): void {
   registerResultAttach(pi);
   let approvalSessionId: string | undefined;
   const pendingApprovals = new Set<string>();
-  const scopeApprovals = new Map<string, "requested" | "approved" | "unverified">();
   const approvals = (ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager.getSessionId();
     if (approvalSessionId !== sessionId) {
       pendingApprovals.clear();
-      scopeApprovals.clear();
       approvalSessionId = sessionId;
     }
     return pendingApprovals;
@@ -178,22 +170,13 @@ export default function laneExtension(pi: ExtensionAPI): void {
   pi.on("tool_approval_requested", (event, ctx) => {
     if (ctx.agent.kind === "main" && event.sessionId === ctx.sessionManager.getSessionId()) {
       approvals(ctx).add(event.toolCallId);
-      if (event.toolName === "lane_report")
-        scopeApprovals.set(event.toolCallId, scopeApprovals.has(event.toolCallId) ? "unverified" : "requested");
     }
   });
   pi.on("tool_approval_resolved", (event, ctx) => {
     if (event.sessionId !== ctx.sessionManager.getSessionId()) return;
     approvals(ctx).delete(event.toolCallId);
-    if (ctx.agent.kind === "main" && event.toolName === "lane_report")
-      scopeApprovals.set(event.toolCallId,
-        event.approved && scopeApprovals.get(event.toolCallId) === "requested" ? "approved" : "unverified");
   });
-  pi.on("agent_end", (_event, ctx) => { if (ctx.agent.kind === "main") scopeApprovals.clear(); });
-  pi.on("session_shutdown", () => {
-    pendingApprovals.clear();
-    scopeApprovals.clear();
-  });
+  pi.on("session_shutdown", () => { pendingApprovals.clear(); });
   pi.on("before_agent_start", async (event, ctx) => {
     if (ctx.agent.kind !== "main") return;
     return { systemPrompt: [
@@ -209,31 +192,11 @@ export default function laneExtension(pi: ExtensionAPI): void {
       "Decision receipts and other coordination activity are not evidence of work. " +
       "Waiting/resolved name the exact tool/approval/job ID or a dependency label. Native tool/approval/job waiting IDs must be observable now. " +
       "Topic observations do not notify HEAD. For manager handoffs, changed evidence or wait transitions are queued for HEAD. " +
-      "For a standalone original owner message in the active bound topic that appears to supersede the existing assignment, " +
-      "call lane_report directly with status scope_review and its Original source ID, never via eval, bash, or write. " +
-      "This only requests HEAD review; it does not grant permission. " +
       "Reports do not themselves send messenger messages, prove acceptance, dispatch, resume, or change execution authority.",
     parameters,
-    async execute(id, params, signal, _onUpdate, ctx) {
+    async execute(id, params, _signal, _onUpdate, ctx) {
       if (ctx.agent.kind !== "main") throw new Error("Lane reporting is restricted to the root lane session");
       if (!validInput(params)) throw new Error("Invalid lane report parameters");
-      approvals(ctx);
-      const nativeApproval = scopeApprovals.get(id);
-      scopeApprovals.delete(id);
-      if (params.status === "scope_review") {
-        signal?.throwIfAborted();
-        const sessionFile = ctx.sessionManager.getSessionFile();
-        if (!sessionFile) throw new Error("Lane scope review requires a native session file");
-        const receipt: ScopeReviewReceipt = {
-          type: "superagent-scope-review", sourceId: params.sourceId,
-          sessionId: ctx.sessionManager.getSessionId(), sessionFile, toolCallId: id,
-        };
-        // Only a matched direct native start/end can request review. Do not append a custom entry.
-        return {
-          content: [{ type: "text", text: "Emitted a scope-review signal. HEAD admission depends on controller verification and successful settlement; the assignment has not changed." }],
-          details: nativeApproval === undefined ? receipt : { ...receipt, nativeApproval },
-        };
-      }
       const target = params.status === "waiting" ? params.waiting : undefined;
       if (target?.kind === "approval" && !approvals(ctx).has(target.id)) {
         throw new Error("Lane approval wait requires an observed pending native tool approval");

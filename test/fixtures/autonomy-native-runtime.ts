@@ -37,6 +37,10 @@ class RecordingMessenger implements Messenger {
   private nextThreadId = 8001;
   constructor(private readonly stateDir: string) {}
   async start(): Promise<void> {}
+  assertRoute(route: Route): void {
+    if (route.platform !== "discord" || route.accountId !== "2" || route.authorityId !== "1")
+      throw new Error("Unexpected native autonomy fixture route");
+  }
   async send(output: OutputRecord): Promise<string> {
     this.sent.push(structuredClone(output));
     return `autonomy-receipt:${output.id}`;

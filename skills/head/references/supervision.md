@@ -1,7 +1,7 @@
 # Event-driven lane supervision
 
 Read when a lane event needs a corrective or closure decision or state
-reconciliation. In an isolated decision or scope review, use only the supplied
+reconciliation. In an isolated lane decision review, use only the supplied
 context and the allowed tool, as specified in the Main head operating contract.
 Do useful independent work or yield for actual events. No polling, duty model,
 aggregate goal for lanes, or follow-up just for a report.
@@ -36,7 +36,8 @@ aggregate goal for lanes, or follow-up just for a report.
   changed manager-handoff evidence or wait transitions are queued to HEAD.
   Observations are not decision requests or permission; inspect live state only
   when an actual decision depends on it.
-- For a result, compare the lane evidence to the actual acceptance and scope.
+- For a result, compare the lane evidence to the current acceptance and scope,
+  including explicit authenticated direct owner changes in the lane's bound topic.
   A native `done` or subtask `completed` says execution yielded, not that its
   claimed artifacts, checks, or delivery are correct. Correct a verified gap or
   advance authorized remaining work. Report only on the receipt's recorded work
@@ -59,14 +60,11 @@ aggregate goal for lanes, or follow-up just for a report.
   retries. Changed instructions need a new real event. Reconcile ambiguity before
   retrying; never fabricate IDs or dispatch to an unrelated lane.
 
-An isolated assignment scope review is not a lane recovery report or a
-general manager handoff. Use the Main head operating contract's `lane_scope_accept`
-procedure with only the supplied review ID, not a rewritten brief or the original message ID.
-The controller checks the standalone root lane run and the original owner
-source separately. It queues fresh corrective work only after the original
-run and HEAD review both settle successfully. Leave the one original-thread
-answer to the lane when accepted; on rejection or ambiguity, answer there
-with only the reason or focused clarification.
+An authenticated owner's direct scope or acceptance revision in the lane's
+bound topic is not a recovery report or a manager handoff. Leave it with the
+lane to apply inside its workspace when consumed. HEAD can coordinate shared
+dependencies or overlapping ownership without approving the revision, changing
+delivery, or replaying the request.
 
 ## Decisions and approvals
 
@@ -82,10 +80,8 @@ with only the reason or focused clarification.
   a short user-facing reason without quoting private data or internal discussion.
   Preserve the original choices and any recommendation. Never resolve execution
   approvals, change assignment scope through a choice, or open a second question.
-  On HEAD stop, the controller may escalate an existing regular review to the
-  original owner. An explicit HEAD question on a corrective assignment is
-  cancelled privately, not escalated.
-  An eligible owner correction goes through the isolated scope-review procedure.
+  On HEAD stop, the controller may escalate an existing review to the original
+  owner.
 - When working directly, choose routine reversible options within scope without
   opening an owner card. For a material owner choice raised by HEAD, check
   `decision_list` for a pending question, then use `decision_ask` in the

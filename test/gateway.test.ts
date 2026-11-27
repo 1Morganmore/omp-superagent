@@ -151,7 +151,7 @@ test("receipt reactions follow durable admission without delaying ACK or requiri
   expect(f.messenger.activities).toEqual([{ message: { route, messageId: "offline-reaction" }, activity: "received" }]);
 });
 
-test("route verification requires reconciled HEAD and the current account, and only history bypasses the intake drain", async () => {
+test("route verification requires reconciled HEAD and the current account even for history and bound work during intake", async () => {
   const f = await fixture();
   f.messenger.assertRoute = destination => {
     if (destination.accountId !== route.accountId) throw new DeliveryError("Unrecognized bot account", "rejected");
@@ -163,6 +163,7 @@ test("route verification requires reconciled HEAD and the current account, and o
   await client.start({ ready: reconcile.promise, message: async () => { intake.resolve(); await receipt.promise; }, answer: async () => {} });
   await expect(client.assertRoute(route)).rejects.toThrow("not ready");
   await expect(client.assertRoute(route, "history")).rejects.toThrow("not ready");
+  await expect(client.assertRoute(route, "bound-work")).rejects.toThrow("not ready");
   reconcile.resolve();
   await f.server.initialReady.promise;
   await f.messenger.emit({ ...input("queued-control"), text: "/cron pause id" });
@@ -170,6 +171,8 @@ test("route verification requires reconciled HEAD and the current account, and o
     await intake.promise;
     await expect(client.assertRoute(route)).rejects.toThrow("intake is still pending");
     await client.assertRoute(route, "history");
+    await client.assertRoute(route, "bound-work");
+    await expect(client.assertRoute({ ...route, accountId: "retired" }, "bound-work")).rejects.toThrow("Unrecognized bot account");
     await expect(client.assertRoute({ ...route, accountId: "retired" }, "history")).rejects.toThrow("Unrecognized bot account");
     expect(f.store.pending()).toBe(1);
   } finally { receipt.resolve(); }

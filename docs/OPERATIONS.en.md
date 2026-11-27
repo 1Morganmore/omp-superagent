@@ -192,17 +192,22 @@ use the owner's language.
   one durable review of the original native dialog, not an immediate answer. HEAD answers
   with an original option or escalates the same card to the owner on its original route.
   Omit `to` for normal routing: bound-topic questions go to the owner, manager-handoff
-  questions to HEAD. An explicit HEAD question on a corrective assignment is
-  cancelled privately, not redirected to the owner.
-- **A conflicting owner correction:** For an eligible standalone original message in
-  a bound topic, the root lane calls `lane_report({status:"scope_review", sourceId})`
-  directly with the original source ID. Only HEAD may accept the verified review
-  ID with `lane_scope_accept`; the controller binds the original text and lane. Hold the
-  disputed work until a corrective assignment arrives. A decision card is not a
-  substitute for scope review or native approval.
+  questions to HEAD.
+- **Changing the lane's work:** Give the new instruction directly in that lane's
+  bound topic. An explicit instruction from the authenticated owner overrides
+  conflicting scope or acceptance in the earlier HEAD brief within the selected
+  workspace. It takes effect when OMP consumes the input in a new turn or as a
+  steer; there is no separate HEAD approval or handoff. For example,
+  “Include the API docs in this repo and verify the examples too” revises the
+  task. Quoting or forwarding that text is not an instruction. The change does
+  not move the checkout, reassign siblings, resume paused work, approve native
+  actions, or permit repeating denied or uncertain effects.
+  If a reconnect recovers an older instruction after a newer message in that
+  topic, send a fresh instruction if the work is still wanted. A queued request
+  for a bot account that is no longer connected is not run under its replacement.
 
 See [direct lane coordination](design/execution.md#direct-lane-coordination) and the
-[scope-review contract](design/execution.md#bound-topic-assignment-scope-review).
+[rules for direct owner changes](design/execution.md#direct-owner-changes-to-bound-topic-work).
 
 ### Choosing a Model for a New Lane
 
@@ -1353,11 +1358,12 @@ channel, go to HEAD; a bound work thread goes to its lane. `/head <request>` exp
 HEAD even in a thread. If work is running in the same conversation, the input is applied at the
 next OMP steering boundary without `/steer`. If idle, it starts a new run. The first reply just
 after opening a thread can also join the original run if that thread is confirmed as the run's
-reply route. Admission of a message or acceptance of an RPC call does not prove the model read
-the input. Other conversations, internal reports, workflow selections, and control commands are
-not mixed into the current run. Steering does not bypass pauses, approvals, compaction, or holds
-for uncertainty. The original Discord addressing policy still applies, and final replies or reports
-for the same run are not sent twice.
+reply route. A direct owner steer can revise the lane's task without changing the run's
+reporting mode. Admission of a message or acceptance of an RPC call does not prove the model
+read the input. Other conversations, internal reports, workflow selections, and control commands
+are not mixed into the current run. Steering does not bypass pauses, approvals, compaction, or
+holds for uncertainty. The original Discord addressing policy still applies, and final replies or
+reports for the same run are not sent twice.
 
 **You can request a new topic without a command, too.** When a new lane is needed, an independent
 OMP session in the verified working directory is bound to a supported thread or topic. In a
@@ -2030,13 +2036,11 @@ submissions in order for each card and deduplicates only actual redeliveries.
 
 HEAD first reviews manager-handoff questions and root-lane questions explicitly
 addressed with `decision_ask({to:"head", questions:[…]})`. Other bound-topic questions
-go to the owner directly. On a corrective assignment, the controller refuses and
-cancels an explicit HEAD question without showing it to the owner. For a routine
-choice within the delegated scope, HEAD uses `lane_review_decision` to return one
-of the original choices to the lane.
+go to the owner directly. For a routine choice within the current scope, HEAD
+uses `lane_review_decision` to return one of the original choices to the lane.
 It records the reason internally without sending a separate messenger notification.
 When owner judgment is required, HEAD escalates the same pending dialog with the reason
-on the original question card. If HEAD stops during an existing regular review, the
+on the original question card. If HEAD stops during an existing review, the
 controller may escalate that same pending dialog to the original owner. Neither path
 authorizes a scope change, grants native execution approval, or answers ordinary native
 dialogs on the operator's behalf.

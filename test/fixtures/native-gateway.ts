@@ -694,25 +694,27 @@ try {
 
     const original: Inbound = { id: "discord:2:241:original", messageId: "241", route: thread,
       text: "Implement the parser change now instead of only inspecting it.", receivedAt: Date.now(), attachments: [] };
-    const review = `scope-review:handoff:${original.id}:${firstLane.id}`;
-    const correction = `handoff:${review}:${firstLane.id}`;
+    assert.equal(firstLane.brief, "Read-only parser inspection.", "The previous HEAD brief did not allow edits");
+    const updatedHandoff = `handoff:${original.id}:${firstLane.id}`;
+    const answerId = `${updatedHandoff}:answer`;
     await messenger.deliver(original);
-    const answerId = `${correction}:answer`;
     const receipt = () => db.query("SELECT state, remote_id FROM outputs WHERE id = ? AND source_id = ?")
       .get(answerId, original.id) as { state: string; remote_id: string } | null;
-    await until(() => receipt()?.state === "sent", "production HEAD grants the correction and Gateway confirms the original-thread reply");
+    await until(() => receipt()?.state === "sent", "Gateway confirms the bound lane's original-thread reply to the owner's updated assignment");
     assert.equal(receipt()?.remote_id, `gateway-native-receipt:${answerId}`);
     assert.deepEqual(messenger.sent.filter(output => output.sourceId === original.id).map(output => [output.id, output.text, output.route, output.replyTo?.messageId]), [
-      [answerId, "Reviewed correction received on the original lane.", thread, original.messageId],
+      [answerId, "The original lane implemented the requested parser change.", thread, original.messageId],
     ]);
-    const journal = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
-    const grants = nativeJournalDispatches(journal).filter(call => call.name === "lane_scope_accept" && call.args?.reviewId === review);
-    assert.deepEqual(grants.map(call => [call.presentation, call.ok, call.args]),
-      [["direct", true, { reviewId: review }]]);
-    assert.equal(input(review)?.state, "done");
-    assert.equal(input(correction)?.target, firstLane.id);
-    const corrected = db.query("SELECT data FROM inputs WHERE id = ?").get(correction) as { data: string };
-    assert.equal(JSON.parse(corrected.data).text, original.text, "The controller supplies the authenticated owner text");
+    const headAfterUpdate = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
+    assert.deepEqual(requestIds(headAfterUpdate), requestIds(afterUsage), "An owner update in a bound topic must not open a HEAD model turn");
+    assert.equal(input(updatedHandoff)?.target, firstLane.id);
+    assert.equal(input(updatedHandoff)?.generation, firstLane.generation);
+    const laneAfterUpdate = parseSessionEntries(await fs.readFile(firstLane.sessionFile, "utf8"));
+    assert.equal(requestIds(laneAfterUpdate).filter(id => id === updatedHandoff).length, 1);
+    const writes = nativeJournalDispatches(laneAfterUpdate).filter(call => call.name === "write" &&
+      call.result.toolCallId.startsWith(`gateway-native:${updatedHandoff}:`));
+    assert.deepEqual(writes.map(call => [call.ok, call.args?.path]), [[true, "parser-change.txt"]]);
+    assert.equal(await fs.readFile(path.join(laneCwd, "parser-change.txt"), "utf8"), "Owner-authorized parser change\n");
 
     const topicChoice: Inbound = { id: "discord:2:242:original", messageId: "242", route: thread,
       text: "Use HEAD to choose the reversible local index format, then report here.", receivedAt: Date.now(), attachments: [] };

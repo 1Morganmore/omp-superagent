@@ -67,6 +67,12 @@ accept steering and report once on its existing route. A parent-origin
 when both report in the same thread. Do not force steering or wait in a
 polling loop when the work must queue separately.
 
+A direct, explicit owner instruction in a lane's own bound topic can revise
+that lane's scope or acceptance within the selected workspace, even when
+steered into an eligible manager run. Do not forward it as `lane_message` or
+ask the lane to obtain HEAD's approval. This does not rebind the lane, reassign
+siblings, clear gates, or change the current run's report route.
+
 Deduplication is per source and lane for `lane_message`. If another new lane or
 separate data, reporting, or platform identity is needed, explain the limit,
 advance independent admissible work, and request a separate compatible owner

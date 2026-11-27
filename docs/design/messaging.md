@@ -432,6 +432,19 @@ See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for com
   and deliver one result for a jointly handled cohort. History lookup verifies
   a joined reply's topic ownership and its own completed native receipt, not the
   manager's instructions or completion.
+  An authenticated owner's direct, explicit work instruction in the bound topic
+  can [revise the lane's scope or acceptance](execution.md#direct-owner-changes-to-bound-topic-work)
+  within the selected workspace once consumed, including on a steer. This keeps
+  the normal reporting mode and does not grant authority to quoted or forwarded
+  material, or to sibling tasks. Before submitting direct work, including a steer
+  or queued request after restart, verify the original account and route with
+  the connected Gateway. If the account cannot be verified, keep it pending.
+  An original physically older than an already admitted message in the same
+  logical topic is retained but not submitted as a fresh instruction. Normal
+  ordered inputs are not superseded merely because several are queued together.
+  For Telegram, use the written selector and the adapter's formatting evidence
+  consistently at admission, scheduling and dispatch: quoted selectors cannot
+  select a workflow or force a standalone turn. Formatted arguments remain data.
   Controls, internal reports and workflow selection do not join the run.
   Pause, approval, compaction and uncertainty gates still apply. Durable intake
   and RPC admission do not prove consumption: OMP consumes steers at native
@@ -601,8 +614,6 @@ a bound topic. On admission of the valid source, the controller immediately
 queues one durable HEAD review tied to the same pending native lane dialog.
 Queueing is not an answer or a guarantee of when HEAD will reply. An unowned
 native dialog after reconnect is held if its original topic cannot be verified.
-Corrective assignments retain owner-only routing: an explicit `to: "head"`
-question is refused and cancelled privately, not shown to the owner.
 
 The isolated HEAD review permits only `lane_review_decision` for that dialog.
 For a routine reversible choice shown to be within the assignment, HEAD
@@ -610,14 +621,20 @@ returns an original option to the lane and records the reason internally,
 without a separate messenger message. When the owner must decide or the
 supplied evidence cannot establish scope, HEAD escalates that same dialog;
 the original route gets the card with the unchanged questions and choices
-and the reason for escalation. If HEAD stops during an existing regular
+and the reason for escalation. If HEAD stops during an existing
 review, the controller may escalate that exact pending dialog to the original
-owner. This fallback does not apply to refused corrective-assignment questions.
-Recommendations are not preselected. This path does not change assignment
-scope, grant tool permission or manufacture user consent. Use the
-[source-bound scope review](execution.md#bound-topic-assignment-scope-review)
-for a conflicting original owner correction. Recommendation, silence, normal
-text, quotes and reports are not approval.
+owner. Recommendations are not preselected. This path does not change
+assignment scope, grant tool permission or manufacture user consent. A direct
+bound-topic work instruction can revise the task, but recommendation, silence,
+normal text, quotes and reports are not replies to a native approval card.
+
+On upgrade, a card that may belong to an interrupted legacy HEAD scope review
+cannot be displayed or answered as an ordinary approval. Retire an already
+presented card on its exact original route; a lost dismissal receipt is not
+permission to send another dismissal or a native response. A later, verified
+native goal resume can own a new dialog without reviving a previously held one.
+The lane reopens in the same SQLite transaction that records the resume's native
+owner and request ID. A failed ownership read or a duplicate cannot lift a pause.
 
 ## Content and delivery
 

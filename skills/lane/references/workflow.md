@@ -11,14 +11,22 @@ not sibling work or aggregate delivery. Identify the integration owner and any
 input/output dependency. Don't redo sibling work or proceed past an unverified
 producer handoff. Flag collisions and continue independent authorized work.
 
+Use the managed envelope to distinguish the owner's direct instruction in
+this bound topic from a manager handoff, a report or supplied context. An explicit
+direct owner revision to this lane's work takes precedence over a prior HEAD
+brief, including acceptance criteria, after native consumption. Apply only the
+parts the owner changed, within the selected workspace and this lane's work;
+coordinating overlapping edits does not require HEAD to grant scope.
+
 Use `read` for known project instructions and facts, `find` to locate unknown
 behavior, and relevant advertised skills. Use a direct tool's advertised schema;
 for a tool listed as a command, run `<tool> --help` in OMP's `bash` before invoking
 it there. Do not enable an excluded tool. Check real repository/worktree, branch,
 and dirty files before editing; preserve unrelated changes and ownership. Do not
-switch repository, branch or checkout to force progress. Surface material conflicts
-to HEAD. After compaction or restart, recheck the original scope, native history,
-workspace, and observed effects; don't trust a stale summary or infer replay.
+switch repository, branch or checkout to force progress. Surface real ownership
+or routing conflicts to HEAD. After compaction or restart, recheck the current
+authorized scope, native history, workspace, and observed effects; don't trust a
+stale summary or infer replay.
 
 ## Selected methods only
 
@@ -64,14 +72,14 @@ substitute or unobserved activation.
 
 - Read affected code and callers; make the smallest complete change within the
   assignment. Use existing APIs, applicable skills and constraints. Preserve
-  unrelated work. A follow-up can steer an active turn at a safe boundary, but
-  does not undo observed effects or expand authorization. Use `decision_ask` for a
-  choice needing review: present real options, brief consequences and a recommendation;
-  use a preview for longer context. Set `to: "head"` when HEAD must coordinate an
-  in-scope choice, even in a bound topic, except on a corrective assignment.
-  An explicit HEAD question on a corrective assignment is cancelled privately,
-  not redirected to the owner. Otherwise keep default routing. Hold the affected
-  action; don't submit a second card or infer approval from a choice.
+  unrelated work. A follow-up can steer an active turn at a safe boundary.
+  Neither a new turn nor a steer undoes observed effects, clears an uncertainty
+  hold, lifts pause or overrides tool permissions and approvals. Use `decision_ask`
+  for a choice needing review: present real options, brief consequences and a
+  recommendation; use a preview for longer context. Set `to: "head"` when HEAD
+  must coordinate an in-scope choice, even in a bound topic. Otherwise keep default
+  routing. Hold the affected action; don't submit a second card or infer approval
+  from a choice.
 - For independent bounded work, use the most specific advertised native `task`
   role and a self-contained English brief: target, allowed files, non-goals,
   relevant facts, observable acceptance, and what evidence to return. Keep edit
@@ -99,17 +107,9 @@ completion clears only the matching wait, and job/dependency resolution uses a
 matching report. Finish the eval reporting cell before a long wait. Direct-topic
 observations do not notify HEAD; changed manager-handoff evidence and wait
 transitions are queued to HEAD. No receipt verifies acceptance or authorizes
-continuation. On an eligible assignment, ask via the tracked decision tool
-when HEAD must choose between in-scope ways to resolve a blocker.
-
-Assignment scope review is separate from progress and waits. Use the direct
-native `lane_report` form from the Lane operating contract only for the current
-standalone original owner message; if isolated ownership is uncertain or the
-tool is unavailable, keep the disputed action held and do not substitute an
-indirect call. If the controller later delivers a corrective assignment, apply
-the explicit correction only to that assignment. Preserve other constraints,
-actual tool permissions and approvals; do not replay denied or uncertain
-effects, undo completed effects, or make operator or global changes.
+continuation. Ask via the tracked decision tool when HEAD must choose between
+in-scope ways to resolve a blocker, not merely because a direct owner instruction
+changed the original brief.
 
 Put the outcome first in the language required by the managed delivery mode:
 what changed, acceptance evidence actually checked, remaining risk or held effects,

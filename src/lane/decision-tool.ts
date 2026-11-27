@@ -22,11 +22,10 @@ export function registerDecisionAsk(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "decision_ask", label: "Request a tracked decision", approval: "read", loadMode: "essential",
     description: (role === "lane"
-      ? "Use to: \"head\" for an in-scope coordination choice that needs HEAD's answer, even from a work topic. " +
+      ? "Use to: \"head\" for a coordination choice that needs HEAD's answer, even from a work topic. " +
         "Omit to for the normal recipient (topic: owner; manager handoff: HEAD). " +
         "HEAD may select an original option or escalate the same question to the owner. " +
-        "On corrective assignments, to: \"head\" is cancelled privately, not sent to the owner. " +
-        "An answer never grants execution approval or changes scope. "
+        "An answer never grants execution approval or authority to change the assignment. "
       : "Ask the owner structured questions on this managed session's native UI. ") +
       "Returns a stable decision id and the actual submitted answers or cancellation, timeout, or chat state. Recommendations, timeouts and chat are not acceptance. No default answers, route override, or automatic work resume.",
     parameters: Type.Object({

@@ -1,15 +1,15 @@
 flowchart LR
     M["Messengers<br/>Discord · Telegram · Slack"]
     G["Gateway<br/>Always-on service<br/>Admit · route · reply"]
-    H["OMP Head<br/>Model + controller<br/>Bound topics bypass the model"]
+    H["OMP Head<br/>Model + controller<br/>Coordinates lanes"]
     A["Lane A<br/>Independent session<br/>repo / topic A"]
     B["Lane B<br/>Independent session<br/>repo / topic B"]
     M --> G
     G --> H
-    H -->|"lane_start / lane_message"| A
-    H -->|"lane_start / lane_message"| B
-    A -->|"Manager results / decisions for HEAD / scope reviews"| H
-    B -->|"Manager results / decisions for HEAD / scope reviews"| H
+    H -->|"Bound owner work via controller / HEAD handoff"| A
+    H -->|"Bound owner work via controller / HEAD handoff"| B
+    A -->|"Topic replies via controller / manager results / HEAD decisions"| H
+    B -->|"Topic replies via controller / manager results / HEAD decisions"| H
     H --> G
     G --> M
     classDef head fill:#faf3ff,stroke:#9c4ffb,color:#7a2bd6,stroke-width:2px

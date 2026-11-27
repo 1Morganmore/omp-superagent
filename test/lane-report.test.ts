@@ -109,14 +109,10 @@ describe("native lane reporting", () => {
     await f.runner.emit({ type: "session_start" });
     expect(f.active()).toEqual(["read", "task"]);
     await f.select(["read", "lane_report"]);
-    for (const input of [
-      { status: "waiting", summary: "Not root", waiting: { kind: "dependency", target: "review" } },
-      { status: "scope_review", sourceId: "original-owner-input" },
-    ]) {
-      expect(await f.runner.emitToolCall({ type: "tool_call", toolName: "lane_report", toolCallId: "child-call", input }))
-        .toMatchObject({ block: true });
-      await expect(f.execute(input)).rejects.toThrow("restricted to the root lane session");
-    }
+    const input = { status: "waiting", summary: "Not root", waiting: { kind: "dependency", target: "review" } };
+    expect(await f.runner.emitToolCall({ type: "tool_call", toolName: "lane_report", toolCallId: "child-call", input }))
+      .toMatchObject({ block: true });
+    await expect(f.execute(input)).rejects.toThrow("restricted to the root lane session");
     await f.runner.emit({ type: "session_start" });
     expect(f.active()).toEqual(["read"]);
   });
@@ -126,52 +122,16 @@ describe("native lane reporting", () => {
     expect(f.definition).toBeUndefined();
   });
 
-  test("scope review returns only native identity and never writes a progress journal entry", async () => {
-    const f = await fixture("main", "lane", true);
-    await f.session.ensureOnDisk();
-    const branch = structuredClone(f.session.getBranch());
-
-    const output = await f.execute({ status: "scope_review", sourceId: "original-owner-input" }, "scope-tool-call");
-
-    expect(output.details).toEqual({
-      type: "superagent-scope-review", sourceId: "original-owner-input",
-      sessionId: f.session.getSessionId(), sessionFile: f.session.getSessionFile(), toolCallId: "scope-tool-call",
-    });
-    expect(parseLaneReportResult(output)).toBeNull();
-    expect(f.session.getBranch()).toEqual(branch);
-  });
-
-  test.each(["matched", "denied", "no request", "different call", "different session"] as const)(
-    "scope review receipts recognize only native approval for the exact requested call (%s)", async scenario => {
-      const f = await fixture("main", "lane", true);
-      await f.session.ensureOnDisk();
-      const sessionId = f.session.getSessionId();
-      const toolCallId = "scope-tool-call";
-      const sourceId = "original-owner-input";
-      const approval = {
-        sessionId: scenario === "different session" ? "different-native-session" : sessionId,
-        toolCallId: scenario === "different call" ? "different-tool-call" : toolCallId,
-        toolName: "lane_report",
-      };
-      if (scenario !== "no request") {
-        await f.runner.emit({ type: "tool_approval_requested", ...approval, approvalMode: "always-ask" });
-      }
-      await f.runner.emit({ type: "tool_approval_resolved", ...approval, approved: scenario !== "denied" });
-
-      const output = await f.execute({ status: "scope_review", sourceId }, toolCallId);
-
-      expect(output.details).toMatchObject({
-        type: "superagent-scope-review", sourceId, sessionId, sessionFile: f.session.getSessionFile(), toolCallId,
-      });
-      if (scenario === "matched") expect(output.details).toHaveProperty("nativeApproval", "approved");
-      else expect(output.details).not.toHaveProperty("nativeApproval", "approved");
-    },
-  );
-
-  test("scope review refuses to issue a receipt without a native session file", async () => {
+  test("rejects the retired review form in native argument validation and direct execution", async () => {
     const f = await fixture();
-    await expect(f.execute({ status: "scope_review", sourceId: "original-owner-input" }))
-      .rejects.toThrow("requires a native session file");
+    const definition = f.definition;
+    if (!definition) throw new Error("lane_report is not registered");
+    const input = { status: "scope_review", sourceId: "original-owner-input" };
+    expect(() => validateToolArguments(definition,
+      { type: "toolCall", id: "retired-review", name: "lane_report", arguments: input }))
+      .toThrow(/Validation failed for tool/);
+    await expect(definition.execute("retired-review", input, undefined, undefined, f.runner.createContext()))
+      .rejects.toThrow("Invalid lane report parameters");
   });
 
   test("native argument validation rejects forged identity/hashes and incomplete status variants", async () => {
@@ -181,7 +141,6 @@ describe("native lane reporting", () => {
       {}, { ...valid, summary: " " }, { ...valid, status: "progress" }, { ...valid, status: "resolved" },
       { ...valid, waiting: { kind: "tool", target: "compiler" } },
       { status: "progress", summary: "No evidence", evidence: [] },
-      { status: "scope_review" }, { status: "scope_review", sourceId: " " },
     ]) {
       await expect(f.execute(input)).rejects.toThrow(/Validation failed for tool|Invalid lane report parameters/);
       await expect(f.definition!.execute("direct", input, undefined, undefined, f.runner.createContext()))
@@ -192,10 +151,6 @@ describe("native lane reporting", () => {
       { ...valid, waiting: { kind: "dependency", target: "dataset", id: "fabricated" } },
       { ...valid, evidence: [{ kind: "file", path: "file", fingerprint: "a".repeat(64) }] },
       { status: "progress", summary: "Chatter", evidence: [{ kind: "tool", toolCallId: "id", ref: "claimed" }] },
-      ...Object.entries({
-        summary: "Lane-authored request", target: "another lane", sessionId: "forged", sessionFile: "/tmp/forged",
-        toolCallId: "forged", text: "Rewritten owner text", nativeApproval: "approved",
-      }).map(([key, value]) => ({ status: "scope_review", sourceId: "original-owner-input", [key]: value })),
     ]) {
       // OMP may normalize away unknown fields before execution. A direct call
       // must refuse them, and no surviving caller field can supply a fingerprint.
@@ -309,20 +264,17 @@ describe("native lane reporting", () => {
   test("current coordination receipts and historical journal entries cannot manufacture tool evidence", async () => {
     const f = await fixture("main", "lane", true);
     const rejected = "not a coordination receipt";
-    for (const name of ["lane_report", "result_attach", "board_post", "board_read", "board_subscribe"]) {
+    for (const name of ["lane_report", "decision_ask", "result_attach", "board_post", "board_read", "board_subscribe"]) {
       f.call(name, name);
       f.completed(name, name);
       await expect(f.execute({ status: "progress", summary: "Coordination activity",
         evidence: [{ kind: "tool", toolCallId: name }] })).rejects.toThrow(rejected);
     }
     const wrapped = await f.execute({ status: "waiting", summary: "Review", waiting: { kind: "dependency", target: "review" } });
-    const review = await f.execute({ status: "scope_review", sourceId: "original-owner-input" });
-    for (const [id, output] of [["wrapped-report", wrapped], ["wrapped-review", review]] as const) {
-      f.call(id, "write");
-      f.completed(id, "write", false, output.details);
-      await expect(f.execute({ status: "progress", summary: "Wrapped receipt",
-        evidence: [{ kind: "tool", toolCallId: id }] })).rejects.toThrow(rejected);
-    }
+    f.call("wrapped-report", "write");
+    f.completed("wrapped-report", "write", false, wrapped.details);
+    await expect(f.execute({ status: "progress", summary: "Wrapped receipt",
+      evidence: [{ kind: "tool", toolCallId: "wrapped-report" }] })).rejects.toThrow(rejected);
     for (const [id, path] of [["report-device", "xd://lane_report"], ["retired-device", "xd://board_read"]]) {
       f.call(id, "write", { path, content: "{}" });
       f.completed(id, "write");

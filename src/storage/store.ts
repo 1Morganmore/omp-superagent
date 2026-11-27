@@ -24,9 +24,9 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-  HEAD_MODEL_CONTROL, SCOPE_REVIEW_PREFIX, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
+  HEAD_MODEL_CONTROL, isRetiredScopeInput, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
   type ActiveInputState, type KickoffHold, type OutputRecord, type Route, type SettlementOutput, type StorePort, type WorkflowActivation,
-  type HeadModelChange, type HeadRecoveryAttempt, type HeadRecoveryEffect, type LaneFallbackReceipt, type LaneRecoveryScope, type ScopeReview, type ScopeReviewNativeProof,
+  type HeadModelChange, type HeadRecoveryAttempt, type HeadRecoveryEffect, type LaneFallbackReceipt, type LaneRecoveryScope,
 } from "../contracts.ts";
 import type { ApprovalResolution } from "../contracts";
 import { captureDecision, resolveDecision } from "../lane/decisions";
@@ -34,9 +34,9 @@ import { isLaneModel, laneModelArgument, sameLaneModel } from "../lane/lane-mode
 import { laneData, readLaneRows, toLane, type LaneRow } from "../lane/lane-rows";
 import { compareMessageIds } from "../routing/message-order";
 import { storedWorkflowName, workflowChoice } from "../lane/workflow";
-import { laneWaitKey, scopeReviewApproval, type LaneReport } from "../lane/lane-report";
+import { laneWaitKey, type LaneReport } from "../lane/lane-report";
 import { laneWatchReplySource } from "../lane/lane-watch";
-import { isOriginalAttachmentMessage, isResultAttachmentSnapshot } from "../messaging/result-attachment";
+import { isResultAttachmentSnapshot } from "../messaging/result-attachment";
 import { existingWorkspace, TOPIC_CHOICE_WAIT_MS, topicRequest } from "../routing/topic-request";
 import type { CronUpdate } from "../cron/cron-jobs";
 import { unattendedSource, hasIntakeReplyRoute, intakeThreadKey, intakeWorkId } from "../pr/pr-intake-work";
@@ -44,10 +44,8 @@ import { isPrReviewLane, type ReviewRound } from "../pr/pr-intake-review";
 import { DeferredRoutingQueue, type DeferredChoiceRow } from "./deferred-routing";
 
 const ACTIVE_INPUTS = "state IN ('pending','submitted','uncertain')";
-const SCOPE_CORRECTION_PREFIX = `handoff:${SCOPE_REVIEW_PREFIX}`;
-const SCOPE_REVIEW_NOT_APPLIED = "The scope correction was not applied. The existing lane scope is unchanged.";
-const SCOPE_CORRECTION_NOT_CURRENT = "The scope correction is no longer current. It was not repeated; the existing lane scope is unchanged.";
-const SCOPE_CORRECTION_NO_ANSWER = "The corrective request settled, but the lane returned no final answer.";
+const retiredScopeId = (column: "id" | "source_id" | "retired.id" | "newer.id") =>
+  `(${column} GLOB 'scope-review:*' OR ${column} GLOB 'handoff:scope-review:*')`;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS lanes (
@@ -90,17 +88,6 @@ const SCHEMA = `
     remote_id TEXT, UNIQUE(target, generation, request_id)
   );
   CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS scope_reviews (
-    id TEXT PRIMARY KEY, handoff_id TEXT NOT NULL UNIQUE REFERENCES inputs(id),
-    source_id TEXT NOT NULL REFERENCES inputs(id), lane_id TEXT NOT NULL REFERENCES lanes(id),
-    generation INTEGER NOT NULL, session_id TEXT NOT NULL, request_id TEXT NOT NULL,
-    tool_call_id TEXT, approval_id TEXT REFERENCES approvals(id),
-    operator_revision TEXT NOT NULL, lane_revision TEXT NOT NULL,
-    state TEXT NOT NULL CHECK(state IN ('candidate','review','granted','closed')),
-    correction_id TEXT NOT NULL UNIQUE, correction_requested INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE INDEX IF NOT EXISTS pending_scope_reviews ON scope_reviews(lane_id)
-    WHERE state IN ('review','granted');
 `;
 
 const ADMITTED_MESSAGE_SCOPE = `FROM inputs
@@ -135,26 +122,6 @@ interface OutputRow {
   error: string | null;
 }
 interface ApprovalRow { data: string; state: Approval["state"]; remote_id: string | null }
-interface ScopeReviewRow {
-  readonly id: string;
-  readonly handoff_id: string;
-  readonly source_id: string;
-  readonly lane_id: string;
-  readonly generation: number;
-  readonly session_id: string;
-  readonly request_id: string;
-  readonly tool_call_id: string | null;
-  readonly approval_id: string | null;
-  readonly operator_revision: string;
-  readonly lane_revision: string;
-  readonly state: "candidate" | "review" | "granted" | "closed";
-  readonly correction_id: string;
-  readonly correction_requested: 0 | 1;
-}
-
-class ScopeReviewError extends Error {
-  override readonly name = "ScopeReviewError";
-}
 
 const toInput = (row: InputRow): InputRecord => {
   const { workflow, ...input } = JSON.parse(row.data) as Inbound & { workflow?: Omit<WorkflowActivation, "name"> & { name: string } };
@@ -273,9 +240,6 @@ export class Store implements StorePort {
       db.run(SCHEMA);
       const laneColumns = db.query<{ name: string }, []>("PRAGMA table_info(lanes)").all();
       if (!laneColumns.some(column => column.name === "remote")) db.run("ALTER TABLE lanes ADD COLUMN remote TEXT");
-      const reviewColumns = db.query<{ name: string }, []>("PRAGMA table_info(scope_reviews)").all();
-      if (!reviewColumns.some(column => column.name === "tool_call_id")) db.run("ALTER TABLE scope_reviews ADD COLUMN tool_call_id TEXT");
-      if (!reviewColumns.some(column => column.name === "approval_id")) db.run("ALTER TABLE scope_reviews ADD COLUMN approval_id TEXT REFERENCES approvals(id)");
       const outputColumns = db.query("PRAGMA table_info(outputs)").all() as Array<{ name: string }>;
       if (!outputColumns.some(column => column.name === "reply_to")) db.run("ALTER TABLE outputs ADD COLUMN reply_to TEXT");
       if (!outputColumns.some(column => column.name === "picker")) db.run("ALTER TABLE outputs ADD COLUMN picker TEXT");
@@ -294,11 +258,100 @@ export class Store implements StorePort {
       this.deferredRouting = new DeferredRoutingQueue(db, reconcileInboundRedelivery);
       this.db = db;
       this.writerLock = lock;
+      this.retireScopeRecords();
+      this.retireScopeApprovals();
     } catch (error) {
       db?.close(true);
       lock?.close(true);
       throw error;
     }
+  }
+
+  private retireScopeRecords(): void {
+    this.db.transaction(() => {
+      if (this.getMeta("migration:retire-scope-review") === "true") return;
+      // Keep native admissions and delivery receipts. Pending synthetic work
+      // never ran; an admission or send without a final receipt is uncertain.
+      this.db.run(`UPDATE inputs SET state = CASE state WHEN 'pending' THEN 'cancelled' ELSE 'uncertain' END
+        WHERE state IN ('pending','submitted') AND ${retiredScopeId("id")}`);
+      this.retireScopeOutputs();
+      if (this.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'scope_reviews'").get()) {
+        this.db.run("UPDATE scope_reviews SET state = 'closed', correction_requested = 0 WHERE state <> 'closed' OR correction_requested <> 0");
+      }
+      const active = this.getMeta("main:active-lane-recovery");
+      if (active && isRetiredScopeInput(active)) this.setMeta("main:active-lane-recovery", "");
+      // Legacy HEAD reviews did not record a per-prompt native owner.
+      const headSession = this.getMeta("main:sessionId");
+      const headGeneration = Number(this.getMeta("main:generation") ?? "0");
+      if (headSession && this.db.query(`SELECT 1 FROM inputs WHERE target = 'main' AND generation = ?
+        AND request_id IS NOT NULL AND state IN ('uncertain','cancelled') AND ${retiredScopeId("id")} LIMIT 1`)
+        .get(headGeneration)) this.setMeta(`retired-scope-head-session:${headGeneration}`, headSession);
+
+      this.setMeta("migration:retire-scope-review", "true");
+    }).immediate();
+  }
+
+  private retireScopeApprovals(): void {
+    this.db.transaction(() => {
+      if (this.getMeta("migration:retire-scope-approvals") === "true") return;
+      // Before 3e03dd1, HEAD never stored its scope-review input on the
+      // card. A submitted review could create any dialog on its original
+      // route. A sibling route or generation rules it out; an existing
+      // approval row, method or native UI ID does not.
+      const headReviews = this.db.query<InputRow & { sequence: number }, []>(`SELECT data,target,state,request_id,generation,sequence
+        FROM inputs WHERE target = 'main' AND request_id IS NOT NULL AND state IN ('uncertain','cancelled')
+          AND ${retiredScopeId("id")} ORDER BY sequence`).all();
+      const lastReview = new Map(headReviews.map(row => [
+        JSON.stringify([row.generation, routeKey(toInput(row).route)]), row.sequence,
+      ]));
+      // scope-review-approval-input was also stamped on ordinary topic
+      // selects. Only the HEAD and correction markers prove retirement.
+      const approvals = this.db.query<ApprovalRow, []>(`SELECT approvals.* FROM approvals WHERE EXISTS (
+        SELECT 1 FROM metadata WHERE key IN (
+          'scope-head-approval-input:' || approvals.id,
+          'scope-correction-approval-input:' || approvals.id,
+          'native-approval-held:' || approvals.id
+        )) OR (target = 'main' AND generation IN (SELECT generation FROM inputs
+          WHERE target = 'main' AND request_id IS NOT NULL AND state IN ('uncertain','cancelled')
+            AND ${retiredScopeId("id")}))`).all();
+      for (const row of approvals) {
+        const approval = toApproval(row);
+        const marked = this.getMeta(`scope-head-approval-input:${approval.id}`) !== null
+          || this.getMeta(`scope-correction-approval-input:${approval.id}`) !== null
+          || this.getMeta(`native-approval-held:${approval.id}`) !== null;
+        if (!marked) {
+          const sequence = lastReview.get(JSON.stringify([approval.generation, routeKey(approval.route)]));
+          if (sequence === undefined || this.hasLaterHeadDecisionOwner(approval, sequence)) continue;
+        }
+        if (approval.state === "pending") {
+          this.resolveApproval(approval.id, approval.generation, "cancelled", { reason: "Retired scope workflow; no native response sent" });
+        }
+        this.setMeta(`native-approval-held:${approval.id}`, "true");
+        this.setMeta(`retired-approval-dismissal:${approval.id}`, "pending");
+      }
+      this.setMeta("migration:retire-scope-approvals", "true");
+    }).immediate();
+  }
+
+  private hasLaterHeadDecisionOwner(approval: Approval, retiredSequence: number): boolean {
+    const decision = approval.decision;
+    // This source is embedded in a tracked decision, unlike a generic
+    // confirmation. An original owner source admitted after every possible
+    // legacy review cannot be that review's original source.
+    if (!decision?.sourceId || this.getMeta(`user-source:${decision.sourceId}`) !== "true") return false;
+    const row = this.db.query<InputRow, [string, number, number, string]>(`SELECT inputs.data,target,state,request_id,generation
+      FROM inputs JOIN metadata AS native ON native.key = 'head-native-owner:' || inputs.id
+        AND json_valid(native.value)
+      WHERE inputs.id = ?1 AND sequence > ?2 AND target = 'main' AND generation = ?3
+        AND state IN ('submitted','done','uncertain')
+        AND json_extract(native.value, '$.requestId') = request_id
+        AND json_extract(native.value, '$.generation') = generation
+        AND json_extract(native.value, '$.sessionId') = ?4
+        AND json_type(native.value, '$.sessionFile') = 'text'
+        AND length(json_extract(native.value, '$.sessionFile')) > 0
+        AND json_type(native.value, '$.cursor') IN ('text','null')`)
+      .get(decision.sourceId, retiredSequence, approval.generation, decision.sessionId);
+    return row !== null && !isRetiredScopeInput(decision.sourceId) && routeKey(toInput(row).route) === routeKey(approval.route);
   }
 
   receive(input: Inbound, target: string | null, metadata: Readonly<Record<string, string>> = {}, workflow: WorkflowActivation | null = null): boolean {
@@ -358,6 +411,7 @@ export class Store implements StorePort {
         }
         return false; // A replay never changes its current assignment or state.
       }
+      if (isRetiredScopeInput(input.id)) throw new Error(`Retired scope workflow input: ${input.id}`);
       if (workflow !== null) {
         workflowChoice({ name: workflow.name, reason: workflow.reason });
         if (workflow.provenance === "user") {
@@ -388,11 +442,12 @@ export class Store implements StorePort {
 
   ownerSource(id: string): InputRecord | null {
     let source = this.input(id);
-    while (source && this.getMeta(`user-source:${source.id}`) !== "true") {
+    while (source && !isRetiredScopeInput(source.id)) {
+      if (this.getMeta(`user-source:${source.id}`) === "true") return source;
       const linked = this.getMeta(`handoff-source:${source.id}`) ?? this.getMeta(`activity-source:${source.id}`);
       source = linked ? this.input(linked) : null;
     }
-    return source;
+    return null;
   }
 
   laneRecoveryScope(reportId: string): LaneRecoveryScope | null {
@@ -412,187 +467,11 @@ export class Store implements StorePort {
     return { lane, failed, original };
   }
 
-  recordScopeReview(inputId: string, generation: number, sessionId: string, sourceId: string, proof: ScopeReviewNativeProof): boolean {
-    return this.db.transaction(() => {
-      const handoff = this.input(inputId);
-      if (handoff?.state !== "submitted" || !handoff.target || handoff.target === "main" || !handoff.requestId
-        || !proof.toolCallId) return false;
-      const id = `${SCOPE_REVIEW_PREFIX}${inputId}`;
-      const row: ScopeReviewRow = {
-        id, handoff_id: inputId, lane_id: handoff.target, source_id: sourceId, generation, session_id: sessionId,
-        request_id: handoff.requestId, tool_call_id: proof.toolCallId, approval_id: proof.approvalId ?? null,
-        operator_revision: this.laneOperatorRevision(handoff.target),
-        lane_revision: this.scopeLaneRevision(handoff.target), state: "candidate",
-        correction_id: `handoff:${id}:${handoff.target}`, correction_requested: 0,
-      };
-      if (!this.scopeReviewBinding(row)) return false;
-      return this.db.query(`INSERT OR IGNORE INTO scope_reviews
-        (id, handoff_id, source_id, lane_id, generation, session_id, request_id, tool_call_id, approval_id,
-          operator_revision, lane_revision, state, correction_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?)`)
-        .run(id, inputId, sourceId, row.lane_id, generation, sessionId, row.request_id,
-          row.tool_call_id, row.approval_id, row.operator_revision, row.lane_revision, row.correction_id).changes === 1;
-    }).immediate();
-  }
-
-  scopeReview(reviewId: string): ScopeReview | null {
-    const row = this.db.query<ScopeReviewRow, [string]>("SELECT * FROM scope_reviews WHERE id = ?").get(reviewId);
-    if (!row || (row.state !== "review" && row.state !== "granted")) return null;
-    const review = this.input(reviewId);
-    if (review?.target !== "main" || this.getMeta(`activity-source:${review.id}`) !== row.source_id
-      || this.getMeta(`user-source:${review.id}`) !== null || review.workflow || review.messageId !== null
-      || review.attachments.length || review.reply || review.discordContext || review.pickerSelection
-      || review.interactionId !== undefined || review.invocationId !== undefined) return null;
-    if (row.state === "review") {
-      if (review.state !== "pending" && (review.state !== "submitted" || !review.requestId || !this.soloScopeAdmission(review.id)
-        || review.generation !== Number(this.getMeta("main:generation") ?? "0"))) return null;
-    } else if (review.state !== "done" || !review.requestId) return null;
-    const scope = this.scopeReviewBinding(row);
-    if (!scope || routeKey(review.route) !== routeKey(scope.original.route)) return null;
-    if (row.state === "granted" && !this.scopeCorrectionInput(row, scope)) return null;
-    return scope;
-  }
-
-  requestScopeCorrection(reviewId: string): string {
-    return this.db.transaction(() => {
-      const scope = this.scopeReview(reviewId);
-      if (!scope || this.input(reviewId)?.state !== "submitted" || this.getMeta("head:restart-fence"))
-        throw new ScopeReviewError("Scope correction requires the current submitted HEAD review and exact owner request");
-      const row = this.db.query<Pick<ScopeReviewRow, "correction_id">, [string]>(
-        "UPDATE scope_reviews SET correction_requested = 1 WHERE id = ? AND state = 'review' RETURNING correction_id",
-      ).get(reviewId);
-      if (!row) throw new ScopeReviewError("Scope review no longer accepts corrective intent");
-      return row.correction_id;
-    }).immediate();
-  }
-
-  private scopeReviewBinding(row: ScopeReviewRow): ScopeReview | null {
-    const handoff = this.input(row.handoff_id);
-    const original = this.input(row.source_id);
-    const lane = this.lane(row.lane_id);
-    if (!handoff || !original || !lane || lane.workState !== "open" || (!lane.route.threadId && !lane.route.topicId)
-      || !row.session_id || lane.sessionId !== row.session_id || lane.generation !== row.generation
-      || row.operator_revision !== this.laneOperatorRevision(lane.id) || row.lane_revision !== this.scopeLaneRevision(lane.id)
-      || this.getMeta("head:restart-fence") || isPrReviewLane(this, lane.id) || this.getMeta(`lane-quota-hold:${lane.id}`)
-      || original.state !== "done" || original.target !== null || original.workflow || original.unresolvedReply || !original.text.trim()
-      || original.text.trimStart().startsWith("/")
-      || original.discordOriginalText !== undefined && original.discordOriginalText.trim() !== original.text.trim()
-      || original.interactionId !== undefined || original.invocationId !== undefined || original.pickerSelection
-      || !isOriginalAttachmentMessage(original) || this.getMeta(`user-source:${original.id}`) !== "true"
-      || this.getMeta(`topic-owner:${original.id}`) !== lane.id
-      || this.getMeta(`topic-creator:${original.id}`) !== null || this.getMeta(`topic-revision:${original.id}`) !== null
-      || this.getMeta(`handoff-source:${original.id}`) !== null || this.getMeta(`activity-source:${original.id}`) !== null
-      || routeKey(original.route) !== routeKey(lane.route) || routeKey(handoff.route) !== routeKey(lane.route)
-      || this.laneForRoute(original.route)?.id !== lane.id
-      || handoff.id !== `handoff:${original.id}:${lane.id}` || handoff.target !== lane.id || handoff.workflow
-      || this.getMeta(`handoff-source:${handoff.id}`) !== original.id
-      || handoff.state !== (row.state === "candidate" ? "submitted" : "done")
-      || handoff.requestId !== row.request_id || handoff.generation !== row.generation || !this.soloScopeAdmission(handoff.id)) return null;
-    if (original.messageId === null || this.firstAdmittedMessage(original.route, original.messageId)?.id !== original.id) return null;
-    const native = this.getMeta(`lane-observation-owner:${handoff.id}`);
-    if (!native || !this.db.query(`SELECT 1 WHERE json_valid(?1)
-      AND json_extract(?1, '$.requestId') = ?2 AND json_extract(?1, '$.sessionId') = ?3
-      AND json_extract(?1, '$.generation') = ?4 AND json_extract(?1, '$.sessionFile') = ?5`)
-      .get(native, row.request_id, row.session_id, row.generation, lane.sessionFile)) return null;
-    const latest = this.latestLaneRun(lane.id)?.id;
-    if (latest !== handoff.id && (row.state !== "granted" || latest !== row.correction_id)
-      || this.inputs(lane.id).some(input => input.state !== "pending" && input.id !== handoff.id && input.id !== row.correction_id)
-      || this.scopeOwnerSuperseded(original, lane.id)) return null;
-    // The exception is only the exact approved call that produced this
-    // review receipt. All other native cards remain outside review authority.
-    if (row.approval_id !== null) {
-      const approval = this.approval(row.approval_id);
-      if (!row.tool_call_id || approval?.state !== "answered" || approval.target !== lane.id || approval.generation !== row.generation
-        || routeKey(approval.route) !== routeKey(original.route)
-        || this.getMeta(`topic-approval:${approval.id}`) !== original.id
-        || this.getMeta(`scope-review-approved-input:${approval.id}`) !== handoff.id) return null;
-    }
-    if (this.db.query(`SELECT 1 FROM approvals
-      JOIN metadata AS topic ON topic.key = 'topic-approval:' || approvals.id
-      WHERE topic.value IN (?1, ?2) AND approvals.id IS NOT ?3 AND NOT EXISTS (
-        SELECT 1 FROM metadata WHERE key = 'scope-correction-approval-input:' || approvals.id
-      ) LIMIT 1`).get(original.id, handoff.id, row.approval_id)) return null;
-    if (this.inputEffects(original, [original.id, handoff.id], () => false)
-      .some(effect => effect.state === "uncertain" || effect.state === "sending")) return null;
-    return { lane, original, handoff };
-  }
-
-  private soloScopeAdmission(id: string): boolean {
-    return this.getMeta(`steering-owner:${id}`) === id && !this.db.query(`SELECT 1 FROM inputs
-      JOIN metadata ON metadata.key = 'steering-owner:' || inputs.id
-      WHERE inputs.target = (SELECT target FROM inputs WHERE id = ?1)
-        AND inputs.generation = (SELECT generation FROM inputs WHERE id = ?1)
-        AND inputs.request_id IS NOT NULL AND inputs.id <> ?1 AND metadata.value = ?1 LIMIT 1`).get(id);
-  }
-
-  private scopeOwnerSuperseded(original: InputRecord, laneId: string): boolean {
-    const { platform, accountId, authorityId, guildId, channelId, threadId, topicId } = original.route;
-    // Retain later owner admissions as a permanent fence, even if they settle
-    // without dispatch. Edits and priority controls supersede too.
-    if (this.db.query(`SELECT 1 FROM inputs AS newer
-      JOIN metadata AS owner ON owner.key = 'user-source:' || newer.id AND owner.value = 'true'
-      LEFT JOIN metadata AS topic ON topic.key = 'topic-owner:' || newer.id
-      WHERE newer.sequence > (SELECT sequence FROM inputs WHERE id = ?1)
-        AND (topic.value = ?2 OR (
-          json_extract(newer.data, '$.route.platform') = ?3 AND json_extract(newer.data, '$.route.accountId') = ?4
-          AND json_extract(newer.data, '$.route.authorityId') = ?5 AND json_extract(newer.data, '$.route.guildId') IS ?6
-          AND json_extract(newer.data, '$.route.channelId') = ?7 AND json_extract(newer.data, '$.route.threadId') IS ?8
-          AND json_extract(newer.data, '$.route.topicId') IS ?9
-        )) LIMIT 1`).get(original.id, laneId, platform, accountId, authorityId, guildId, channelId, threadId, topicId ?? null)) return true;
-    const originalMessageId = original.messageId;
-    if (originalMessageId !== null) {
-      // Catchup can admit a physically newer original first. Use the exact
-      // topic and platform message clock, not an edit ID or arrival time.
-      const earlierAdmissions = this.db.query<InputRow, [string, string, string, string, string | null, string | null, string, string | null]>(
-        `SELECT inputs.* ${ADMITTED_MESSAGE_SCOPE}
-          AND inputs.sequence < (SELECT sequence FROM inputs WHERE id = ?)
-          AND json_extract(inputs.data, '$.route.topicId') IS ?`,
-      ).iterate(platform, channelId, accountId, authorityId, guildId, threadId, original.id, topicId ?? null);
-      for (const row of earlierAdmissions) {
-        const source = toInput(row);
-        if (source.messageId !== null && compareMessageIds(platform, source.messageId, originalMessageId) === 1
-          && isOriginalAttachmentMessage(source)) return true;
-      }
-    }
-    if (this.deferredRouting.hasOnRoute(original.route, original.id)) return true;
-    // Gateway can durably admit an input before head routing classifies it.
-    if (!this.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'gateway_events'").get()) return false;
-    return this.db.query(`SELECT 1 FROM gateway_events INDEXED BY gateway_events_pending
-      WHERE delivered_at IS NULL AND json_extract(data, '$.kind') = 'message'
-        AND json_extract(data, '$.input.id') <> ?1
-        AND NOT EXISTS (SELECT 1 FROM inputs WHERE id = json_extract(gateway_events.data, '$.input.id'))
-        AND json_extract(data, '$.input.route.platform') = ?2 AND json_extract(data, '$.input.route.accountId') = ?3
-        AND json_extract(data, '$.input.route.authorityId') = ?4 AND json_extract(data, '$.input.route.guildId') IS ?5
-        AND json_extract(data, '$.input.route.channelId') = ?6 AND json_extract(data, '$.input.route.threadId') IS ?7
-      LIMIT 1`).get(original.id, platform, accountId, authorityId, guildId, channelId, threadId) !== null;
-  }
-
-  private scopeCorrectionInput(row: ScopeReviewRow, scope: ScopeReview): InputRecord | null {
-    const input = this.input(row.correction_id);
-    if (!input || input.target !== scope.lane.id || input.state !== "pending" && (input.state !== "submitted"
-      || !input.requestId || input.generation !== row.generation || !this.soloScopeAdmission(input.id))
-      || routeKey(input.route) !== routeKey(scope.lane.route) || input.text !== scope.original.text.trim()
-      || input.workflow || input.messageId !== null || input.attachments.length || input.reply || input.discordContext
-      || input.interactionId !== undefined || input.invocationId !== undefined || input.pickerSelection
-      || this.getMeta(`user-source:${input.id}`) !== null || this.getMeta(`topic-owner:${input.id}`) !== null
-      || this.getMeta(`handoff-source:${input.id}`) !== row.id
-      || this.getMeta(`report-approval-source:${row.id}`) !== scope.original.id) return null;
-    return input;
-  }
-
-  private scopeLaneRevision(id: string): string {
-    return this.getMeta(`scope-review-lane-revision:${id}`) ?? "0";
-  }
-
   reportApprovalSource(id: string): InputRecord | null {
     const input = this.input(id);
-    if (!input) return null;
+    if (!input || isRetiredScopeInput(id)) return null;
     const reportId = input.target === "main" ? id : this.getMeta(`handoff-source:${id}`);
-    if (!reportId || this.input(reportId)?.target !== "main") return null;
-    if (reportId.startsWith(SCOPE_REVIEW_PREFIX)) {
-      const scope = this.scopeReview(reportId);
-      return scope && id === `handoff:${reportId}:${scope.lane.id}` && input.state === "submitted" ? scope.original : null;
-    }
+    if (!reportId || isRetiredScopeInput(reportId) || this.input(reportId)?.target !== "main") return null;
     const sourceId = this.getMeta(`report-approval-source:${reportId}`);
     const original = sourceId === null ? null : this.ownerSource(id);
     return original?.id === sourceId ? original : null;
@@ -601,11 +480,14 @@ export class Store implements StorePort {
   private topicOwner(input: InputRecord): InputRecord | null {
     if (!input.target || input.target === "main") return null;
     let source: InputRecord | null = input;
-    while (source && this.getMeta(`user-source:${source.id}`) !== "true") {
+    while (source && !isRetiredScopeInput(source.id)) {
+      if (this.getMeta(`user-source:${source.id}`) === "true") {
+        return this.getMeta(`topic-owner:${source.id}`) === input.target ? source : null;
+      }
       const linked: string | null = this.getMeta(`handoff-source:${source.id}`);
       source = linked ? this.input(linked) : null;
     }
-    return source && this.getMeta(`topic-owner:${source.id}`) === input.target ? source : null;
+    return null;
   }
 
   topicDelivery(id: string) {
@@ -760,24 +642,20 @@ export class Store implements StorePort {
   }
 
   hasPendingLaneResult(target: string): boolean {
-    if (this.hasPendingScopeReview(target)) return true;
+    if (this.hasLegacyScopeReviews() && this.db.query(`SELECT 1 FROM scope_reviews AS review
+      JOIN outputs ON outputs.id IN (review.id || ':answer', review.correction_id || ':answer')
+      WHERE review.lane_id = ? AND outputs.state IN ('pending','sending','uncertain') LIMIT 1`).get(target)) return true;
     return this.db.query(`SELECT 1 FROM inputs AS run
       LEFT JOIN inputs AS report ON report.id = 'report:' || run.id
       LEFT JOIN inputs AS recovered ON recovered.id = 'report:' || run.id || ':done'
-      LEFT JOIN inputs AS scope ON scope.id = ?2 || run.id
-      LEFT JOIN outputs AS answer ON answer.id = COALESCE(recovered.id, report.id, scope.id, run.id) || ':answer'
-      LEFT JOIN outputs AS final ON final.id = COALESCE(recovered.id, report.id, scope.id, run.id) || ':answer:done'
+      LEFT JOIN outputs AS answer ON answer.id = COALESCE(recovered.id, report.id, run.id) || ':answer'
+      LEFT JOIN outputs AS final ON final.id = COALESCE(recovered.id, report.id, run.id) || ':answer:done'
       WHERE run.target = ?1 AND run.target <> 'main' AND run.request_id IS NOT NULL AND run.state = 'done'
         AND (COALESCE(recovered.state, report.state) IN ('pending','submitted','uncertain')
-          OR COALESCE(final.state, answer.state) IN ('pending','sending','uncertain'))
-      LIMIT 1`).get(target, SCOPE_REVIEW_PREFIX) !== null;
-  }
-
-  hasPendingScopeReview(target: string): boolean {
-    const rows = this.db.query<Pick<ScopeReviewRow, "id">, [string]>(
-      "SELECT id FROM scope_reviews WHERE lane_id = ? AND state IN ('review','granted')",
-    ).all(target);
-    return rows.some(row => this.scopeReview(row.id) !== null);
+          OR COALESCE(final.state, answer.state) IN ('pending','sending','uncertain')
+          -- A retired review cannot run, but its interrupted send still holds this lane.
+          OR EXISTS (SELECT 1 FROM outputs WHERE id = 'scope-review:' || run.id || ':answer' AND state = 'uncertain'))
+      LIMIT 1`).get(target) !== null;
   }
 
   hasPendingLanePlacement(target: string): boolean {
@@ -816,7 +694,7 @@ export class Store implements StorePort {
     return this.db.query(`SELECT 1 FROM inputs
       JOIN metadata ON metadata.key = 'head-native-owner:' || inputs.id AND metadata.value <> ''
       WHERE inputs.target = 'main' AND inputs.state = 'uncertain'
-        AND NOT EXISTS (SELECT 1 FROM scope_reviews WHERE scope_reviews.id = inputs.id) LIMIT 1`).get() !== null;
+        AND NOT ${retiredScopeId("id")} LIMIT 1`).get() !== null;
   }
 
   kickoffHold(target: string): KickoffHold | null {
@@ -841,6 +719,25 @@ export class Store implements StorePort {
     return this.db.query<InputRow, [string, string, string, string, string | null, string | null, string]>(
       `SELECT inputs.* ${ADMITTED_MESSAGE_SCOPE} AND json_extract(inputs.data, '$.messageId') = ? ORDER BY inputs.sequence`,
     ).all(route.platform, route.channelId, route.accountId, route.authorityId, route.guildId, route.threadId, messageId).map(toInput);
+  }
+
+  isLateTopicOriginal(source: InputRecord): boolean {
+    const { messageId, route } = source;
+    if (messageId === null) return false;
+    // Normally this is the newest physical message. A higher cursor alone is
+    // not proof: it may belong to another logical topic or a later admission.
+    const cursor = this.getMeta(`cursor:${physicalRouteKey(route)}`);
+    if (cursor === messageId && this.getMeta(`topic-revision:${source.id}`) === null) return false;
+    const rows = this.db.query<{ messageId: string }, [string, string, string, string, string | null, string | null, string | null, string]>(
+      `SELECT json_extract(inputs.data, '$.messageId') AS messageId ${ADMITTED_MESSAGE_SCOPE}
+        AND json_extract(inputs.data, '$.route.topicId') IS ? AND inputs.sequence < (SELECT sequence FROM inputs WHERE id = ?)
+        ORDER BY inputs.sequence DESC`,
+    ).iterate(route.platform, route.channelId, route.accountId, route.authorityId, route.guildId, route.threadId, route.topicId ?? null, source.id);
+    for (const earlier of rows) {
+      const order = compareMessageIds(route.platform, earlier.messageId, messageId);
+      if (order === 1 || order === 0) return true;
+    }
+    return false;
   }
 
   /** Recognize a misplaced choice without exposing another thread's question or granting it a vote. */
@@ -1002,18 +899,7 @@ export class Store implements StorePort {
   submit(id: string, requestId: string, generation: number): boolean {
     return this.db.transaction(() => {
       const input = this.input(id);
-      if (!input || input.state !== "pending" || input.target === null) return false;
-      if (id.startsWith(SCOPE_REVIEW_PREFIX) || id.startsWith(SCOPE_CORRECTION_PREFIX)) {
-        const reviewId = input.target === "main" ? id : this.getMeta(`handoff-source:${id}`);
-        const scope = reviewId && this.scopeReview(reviewId);
-        if (!scope || this.getMeta(`steering-owner:${id}`) !== id || (input.target === "main"
-          ? id !== reviewId || generation !== Number(this.getMeta("main:generation") ?? "0")
-          : id !== `handoff:${reviewId}:${scope.lane.id}` || generation !== scope.lane.generation)
-          || this.getMeta("head:restart-fence")) {
-          this.settle(id, "cancelled");
-          return false;
-        }
-      }
+      if (!input || input.state !== "pending" || input.target === null || isRetiredScopeInput(id)) return false;
       const progress = this.getMeta(`progress-source:${id}`);
       if (progress && !this.progressOpen(JSON.parse(progress))) {
         this.db.query("UPDATE inputs SET state = 'cancelled' WHERE id = ? AND state = 'pending'").run(id);
@@ -1045,12 +931,32 @@ export class Store implements StorePort {
     }).immediate();
   }
 
+  submitGoalResume(input: Inbound, target: string, sourceId: string, owner: Parameters<StorePort["submitGoalResume"]>[3],
+    priorWorkState?: Lane["workState"]): InputRecord {
+    return this.db.transaction(() => {
+      if (target !== "main") {
+        const lane = this.lane(target);
+        if (!lane || lane.workState !== priorWorkState || lane.workState === "cancelled" || lane.sessionId !== owner.sessionId
+          || lane.generation !== owner.generation || !this.updateLane(target, owner.generation, {
+            workState: "open", runtimeState: "running", lastActivityAt: Date.now(),
+          })) throw new Error("The original lane changed before goal resume");
+      }
+      // Separate from prompt ownership: an interrupted goal resume must never replay as a prompt.
+      if (!this.receive(input, target, {
+        [`handoff-source:${input.id}`]: sourceId,
+        [`native-goal-resume-owner:${input.id}`]: JSON.stringify(owner),
+      }) || !this.submit(input.id, owner.requestId, owner.generation)) throw new Error("Native goal resume was not admitted");
+      return this.requireInput(input.id);
+    }).immediate();
+  }
+
   private progressOpen(context: { inputId: string; generation: number; sessionId: string }): boolean {
     const input = this.input(context.inputId);
-    if (!input || input.state !== "submitted" || input.generation !== context.generation || this.laneRecoveryObsolete(input.id)) return false;
+    if (!input || input.state !== "submitted" || input.generation !== context.generation
+      || isRetiredScopeInput(input.id) || this.laneRecoveryObsolete(input.id)) return false;
     const sourceId = this.getMeta(`handoff-source:${input.id}`);
     const source = sourceId ? this.input(sourceId) : input;
-    if (!source || source.state === "cancelled" || source.state === "uncertain") return false;
+    if (!source || isRetiredScopeInput(source.id) || source.state === "cancelled" || source.state === "uncertain") return false;
     if (input.target === "main") {
       const parent = this.getMeta(`progress-source:${input.id}`);
       return (!parent || this.progressOpen(JSON.parse(parent)))
@@ -1119,7 +1025,7 @@ export class Store implements StorePort {
   }
 
   progress(id: string, generation: number, sessionId: string, eventId: string, text: string, editInPlace = false): boolean {
-    if (!text.trim() || id.startsWith(SCOPE_REVIEW_PREFIX) || id.startsWith(SCOPE_CORRECTION_PREFIX)) return false;
+    if (!text.trim()) return false;
     return this.db.transaction(() => {
       const context = { inputId: id, generation, sessionId };
       if (!this.progressOpen(context)) return false;
@@ -1252,73 +1158,16 @@ export class Store implements StorePort {
     }).immediate();
   }
 
-  /** Called only inside settle: one transaction owns the state transition, output and next receipt. */
-  private settleScopeReview(input: InputRecord, state: "done" | "uncertain" | "cancelled", settlement?: SettlementOutput): boolean {
-    const id = input.id;
-    const eligible = input.state === "submitted" && state === "done" && settlement?.scopeReviewEligible === true
-      && settlement.laneFailure === undefined && !settlement.picker && !this.getMeta("head:restart-fence");
-    const shut = this.db.query("UPDATE scope_reviews SET state = 'closed', correction_requested = 0 WHERE id = ?");
-    if (id.startsWith(SCOPE_REVIEW_PREFIX) || id.startsWith(SCOPE_CORRECTION_PREFIX)) {
-      const row = id.startsWith(SCOPE_REVIEW_PREFIX)
-        ? this.db.query<ScopeReviewRow, [string]>("SELECT * FROM scope_reviews WHERE id = ?").get(id)
-        : this.db.query<ScopeReviewRow, [string]>("SELECT * FROM scope_reviews WHERE correction_id = ?").get(id);
-      if (!row) return true; // Reserved internal identities cannot use ordinary report routing.
-      const scope = this.scopeReview(row.id);
-      if (id === row.id && row.state === "review" && eligible && scope && row.correction_requested === 1
-        && !this.input(row.correction_id)) {
-        this.insertInput({
-          id: row.correction_id, route: scope.lane.route, messageId: null, receivedAt: scope.original.receivedAt,
-          text: scope.original.text.trim(), attachments: [],
-        }, scope.lane.id, {
-          [`handoff-source:${row.correction_id}`]: id,
-          [`report-approval-source:${id}`]: scope.original.id,
-        }, null);
-        this.db.query("UPDATE scope_reviews SET state = 'granted', correction_requested = 0 WHERE id = ?").run(id);
-        return true; // No HEAD final when the correction was actually admitted.
-      }
-      const correction = id === row.correction_id;
-      const deliver = row.state === (correction ? "granted" : "review");
-      shut.run(row.id);
-      if (deliver && input.state !== "uncertain") {
-        const original = this.input(row.source_id);
-        if (!original || this.getMeta(`user-source:${original.id}`) !== "true" || routeKey(original.route) !== routeKey(input.route)) return true;
-        const answer = settlement?.text.trim();
-        const text = correction
-          ? answer || (state === "done" ? SCOPE_CORRECTION_NO_ANSWER : SCOPE_CORRECTION_NOT_CURRENT)
-          : eligible && scope && row.correction_requested === 0 && answer && answer.length <= 1200 ? answer : SCOPE_REVIEW_NOT_APPLIED;
-        this.queueOutput({ id: settlement?.id ?? `${id}:answer`, text, sourceId: original.id, route: original.route });
-      }
-      return true;
-    }
-    const row = this.db.query<ScopeReviewRow, [string]>(
-      "SELECT * FROM scope_reviews WHERE handoff_id = ? AND state = 'candidate'",
-    ).get(id);
-    if (!row) return false;
-    const scope = eligible ? this.scopeReviewBinding(row) : null;
-    if (!scope || this.input(row.id)) {
-      shut.run(row.id);
-      // Preserve ordinary answers and failure routing. A completed native
-      // turn with no answer still owes a bounded result at its original source.
-      if (input.state !== "submitted" || state !== "done" || !settlement || settlement.laneFailure !== undefined
-        || settlement.picker || settlement.text.trim()) return false;
-      const original = this.input(row.source_id);
-      if (!original || this.getMeta(`user-source:${original.id}`) !== "true"
-        || routeKey(original.route) !== routeKey(input.route)) return false;
-      this.queueOutput({ id: settlement.id, text: SCOPE_REVIEW_NOT_APPLIED, sourceId: original.id, route: original.route });
-      return true;
-    }
-    this.insertInput({
-      id: row.id, route: scope.original.route, messageId: null, receivedAt: scope.original.receivedAt,
-      text: "Internal review of the independently verified original owner request.", attachments: [],
-    }, "main", { [`activity-source:${row.id}`]: scope.original.id }, null);
-    this.db.query("UPDATE scope_reviews SET state = 'review' WHERE id = ?").run(row.id);
-    return true;
-  }
-
   settle(id: string, state: "done" | "uncertain" | "cancelled", settlement?: SettlementOutput, headModel?: HeadModelChange, editInPlace = false): boolean {
     return this.db.transaction(() => {
       const input = this.input(id);
       if (!input || input.state === "done" || input.state === "cancelled") return false;
+      if (isRetiredScopeInput(id)) {
+        // Explicit resolution may close a held receipt, but it cannot turn
+        // retired work into a successful result or ordinary delivery.
+        if (state !== "cancelled") return false;
+        return this.db.query("UPDATE inputs SET state = 'cancelled' WHERE id = ?").run(id).changes === 1;
+      }
       const progress = this.getMeta(`progress-source:${id}`);
       const output = settlement && (!progress || this.progressOpen(JSON.parse(progress))) && !this.laneRecoveryObsolete(id)
         ? { id: settlement.id, text: settlement.text, picker: settlement.picker } : undefined;
@@ -1332,14 +1181,6 @@ export class Store implements StorePort {
       if (input.state === state && (state !== "uncertain" || !newQuota)) return false;
       const pending = this.getMeta(`progress-pending:${id}`);
       if (pending) this.db.query("UPDATE inputs SET state = 'cancelled' WHERE id = ? AND state = 'pending'").run(pending);
-      if (this.settleScopeReview(input, state, settlement)) {
-        if (newQuota && input.target && id.startsWith(SCOPE_CORRECTION_PREFIX)) {
-          this.setMeta(quotaKey, "true");
-          this.setMeta(`lane-quota-hold:${input.target}`, id);
-        }
-        this.db.query("UPDATE inputs SET state = ? WHERE id = ?").run(state, id);
-        return true;
-      }
       const reportId = `report:${id}`;
       if (input.state === "uncertain" && (newQuota || state !== "uncertain")
         && this.getMeta(`lane-recovery-input:${reportId}`) === id
@@ -1506,7 +1347,7 @@ export class Store implements StorePort {
       const input = this.input(attempt.inputId);
       if (attempt.state !== "prepared" || this.getMeta("head:recovery-active")
         || this.getMeta(`head:recovery:${attempt.inputId}`) || input?.target !== "main" || input.state !== "uncertain"
-        || input.id.startsWith(SCOPE_REVIEW_PREFIX)
+        || isRetiredScopeInput(input.id)
         || input.requestId !== attempt.requestId || input.generation !== attempt.generation
         || this.getMeta("head:stop-boundary") !== attempt.stopBoundary) return false;
       this.setMeta(`head:recovery:${attempt.inputId}`, JSON.stringify(attempt));
@@ -1518,7 +1359,7 @@ export class Store implements StorePort {
   commitHeadRecovery(expected: HeadRecoveryAttempt, decided: HeadRecoveryAttempt): boolean {
     return this.db.transaction(() => {
       const input = this.input(expected.inputId);
-      if (this.getMeta("head:recovery-active") !== expected.inputId
+      if (isRetiredScopeInput(expected.inputId) || this.getMeta("head:recovery-active") !== expected.inputId
         || this.getMeta(`head:recovery:${expected.inputId}`) !== JSON.stringify(expected)
         || decided.decision?.decision === "release" && this.getMeta("head:stop-boundary") !== expected.stopBoundary
         || input?.target !== "main" || input.state !== "uncertain"
@@ -1575,6 +1416,7 @@ export class Store implements StorePort {
   }
 
   queueOutput(output: Omit<OutputRecord, "state" | "remoteId" | "error" | "editOf">): boolean {
+    if (isRetiredScopeInput(output.id) || isRetiredScopeInput(output.sourceId)) return false;
     if (output.status && (output.route.platform !== "discord" || output.picker || output.resultAttachment)) {
       throw new Error(`Status delivery requires a plain Discord message: ${output.id}`);
     }
@@ -1701,6 +1543,66 @@ export class Store implements StorePort {
       EXISTS (SELECT 1 FROM outputs WHERE state IN ('pending','sending','uncertain'))`).get() !== null;
   }
 
+  private hasLegacyScopeReviews(): boolean {
+    return this.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'scope_reviews'").get() !== null;
+  }
+
+  private retireScopeOutputs(): void {
+    const scope = `(${retiredScopeId("id")} OR ${retiredScopeId("source_id")})`;
+    this.db.run(`UPDATE outputs SET state = 'uncertain',
+      error = 'Retired scope workflow; delivery interrupted before a durable receipt'
+      WHERE state = 'sending' AND ${scope}`);
+    const pending = this.db.query<OutputRow, []>(`SELECT * FROM outputs WHERE state = 'pending' AND ${scope}`).all();
+    const hasReviews = pending.length > 0 && this.hasLegacyScopeReviews();
+    const fail = this.db.query(`UPDATE outputs SET state = 'failed',
+      error = 'Retired scope workflow; no delivery attempted' WHERE id = ?`);
+    for (const row of pending) {
+      if (!hasReviews || !this.isSettledLegacyScopeAnswer(toOutput(row))) fail.run(row.id);
+    }
+  }
+
+  private isSettledLegacyScopeAnswer(output: OutputRecord): boolean {
+    // The old settlement transaction closed the review, queued the final
+    // answer using source_id, and marked the synthetic admission done.
+    if (!output.id.endsWith(":answer")) return false;
+    const resultInputId = output.id.slice(0, -":answer".length);
+    const review = this.db.query<{
+      id: string; correction_id: string; handoff_id: string; lane_id: string; generation: number; request_id: string;
+    }, [string, string]>(`SELECT id, correction_id, handoff_id, lane_id, generation, request_id
+      FROM scope_reviews WHERE state = 'closed' AND correction_requested = 0 AND source_id = ?1
+        AND (?2 = id OR ?2 = correction_id)`).get(output.sourceId, resultInputId);
+    if (!review || review.id !== `scope-review:${review.handoff_id}`
+      || review.handoff_id !== `handoff:${output.sourceId}:${review.lane_id}`
+      || review.correction_id !== `handoff:${review.id}:${review.lane_id}`
+      || output.remoteId !== null || output.editOf || output.status || output.picker || output.resultAttachment
+      || !output.text.trim()) return false;
+    const source = this.input(output.sourceId);
+    const handoff = this.input(review.handoff_id);
+    const reviewed = this.input(review.id);
+    if (!source?.messageId || source.target !== null || source.state !== "done"
+      || isRetiredScopeInput(source.id) || this.getMeta(`user-source:${source.id}`) !== "true"
+      || this.getMeta(`topic-owner:${source.id}`) !== review.lane_id
+      || handoff?.target !== review.lane_id || handoff.state !== "done"
+      || !handoff.requestId || handoff.requestId !== review.request_id || handoff.generation !== review.generation
+      || this.getMeta(`handoff-source:${handoff.id}`) !== source.id
+      || reviewed?.target !== "main" || reviewed.state !== "done" || !reviewed.requestId || reviewed.generation === null
+      || this.getMeta(`activity-source:${reviewed.id}`) !== source.id) return false;
+    const route = routeKey(source.route);
+    if (routeKey(handoff.route) !== route || routeKey(reviewed.route) !== route || routeKey(output.route) !== route) return false;
+    if (resultInputId === review.correction_id) {
+      const correction = this.input(review.correction_id);
+      if (correction?.target !== review.lane_id || correction.state !== "done" || !correction.requestId
+        || correction.generation !== review.generation || routeKey(correction.route) !== route
+        || this.getMeta(`handoff-source:${correction.id}`) !== reviewed.id
+        || this.getMeta(`report-approval-source:${reviewed.id}`) !== source.id) return false;
+    } else if (this.input(review.correction_id)) {
+      return false; // The old review did not queue an answer when it granted a correction.
+    }
+    return source.route.platform === "discord"
+      ? output.replyTo?.messageId === source.messageId && routeKey(output.replyTo.route) === physicalRouteKey(source.route)
+      : output.replyTo === undefined;
+  }
+
   /**
    * A Discord status update edits the stream's message only after that message's
    * creation was confirmed. The edit target is persisted with the claim, so a
@@ -1715,6 +1617,15 @@ export class Store implements StorePort {
       }
       const output = this.output(id);
       if (output?.state !== "pending") return false;
+      if (isRetiredScopeInput(output.id) || isRetiredScopeInput(output.sourceId)) {
+        // Only the existing immutable answer can be sent. Do not consult live
+        // lane/HEAD ownership or mutate its historical reply/edit destination.
+        if (this.hasLegacyScopeReviews() && this.isSettledLegacyScopeAnswer(output)) {
+          return this.db.query("UPDATE outputs SET state = 'sending' WHERE id = ? AND state = 'pending'").run(id).changes === 1;
+        }
+        this.db.query("UPDATE outputs SET state = 'failed', error = 'Retired scope workflow; no delivery attempted' WHERE id = ?").run(id);
+        return false;
+      }
       if (this.laneRecoveryObsolete(output.sourceId)) {
         this.suppressLaneReport(output.sourceId, "Lane recovery report no longer has current owner authority");
         return false;
@@ -1742,8 +1653,14 @@ export class Store implements StorePort {
       if (output.resultAttachment && state === "pending") {
         throw new Error(`A result attachment is never retried: ${id}`);
       }
+      const retired = isRetiredScopeInput(output.id) || isRetiredScopeInput(output.sourceId);
+      if (state === "pending" && retired) {
+        throw new Error(`Retired scope workflow output is never retried: ${id}`);
+      }
       const retry = state === "pending" && (output.state === "uncertain" || output.state === "failed");
-      const reconcile = output.state === "uncertain" && state === "sent";
+      // A definitively rejected retired send releases its hold, never its retry fence.
+      const reconcile = output.state === "uncertain" && (state === "sent"
+        || (state === "failed" && retired && remoteId === undefined && output.remoteId === null));
       if (output.state !== "sending" && !retry && !reconcile) {
         throw new Error(`Invalid output transition ${output.state} -> ${state}: ${id}`);
       }
@@ -1866,10 +1783,6 @@ export class Store implements StorePort {
     return this.db.transaction(() => {
       const lane = this.lane(id);
       if (!lane || lane.generation !== generation) return false;
-      if ((patch.workState !== undefined && patch.workState !== lane.workState)
-        || (patch.sessionId !== undefined && patch.sessionId !== lane.sessionId)) {
-        this.setMeta(`scope-review-lane-revision:${id}`, String(BigInt(this.scopeLaneRevision(id)) + 1n));
-      }
       // Explicitly copy the contract whitelist; runtime callers cannot change identity.
       for (const key of ["workState", "runtimeState", "sessionId", "pid", "lastActivityAt", "result"] as const) {
         if (patch[key] !== undefined) Object.assign(lane, { [key]: patch[key] });
@@ -2023,31 +1936,17 @@ export class Store implements StorePort {
       }
       if (ownerInputId) {
         const owner = this.input(ownerInputId);
-        if (owner?.target !== approval.target || owner.generation !== approval.generation)
+        if (owner?.target !== approval.target || owner.generation !== approval.generation || isRetiredScopeInput(owner.id))
           throw new Error(`Approval does not match its topic source: ${approval.id}`);
         const reportSource = this.reportApprovalSource(owner.id);
-        if (owner.id.startsWith(SCOPE_REVIEW_PREFIX)) {
-          const scope = this.scopeReview(owner.id);
-          if (approval.target !== "main" || owner.state !== "submitted" || !scope
-            || routeKey(scope.original.route) !== routeKey(approval.route))
-            throw new ScopeReviewError("Approval does not match the active HEAD scope review");
-          this.setMeta(`scope-head-approval-input:${approval.id}`, owner.id);
-        } else if (reportSource) {
+        if (reportSource) {
           if (routeKey(reportSource.route) !== routeKey(approval.route))
             throw new Error(`Approval does not match its original report source: ${approval.id}`);
-          if (owner.id.startsWith(SCOPE_CORRECTION_PREFIX)) {
-            this.setMeta(`topic-approval:${approval.id}`, reportSource.id);
-            this.setMeta(`scope-correction-approval-input:${approval.id}`, owner.id);
-          }
         } else {
           const topic = this.topicDelivery(owner.id);
           if (!topic || routeKey(topic.route) !== routeKey(approval.route))
             throw new Error(`Approval does not match its topic source: ${approval.id}`);
           this.setMeta(`topic-approval:${approval.id}`, topic.source.id);
-          if (owner.state === "submitted" && owner.requestId && owner.id === `handoff:${topic.source.id}:${approval.target}`
-            && scopeReviewApproval(approval.request)) {
-            this.setMeta(`scope-review-approval-input:${approval.id}`, owner.id);
-          }
         }
       } else this.checkTarget(approval.target, approval.route);
       const lane = this.lane(approval.target);
@@ -2069,35 +1968,108 @@ export class Store implements StorePort {
       AND (?1 IS NULL OR target = ?1) ORDER BY sequence`).all(target ?? null) as ApprovalRow[]).map(toApproval);
   }
 
+  isNativeApprovalHeld(owner: {
+    readonly target: string; readonly generation: number; readonly sessionId: string;
+    readonly input?: { readonly id: string; readonly sessionFile: string };
+  }, approvalId: string): boolean {
+    if (this.getMeta(`native-approval-held:${approvalId}`) !== null
+      || this.getMeta(`scope-cancel:${owner.sessionId}:${approvalId}`) !== null
+      || this.getMeta(`retired-scope-dialog:${owner.sessionId}:${approvalId}`) !== null) return true;
+    // A stock UI ID does not identify the original prompt, and resolving the
+    // ledger receipt does not close native UI. Only the current later native
+    // admission can own a new dialog, not a completed turn or a stop receipt.
+    return this.db.query(`SELECT 1 FROM inputs AS retired
+      LEFT JOIN metadata AS previous ON previous.key = ?5 || retired.id
+      LEFT JOIN metadata AS head ON head.key = 'retired-scope-head-session:' || retired.generation AND retired.target = 'main'
+      WHERE retired.target = ?1 AND retired.generation = ?2 AND retired.request_id IS NOT NULL
+        AND retired.state IN ('uncertain','cancelled') AND ${retiredScopeId("retired.id")}
+        AND COALESCE(CASE WHEN json_valid(previous.value) THEN json_extract(previous.value, '$.sessionId') END,
+          head.value, ?4) = ?4
+        AND NOT EXISTS (SELECT 1 FROM approvals WHERE id = ?3)
+        AND NOT EXISTS (
+          SELECT 1 FROM inputs AS newer
+          JOIN metadata AS native ON native.key IN (?5 || newer.id, 'native-goal-resume-owner:' || newer.id)
+            AND json_valid(native.value)
+          WHERE newer.target = retired.target AND newer.generation = retired.generation
+            AND newer.id = ?6 AND newer.sequence > retired.sequence AND newer.state = 'submitted'
+            AND NOT ${retiredScopeId("newer.id")}
+            AND json_extract(native.value, '$.requestId') = newer.request_id
+            AND json_extract(native.value, '$.generation') = newer.generation
+            AND json_extract(native.value, '$.sessionId') = ?4
+            AND json_extract(native.value, '$.sessionFile') = ?7
+            AND json_type(native.value, '$.cursor') IN ('text','null')
+        ) LIMIT 1`).get(owner.target, owner.generation, approvalId, owner.sessionId,
+      owner.target === "main" ? "head-native-owner:" : "lane-observation-owner:",
+      owner.input?.id ?? null, owner.input?.sessionFile ?? null) !== null;
+  }
+
+  retiredApprovalDismissals(): string[] {
+    return this.db.query<{ id: string }, []>(`SELECT a.id FROM approvals AS a
+      JOIN metadata AS dismissal ON dismissal.key = 'retired-approval-dismissal:' || a.id
+      WHERE dismissal.value IN ('pending','attempted') ORDER BY a.sequence`).all().map(row => row.id);
+  }
+
+  claimRetiredApprovalDismissal(id: string): Approval | null {
+    return this.db.transaction(() => {
+      const dismissal = `retired-approval-dismissal:${id}`;
+      const phase = this.getMeta(dismissal);
+      const approval = this.approval(id);
+      if (!approval || (phase !== "pending" && phase !== "attempted")) return null;
+      // A previous controller may have lost its local receipt after the
+      // Gateway recorded the remote one. Never use another card's effect or
+      // infer a remote message from an attempted send.
+      let remoteId = approval.remoteId;
+      let uncertainDismissal = false;
+      const dismissals = new Set<string>();
+      if (this.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'gateway_effects'").get()) {
+        const effects = this.db.query<{ operation: string; arguments: string; result: string | null }, [string]>(`
+          SELECT operation, arguments, result FROM gateway_effects
+          WHERE operation IN ('showApproval','dismissApproval') AND json_valid(arguments)
+            AND json_extract(arguments, '$[0].id') = ?`).all(id);
+        const messages = new Set(remoteId ? [remoteId] : []);
+        for (const effect of effects) {
+          const [card] = JSON.parse(effect.arguments) as Approval[];
+          if (!card || !isDeepStrictEqual(approvalIdentity(card), approvalIdentity(approval))) continue;
+          const result = effect.result === null ? null : JSON.parse(effect.result) as
+            { ok?: boolean; certainty?: string; value?: unknown };
+          if (effect.operation === "showApproval") {
+            if (result?.ok === true && typeof result.value === "string" && result.value) messages.add(result.value);
+          } else if (result?.ok === true && card.remoteId) {
+            dismissals.add(card.remoteId);
+          } else if (result?.certainty !== "rejected") {
+            uncertainDismissal = true;
+          }
+        }
+        if (messages.size !== 1) return null;
+        remoteId = messages.values().next().value ?? null;
+      }
+      if (!remoteId) return null;
+      if (dismissals.has(remoteId)) {
+        this.setMeta(dismissal, "complete");
+        return null;
+      }
+      if (phase === "attempted" || uncertainDismissal || dismissals.size) return null;
+      this.setApprovalMessage(id, remoteId);
+      this.setMeta(dismissal, "attempted");
+      return { ...approval, remoteId };
+    }).immediate();
+  }
+
+  finishRetiredApprovalDismissal(id: string): void {
+    this.db.query("UPDATE metadata SET value = 'complete' WHERE key = ? AND value = 'attempted'")
+      .run(`retired-approval-dismissal:${id}`);
+  }
+
   resolveApproval(id: string, generation: number, state: "answered" | "cancelled", resolution?: ApprovalResolution): boolean {
     return this.db.transaction(() => {
       const approval = this.approval(id);
       if (!approval || approval.state !== "pending" || approval.generation !== generation) return false;
       const lane = this.lane(approval.target);
-      if (state === "answered" && lane && (lane.generation !== generation || lane.workState !== "open")) return false;
-      const correction = this.getMeta(`scope-correction-approval-input:${approval.id}`);
-      const headReview = this.getMeta(`scope-head-approval-input:${approval.id}`);
-      // The Gateway can durably admit a newer source on another connection
-      // after the controller's native readback but before this claim.
-      if (state === "answered" && (correction && !this.reportApprovalSource(correction)
-        || headReview && !this.scopeReview(headReview))) {
-        const response = resolution?.response;
-        const request = approval.request;
-        const denied = isDeepStrictEqual(response, { cancelled: true })
-          || request.method === "confirm" && isDeepStrictEqual(response, { confirmed: false })
-          || request.method === "select" && Array.isArray(request.options) && request.options.includes("Deny")
-            && isDeepStrictEqual(response, { value: "Deny" });
-        if (!denied || resolution?.headSelection) return false;
-      }
+      if (state === "answered" && (this.getMeta(`native-approval-held:${id}`) !== null
+        || lane && (lane.generation !== generation || lane.workState !== "open"))) return false;
       resolveDecision(this, approval, state, resolution);
-      const resolved = this.db.query("UPDATE approvals SET state = ? WHERE id = ? AND generation = ? AND state = 'pending'")
+      return this.db.query("UPDATE approvals SET state = ? WHERE id = ? AND generation = ? AND state = 'pending'")
         .run(state, id, generation).changes === 1;
-      if (resolved && state === "answered" && resolution?.headSelection === undefined
-        && resolution?.response && scopeReviewApproval(approval.request, resolution.response)) {
-        const inputId = this.getMeta(`scope-review-approval-input:${id}`);
-        if (inputId) this.setMeta(`scope-review-approved-input:${id}`, inputId);
-      }
-      return resolved;
     }).immediate();
   }
 
@@ -2112,8 +2084,32 @@ export class Store implements StorePort {
   }
 
   recoverDeliveries(): void {
-    this.db.query("UPDATE outputs SET state = 'uncertain', error = ? WHERE state = 'sending'")
-      .run("Delivery interrupted before a durable receipt; reconcile before retrying.");
+    this.db.transaction(() => {
+      this.db.query("UPDATE outputs SET state = 'uncertain', error = ? WHERE state = 'sending'")
+        .run("Delivery interrupted before a durable receipt; reconcile before retrying.");
+      if (!this.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'gateway_effects'").get()) return;
+      const retired = this.db.query<OutputRow, []>(`SELECT * FROM outputs WHERE state = 'uncertain' AND remote_id IS NULL
+        AND (${retiredScopeId("id")} OR ${retiredScopeId("source_id")})`).all();
+      const attempts = this.db.query<{ output: string; rejected: number }, [string]>(`SELECT
+        json_extract(arguments, '$[0]') AS output,
+        CASE WHEN state = 'complete' AND json_type(result, '$.ok') = 'false'
+          AND json_extract(result, '$.certainty') = 'rejected' THEN 1 ELSE 0 END AS rejected
+        FROM gateway_effects WHERE operation = 'send' AND json_extract(arguments, '$[0].id') = ? LIMIT 2`);
+      for (const row of retired) {
+        const recorded = attempts.all(row.id);
+        const receipt = recorded.length === 1 ? recorded[0] : undefined;
+        if (!receipt?.rejected) continue;
+        const saved: unknown = JSON.parse(receipt.output);
+        if (!saved || typeof saved !== "object" || !("error" in saved)) continue;
+        const { error: _attemptError, ...attempt } = saved;
+        const { error: _storedError, ...output } = toOutput(row);
+        // Legacy sends used random Gateway effect IDs. Reconcile only one
+        // terminal rejection with the same immutable send arguments.
+        if (isDeepStrictEqual(attempt, { ...output, state: "sending" })) {
+          this.finishOutput(row.id, "failed", undefined, "Gateway recorded definitive non-delivery");
+        }
+      }
+    }).immediate();
   }
 
   getMeta(key: string): string | null {

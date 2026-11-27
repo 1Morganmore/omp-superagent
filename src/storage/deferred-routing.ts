@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { deferredRecoveryCandidate, physicalRouteKey, routingConversation, type DeferredRoutingPort, type Inbound, type Lane, type Route } from "../contracts";
+import { deferredRecoveryCandidate, physicalRouteKey, routingConversation, type DeferredRoutingPort, type Inbound, type Lane } from "../contracts";
 
 const LEGACY_QUEUE = "intake:deferred-routing";
 const SCHEMA = `
@@ -130,12 +130,6 @@ export class DeferredRoutingQueue implements DeferredRoutingPort {
 
   remove(id: string): void {
     this.db.query("DELETE FROM deferred_routing WHERE id = ?").run(id);
-  }
-
-  hasOnRoute(route: Route, exceptId: string): boolean {
-    return this.db.query(`
-      SELECT 1 FROM deferred_routing WHERE physical_route = ? AND id <> ? LIMIT 1
-    `).get(physicalRouteKey(route), exceptId) !== null;
   }
 
   choices(input: Pick<Inbound, "id" | "route" | "receivedAt">, deadline: number): Iterable<DeferredChoiceRow> {

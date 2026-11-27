@@ -96,6 +96,26 @@ function storedOutput(path: string, id: string): { state: string; remote_id: str
 }
 
 describe("durable coordination store", () => {
+  test("a duplicate goal resume cannot reopen a later pause or replace the first native receipt", () => {
+    const { store } = fixture();
+    const lane = admitLane(store);
+    const source = inbound("goal-control", lane.route);
+    store.receive(source, "main");
+    store.settle(source.id, "done");
+    const owner = { requestId: "first-resume", generation: lane.generation, sessionId: "goal-session",
+      sessionFile: lane.sessionFile, cursor: "paused-entry", goalId: "goal" };
+    store.updateLane(lane.id, lane.generation, { workState: "paused", sessionId: owner.sessionId });
+    const input = { ...source, id: `resume:${source.id}:${lane.id}` };
+    expect(store.submitGoalResume(input, lane.id, source.id, owner, "paused")).toMatchObject({ state: "submitted", requestId: owner.requestId });
+    expect(store.lane(lane.id)?.workState).toBe("open");
+    store.settle(input.id, "cancelled");
+    store.updateLane(lane.id, lane.generation, { workState: "paused", runtimeState: "idle" });
+    expect(() => store.submitGoalResume(input, lane.id, source.id, { ...owner, requestId: "second-resume" }, "paused")).toThrow();
+    expect(store.lane(lane.id)).toMatchObject({ workState: "paused", runtimeState: "idle" });
+    expect(store.input(input.id)).toMatchObject({ state: "cancelled", requestId: owner.requestId });
+    expect(JSON.parse(store.getMeta(`native-goal-resume-owner:${input.id}`)!)).toEqual(owner);
+  });
+
   test("legacy deferred routing migrates once in receipt order with exact inputs and conversation scope", () => {
     const first = {
       ...inbound("old-first", route({ topicId: "logical-topic" })), receivedAt: 300,

@@ -13,7 +13,7 @@ import type { GroupReply } from "../group/group-policy";
 import type { DiscordPresenceStatus, MessengerPresenceRequest } from "../contracts";
 
 export interface GatewayHeadMessenger extends Messenger {
-  assertRoute(route: Route, purpose?: "history"): Promise<void>;
+  assertRoute(route: Route, purpose?: "history" | "bound-work"): Promise<void>;
   requestRestart(request: GatewayRestartRequest): Promise<GatewayRestartRecord>;
 }
 
@@ -215,8 +215,8 @@ class GatewayMessenger implements GatewayHeadMessenger {
       resultAttachment: "data" in payload ? { name: payload.name, legacy: true } : payload,
     }] });
   }
-  assertRoute(route: Route, purpose?: "history"): Promise<void> {
-    return this.call(purpose === "history" ? "/history/route" : "/route", { route }, AbortSignal.timeout(1000));
+  assertRoute(route: Route, purpose?: "history" | "bound-work"): Promise<void> {
+    return this.call(purpose === "history" || purpose === "bound-work" ? "/history/route" : "/route", { route }, AbortSignal.timeout(1000));
   }
   setActivity(message: MessageReference, activity: MessageActivity): Promise<void> {
     return this.effect("setActivity", [{ route: message.route, messageId: message.messageId }, activity]);

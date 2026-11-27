@@ -1,4 +1,4 @@
-import { WORKFLOW_NAMES, type InputRecord, type WorkflowActivation, type WorkflowChoice, type WorkflowName } from "../contracts";
+import { WORKFLOW_NAMES, type Inbound, type InputRecord, type WorkflowActivation, type WorkflowChoice, type WorkflowName } from "../contracts";
 
 // Public commands and leading delimiters match omp-superkit ulw.ts at c11a6e4.
 // Skill paths and persisted native keys are deliberately not public selectors.
@@ -47,11 +47,52 @@ function invocation(text: string): { name: WorkflowName; length: number; legacy?
   return { name: "super", length: prefix + plain[0].length, legacy: true };
 }
 
-export function leadingWorkflow(text: string): WorkflowName | null {
+function leadingInvocation(text: string) {
   const match = invocation(text);
   // Upstream masks URLs before reading its SUPER/ULW selectors. Do not
   // accidentally admit one just because a real command may use a colon.
-  return match && (match.name === "jevify" || !leadingUri.test(text)) ? match.name : null;
+  return match && (match.name === "jevify" || !leadingUri.test(text)) ? match : null;
+}
+
+export function leadingWorkflow(text: string): WorkflowName | null {
+  return leadingInvocation(text)?.name ?? null;
+}
+
+/** Telegram's entity view can corroborate a written selector, but cannot supply one. */
+export function ownerWorkflowRequest(input: Inbound, task: string): {
+  readonly name: WorkflowName | null;
+  readonly projection?: { readonly text: string; readonly selectorChanged: boolean };
+} {
+  if (input.route.platform !== "telegram" || input.pickerSelection || input.routingText === input.text)
+    return { name: leadingWorkflow(task) };
+
+  // Remove only the wrapper parsed from the genuine request. Parsing a new
+  // /head, /new or cwd header exposed by redaction could also expose a selector.
+  const written = leadingInvocation(task);
+  const prefix = input.text.slice(0, input.text.length - task.length);
+  const view = input.routingText ?? "";
+  const aligned = view.startsWith(prefix);
+  const body = aligned ? view.slice(prefix.length) : view;
+  const visible = leadingInvocation(body);
+  const selector = task.slice(0, written?.length ?? 0);
+  const exact = aligned && written && visible && visible.name === written.name
+    && body.slice(0, visible.length) === selector;
+  if (exact) {
+    // The adapter attests the first slash token, but prose (or a selector
+    // after a wrapper) can be ambiguous if redaction exposed a repeated word.
+    // CR/LF survive redaction, so only the rest of the same line can stand in for it.
+    const directSlash = !prefix && input.telegramProtectedCommand === false && /^\/\S+$/u.test(selector.trimStart());
+    const finalWord = /\S+$/u.exec(selector)?.[0];
+    const sameLine = /^[^\r\n]*/u.exec(task.slice(selector.length))?.[0];
+    if (directSlash || !finalWord || !sameLine?.includes(finalWord)) {
+      return { name: written.name, projection: { text: body, selectorChanged: false } };
+    }
+  }
+  return {
+    name: null,
+    // In particular, a revealed jevify must not reach the native prose matcher.
+    projection: { text: visible ? body.slice(visible.length) : body, selectorChanged: Boolean(written || visible) },
+  };
 }
 
 /** Read old coordination identities without making aliases valid manager inputs. */

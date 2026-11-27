@@ -48,6 +48,10 @@ class RecordingMessenger implements Messenger {
   readonly creations: Array<{ route: Route; title: string; sourceMessageId?: string; destination: Route }> = [];
   constructor(private readonly snapshot: () => { sequence: number; inputStates: Record<string, string> }) {}
   async start(handlers: Handlers): Promise<void> { this.handlers = handlers; }
+  assertRoute(route: Route): void {
+    if (!this.handlers || route.platform !== "discord" || route.accountId !== "2" || route.authorityId !== "1")
+      throw new Error("Unexpected native steering fixture route");
+  }
   async deliver(input: Inbound): Promise<void> {
     if (!this.handlers) throw new Error("Recording Messenger is not started");
     await this.handlers.message(input);

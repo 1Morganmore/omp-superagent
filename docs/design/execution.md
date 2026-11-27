@@ -228,58 +228,42 @@ pending native dialog. Omitting `to` keeps the default: a topic-owned question
 goes directly to its authorized topic; a manager-handoff question goes to HEAD.
 HEAD answers with an original option or escalates the same card on its original
 route via `lane_review_decision`. Do not use a decision to change scope or
-grant native approvals. If a standalone bound-topic owner message explicitly
-supersedes the assignment, use the isolated scope-review procedure below.
-An explicit HEAD-directed question on the resulting corrective assignment is
-cancelled privately, not rerouted to the owner.
+grant native approvals. A direct bound-topic owner instruction can revise
+the assignment without a HEAD decision.
 HEAD uses `lane_message` for a specific authorized follow-up; neither an
 observation nor a decision supplies fresh dispatch authority. Do not poll or
 schedule a model just to check for updates.
 
-### Bound-topic assignment scope review
+### Direct owner changes to bound-topic work
 
-An existing assignment can conflict with a later explicit owner correction.
-Ordinary bound-topic requests and replies still stay in the lane. For a
-standalone original owner message in the active bound topic, the root lane
-may call `lane_report({status:"scope_review", sourceId})` **directly**, using
-the current original source ID. The arguments cannot contain a target,
-owner-text copy, or lane-authored explanation. A scope review is neither a
-progress report nor a manager handoff. It has only an identity receipt from
-the native tool result and appends no custom progress event.
+An authenticated owner's direct, explicit work instruction in a lane's own
+bound topic supersedes conflicting task scope or acceptance in an earlier
+HEAD brief. The lane applies the change inside its selected workspace when the
+native session consumes the input, whether as a new ordinary prompt or as an
+eligible steer. Apply only what the owner changed. A binding by itself does not
+authorize work; quoted or forwarded content, attachments, historical excerpts,
+child reports and sibling assignments do not acquire the owner's authority.
+The original brief and acceptance remain available as prior context even if the
+opening prompt never ran. They are not a veto over the owner's later instruction.
 
-The controller requires a matched native execution start and successful end
-from the exact current root lane session, file, request and generation. It
-rejects eval, `xd://`, custom-only or replayed receipts and fails closed on
-steering ambiguity. It rechecks the authenticated original owner input and
-its current topic binding independently. Both the review and corrective
-prompt require a fresh Gateway check of the original messenger account; a
-stored allowlist alone is insufficient after reconnect. A newer owner
-message in the same topic takes precedence even if catch-up admitted the
-older physical message last. Review requires exact trimmed owner text with
-no detected credentials or excluded material, including quotes spanning
-lines. Ineligible text stays in the bound lane; its
-redacted or projected remainder cannot authorize a review. HEAD compares
-the eligible text against the existing assignment and receives no lane
-prose, quote, or attachment as part of the review.
+The [ordinary topic routing rules](messaging.md#topic-routing-and-controls)
+still apply. Keep the original source, session and delivery identity; steering
+does not change an existing manager handoff's reporting mode. There is no
+separate HEAD approval, scope-review turn or replayed handoff. HEAD can still
+coordinate shared edit ownership, dependencies and integration, and answer or
+escalate a genuine tracked decision on its original route.
+If a direct instruction joined a manager run, its decision keeps the opener's
+card and destination. HEAD receives the question, not private steer text or a
+claim that the original brief still represents current permission.
 
-If the original text explicitly supersedes the conflicting scope, the only
-allowed tool is direct `lane_scope_accept`, which takes only the review ID.
-The controller resolves the exact verified owner text and the same lane from
-that ID; there is no workflow or destination override. It may dispatch one fresh, deduplicated
-corrective input only after the original lane run and HEAD review both
-settle successfully. The correction applies only to that assignment, not to
-tool availability, native approvals, operator settings, or other work.
-OMP carries restrictive `lane_message` approval settings over to the new
-tool unless the operator configures an explicit policy for `lane_scope_accept`.
-Disabling `lane_message` in the native tool selection also disables correction.
-A newer owner message invalidates affirmative consent on a pending HEAD review
-card; an exact stale dialog can only be declined or cancelled, not granted.
-A correction cannot replay denied or uncertain effects. The lane delivers the corrected
-outcome on the original thread; HEAD does not echo the request or add a
-second reply. If the correction is unsupported or unclear, HEAD gives one
-bounded reason or clarification there, without dispatching work. A failed or
-incomplete review reports that the correction was not applied, without
-attributing the failure to the owner's authority.
+The instruction does not move the lane to another workspace or checkout,
+take over sibling work, change operator settings, bypass tool restrictions or
+native approvals, resume paused work, or clear an uncertain effect. It does
+not undo completed work or authorize repeating a denied or uncertain action.
+Old pending records from the retired review path are not a source of work or
+permission and must not dispatch or replay on upgrade. This does not discard a
+verified completed result still waiting for its first delivery on the original
+route. An interrupted send is uncertain, not a reason to send again.
 
 ### Failed lane requests
 

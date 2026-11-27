@@ -57,8 +57,10 @@ export function deferredRecoveryCandidate(text: string) {
   return { kind: "lane-stop", laneId: argument } as const;
 }
 
-/** Internal HEAD review ID prefix; authority lives in the current store binding. */
-export const SCOPE_REVIEW_PREFIX = "scope-review:";
+/** Reserved legacy synthetic identities; never a source of work or authority. */
+export function isRetiredScopeInput(id: string): boolean {
+  return id.startsWith("scope-review:") || id.startsWith("handoff:scope-review:");
+}
 
 /** Exact successor generation reserved when a submitted card is authorized to restore its original lane session. */
 export const laneModelPickerRestoreKey = (sourceId: string) => `lane-model:picker-restore:${sourceId}`;
@@ -322,21 +324,7 @@ export type SettlementOutput = Pick<OutputRecord, "id" | "text" | "picker"> & {
   readonly discordHeadFollowups?: readonly string[];
   /** Controller-only lane failure routing, never derived from output text. */
   readonly laneFailure?: "quota" | "recover";
-  /** Controller-verified clean native settlement of a solo scope-review admission. */
-  readonly scopeReviewEligible?: boolean;
 };
-
-export interface ScopeReview {
-  readonly lane: Lane;
-  readonly original: InputRecord;
-  readonly handoff: InputRecord;
-}
-
-/** Controller-proven successful native report, with its exact own approval if one was required. */
-export interface ScopeReviewNativeProof {
-  readonly toolCallId: string;
-  readonly approvalId?: string;
-}
 
 export interface LaneRecoveryScope {
   readonly lane: Lane;
@@ -426,12 +414,6 @@ export interface StorePort {
   ownerSource(id: string): InputRecord | null;
   /** Revalidate a report's exact failed admission, actionable owner and operator selection. */
   laneRecoveryScope(reportId: string): LaneRecoveryScope | null;
-  /** Stage a verified direct native scope-review signal; does not enqueue a HEAD input. */
-  recordScopeReview(inputId: string, generation: number, sessionId: string, sourceId: string, proof: ScopeReviewNativeProof): boolean;
-  /** Verify the current owner request, solo admission, and lane binding for review or granted dispatch. */
-  scopeReview(reviewId: string): ScopeReview | null;
-  /** Record one HEAD intent; only eligible native settlement can admit corrective work. */
-  requestScopeCorrection(reviewId: string): string;
   /** Original parent route for a redirected report or a handoff derived from that report. */
   reportApprovalSource(id: string): InputRecord | null;
   /** Manager handoff's verified reply route, pinned for a parent-origin thread follow-up or a joined bound reply. */
@@ -450,8 +432,6 @@ export interface StorePort {
   latestLaneRun(target: string): InputRecord | null;
   /** A successful lane run still has an unresolved final report or delivery. */
   hasPendingLaneResult(target: string): boolean;
-  /** A current scope review or granted correction still needs this lane generation. */
-  hasPendingScopeReview(target: string): boolean;
   hasPendingLanePlacement(target: string): boolean;
   /** Check both transfer endpoints without reading their queued messages or private dialog contents. */
   hasWorkerMemoryHold(target: string): boolean;
@@ -466,6 +446,8 @@ export interface StorePort {
   kickoffHold(target: string): KickoffHold | null;
   /** The first authorized revision on the physical route, even after settlement. */
   firstAdmittedMessage(route: Route, messageId: string): InputRecord | null;
+  /** A physically later owner message (or revision of this original) was already admitted in this exact topic. */
+  isLateTopicOriginal(source: InputRecord): boolean;
   /** Exact logical child of a parent reply; unverified evidence must not select a stop target. */
   repliedParentTopic(route: Route, messageId: string): Lane | "unverified" | null;
   /** Workspace evidenced by a placed owner message or a confirmed bot reply on this physical route. */
@@ -484,6 +466,10 @@ export interface StorePort {
   admittedMessageIds(route: Route): Iterable<string>;
   bindInput(id: string, target: string): void;
   submit(id: string, requestId: string, generation: number): boolean;
+  /** Reopen the verified lane and submit its goal resume together, without admitting a prompt. */
+  submitGoalResume(input: Inbound, target: string, sourceId: string, owner: {
+    requestId: string; generation: number; sessionId: string; sessionFile: string; cursor: string | null; goalId?: string;
+  }, priorWorkState?: Lane["workState"]): InputRecord;
   /** Nonterminal native assistant observation; never settles or dispatches its owner. */
   progress(id: string, generation: number, sessionId: string, eventId: string, text: string, editInPlace?: boolean): boolean;
   recordLaneReport(id: string, generation: number, sessionId: string, eventId: string, report: LaneReport, observedAt?: number): boolean;
@@ -522,6 +508,16 @@ export interface StorePort {
   putApproval(approval: Approval, ownerInputId?: string): void;
   approval(id: string): Approval | null;
   approvals(target?: string): Approval[];
+  /** No Messenger card or automatic native response for a retired approval or its unresolved admission. */
+  isNativeApprovalHeld(owner: {
+    readonly target: string; readonly generation: number; readonly sessionId: string;
+    readonly input?: { readonly id: string; readonly sessionFile: string };
+  }, approvalId: string): boolean;
+  /** Retired card identities whose original remote dismissal is not yet confirmed. */
+  retiredApprovalDismissals(): string[];
+  /** Consume the one dismissal attempt only when there is an exact remote card receipt. */
+  claimRetiredApprovalDismissal(id: string): Approval | null;
+  finishRetiredApprovalDismissal(id: string): void;
   resolveApproval(id: string, generation: number, state: "answered" | "cancelled", resolution?: ApprovalResolution): boolean;
   setApprovalMessage(id: string, remoteId: string): void;
   recoverDeliveries(): void;
@@ -614,8 +610,8 @@ export interface Messenger {
   }): Promise<void>;
   send(output: OutputRecord): Promise<string>;
   sendGroup?(reply: GroupReply): Promise<string>;
-  /** Verify the authenticated adapter. History is read-only and may run before intake is acknowledged. */
-  assertRoute?(route: Route, purpose?: "history"): void | Promise<void>;
+  /** Read-only checks for history and already-admitted bound work do not require a drained Gateway queue. */
+  assertRoute?(route: Route, purpose?: "history" | "bound-work"): void | Promise<void>;
   /** Cosmetic own reactions on the original message; never an admission or completion receipt. */
   setActivity?(message: MessageReference, activity: MessageActivity): Promise<void>;
   showApproval(approval: Approval): Promise<string>;

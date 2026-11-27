@@ -88,6 +88,10 @@ class TopicMessenger implements Messenger {
   capabilityError?: Error;
   creationError?: Error;
   beforeCreate?: () => void;
+  assertRoute(destination: Route): void {
+    if (destination.accountId !== (destination.platform === "slack" ? "TTEAM:UBOT" : "2"))
+      throw new Error("Unrecognized fixture account");
+  }
   canCreateThread: Messenger["canCreateThread"] = async route => {
     this.capabilities.push(route);
     if (this.capabilityError) throw this.capabilityError;

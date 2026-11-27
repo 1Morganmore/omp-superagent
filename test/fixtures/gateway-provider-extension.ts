@@ -12,7 +12,7 @@ const provider = "gateway-native";
 const model = "local";
 const managers = [
   "head_recovery", "head_set_model", "cron_create", "lane_models", "lane_init_presets", "lane_set_model", "lane_start",
-  "lane_inspect", "lane_message", "lane_scope_accept", "lane_pause", "lane_resume", "lane_review_decision", "lane_close", "thread_inspect",
+  "lane_inspect", "lane_message", "lane_pause", "lane_resume", "lane_review_decision", "lane_close", "thread_inspect",
   "lane_thread_update", "discord_context", "discord_purpose_list", "discord_purpose_set", "discord_purpose_clear",
   "pr_watch", "pr_watch_list", "decision_list", "decision_inspect", "decision_withdraw",
 ];
@@ -58,7 +58,7 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
       const requestId = envelope?.requestId;
       const bootstrap = text.includes(startup);
       const steering = envelope?.envelope.includes("This is an authorized same-conversation followup to the active request.") ?? false;
-      return requestId || bootstrap ? [{ index, text, requestId, bootstrap, steering }] : [];
+      return requestId || bootstrap ? [{ index, text, requestId, sourceId: envelope?.sourceId, bootstrap, steering }] : [];
     });
     const exchanges = nativeToolExchanges(context.messages);
     const all = nativeToolTurn(pi, context, exchanges);
@@ -78,7 +78,7 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
         && dispatch.result.toolCallId.startsWith(`gateway-native:${requestId}:read:`));
     }) ?? activeUsers.at(-1);
     if (!selected) throw new Error("Unexpected native Gateway model input: no runtime request or startup turn");
-    const { index: userIndex, text, requestId, bootstrap } = selected;
+    const { index: userIndex, text, requestId, sourceId, bootstrap } = selected;
     const callPrefix = `gateway-native:${requestId ?? "bootstrap"}:`;
     const messages = context.messages.slice(userIndex + 1);
     const explicitHeadReview = role === "head" && requestId?.startsWith("lane-decision-review:")
@@ -136,17 +136,6 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     }
     if (!requestId) throw new Error("Ordinary native input requires its durable request identity");
     if (role === "head") {
-      if (requestId.startsWith("scope-review:")) {
-        const lane = /Assignment scope review for lane ("[^"]+")/.exec(text)?.[1];
-        const original = /Authenticated original owner message \(only source of a scope change\): ([^\n]+)/.exec(text)?.[1];
-        if (!lane || !original || !text.includes("Read-only parser inspection.")) throw new Error("Missing original scope review evidence");
-        const schema = context.tools?.find(tool => tool.name === "lane_scope_accept")?.parameters;
-        const properties = schema && "properties" in schema ? schema.properties : undefined;
-        if (!properties || typeof properties !== "object" || Object.keys(properties).join() !== "reviewId")
-          throw new Error("Scope review must advertise a direct tool with only the review ID, not a workflow or dispatch override");
-        if (!called("lane_scope_accept")) return invoke("lane_scope_accept", { reviewId: requestId });
-        return { content: ["Correction requested."] };
-      }
       if (requestId === "240") {
         if (!called("cron_create")) return invoke("cron_create", {
           sourceId: requestId, schedule: "in 1s", prompt: "Return the native scheduled check result in this conversation.",
@@ -242,13 +231,13 @@ export default function gatewayProvider(pi: ExtensionAPI): void {
     }
 
     if (role !== "lane") throw new Error(`Unexpected Gateway native role: ${role}`);
-    if (requestId.startsWith("handoff:scope-review:")) return { content: ["Reviewed correction received on the original lane."] };
-    if (requestId.startsWith("handoff:discord:2:241:original:")) {
-      if (!called("lane_report")) {
-        const signal = invoke("lane_report", { status: "scope_review", sourceId: "discord:2:241:original" });
-        return { content: ["Holding the edit for scope review.", ...signal.content ?? []] };
+    if (requestId === `handoff:discord:2:241:original:${process.env.OMP_SUPERAGENT_LANE}`) {
+      if (sourceId !== "discord:2:241:original" ||
+          !text.includes("Implement the parser change now instead of only inspecting it.")) {
+        throw new Error("The bound lane did not receive the authenticated owner's original instruction");
       }
-      return { content: ["The disputed work has not started."] };
+      if (!called("write")) return invoke("write", { path: "parser-change.txt", content: "Owner-authorized parser change\n" });
+      return { content: ["The original lane implemented the requested parser change."] };
     }
     if (requestId === `handoff:209:${process.env.OMP_SUPERAGENT_LANE}`) {
       if (!called("decision_ask")) return invoke("decision_ask", {
