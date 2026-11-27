@@ -54,6 +54,7 @@ import { HEAD_ROTATION_KEY, HEAD_SESSION_FILE_KEY, MIN_HEAD_IDLE_MS, activeHeadS
   type HeadLifecycleMode, type HeadRotation, type RotationAttestation, type RotationNative, type RotationResident } from "./head-rotation";
 import { selectWorkerPlacement, workerPlacementReady } from "../worker/worker-placement";
 import { DeferredRoutingDrain, type RecoveryControl } from "./deferred-routing";
+import { pullWorkerMemory, verifyMemoryCheckout, workerMemoryStatus, type MemoryDestination } from "./worker-memory";
 import { lookupWorker, remoteLanePaths, workerConnect, workerOpen, workerProbe, workerRef } from "../worker/worker-wire";
 import type { RemotePlacement, WorkerProbe, WorkerRegistration, WorkerSelector } from "../worker/worker-wire";
 import { applySoulUpdate, replyVoiceProfile, soulSourceId, soulUpdateIntent } from "../omp/soul";
@@ -158,6 +159,7 @@ function fastModeStatus({ mode, active }: FastModeState): string {
 
 export interface RuntimeAdapters extends PresetRoleSyncAdapters {
   topicMemory?: Pick<MemoryRuntimeContext, "status" | "search">;
+  workerMemoryDestination?: MemoryDestination;
   connect(path: string): Promise<RuntimeHost>;
   startHost(options: HostOptions): Promise<{ pid: number }>;
   selectWorkerPlacement: typeof selectWorkerPlacement;
@@ -212,6 +214,9 @@ interface Live {
   releasing?: boolean;
   lostDuringRelease?: boolean;
   nextReleaseProbe?: number;
+  memoryWorker?: WorkerRegistration;
+  nextMemoryPull?: number;
+  finalMemoryVersion?: number;
   recovery?: RotationResident;
   goalId?: string;
   observationCursor?: string | null;
@@ -465,6 +470,7 @@ export class Superagent {
   private readonly resultAttachments: ResultAttachments;
   private readonly remoteReconnect = new Map<string, RemoteRetry>();
   private readonly remoteAttaching = new Map<string, Promise<Live>>();
+  private memoryPull?: { readonly live: Live; readonly deadline: number; readonly done: Promise<void>; readonly cancel: AbortController };
   private readonly routingDrain: DeferredRoutingDrain;
 
   constructor(
@@ -2155,7 +2161,13 @@ export class Superagent {
     const operation = (async () => {
       const { registration, probe } = inspected ?? await this.inspectRemote(lane);
       if (!probe.socket) throw new Error(`Lane ${lane.id} has no verified remote socket for generation ${lane.generation}`);
-      return this.attach(lane.id, lane.generation, () => this.adapters.workerConnect(registration, workerRef(lane)), probe);
+      const live = await this.attach(lane.id, lane.generation, () => this.adapters.workerConnect(registration, workerRef(lane)), probe);
+      // Backend initialization can outlive attachment. This records eligibility
+      // to probe; a fresh positive attestation is still required for every page.
+      if (this.config.remoteMemorySync && (probe.memorySyncVersion === 1 || probe.memoryPreparedVersion === 1)
+        && this.store.getMeta(`worker-memory:requested:${lane.id}`) === "1")
+        live.memoryWorker = registration;
+      return live;
     })();
     this.remoteAttaching.set(lane.id, operation);
     try { return await operation; }
@@ -4668,7 +4680,7 @@ export class Superagent {
         }
       }
       if (current.workState !== outcome) this.background(this.syncLaneThreadTitle(lane));
-      if (live) await this.release(live, true);
+      if (live) await this.release(live, "close");
     } finally { this.laneMutations--; }
   }
 
@@ -4710,6 +4722,8 @@ export class Superagent {
       ...lane, state: state ? { ...state, model: actual } : null, stateError,
       queueHolds: this.laneQueueHolds(id),
       observationState: this.observationState(lane, state),
+      ...(lane.remote && this.config.remoteMemorySync && { memorySync: workerMemoryStatus(this.store, id)
+        ?? { status: this.live.get(id)?.memoryWorker ? "waiting-for-idle" : "not-negotiated" } }),
       modelCheck: { expected: lane.model, actual, error: this.modelHolds.get(id) ?? null },
       modelChange: this.modelIntent(id),
       modelApply: this.modelIntent(id, "apply"),
@@ -4768,7 +4782,7 @@ export class Superagent {
       const candidates = [...this.live.values()].filter(host => host.id !== "main" && !host.input && !host.busy)
         .sort((left, right) => left.lastActivity - right.lastActivity);
       let released = false;
-      for (const candidate of candidates) if (await this.release(candidate)) { released = true; break; }
+      for (const candidate of candidates) if (await this.release(candidate, "capacity")) { released = true; break; }
       if (!released) return null;
       if (this.residentHosts().size + Number(this.groups?.running ?? false) >= this.config.maxHosts) return null;
     }
@@ -4851,6 +4865,9 @@ export class Superagent {
       if (restoring) this.store.setMeta(restoreModelKey(lane.id), JSON.stringify({ generation: lane.generation }));
       preflight = false;
       if (!remote) await mkdir(dirname(lane.sessionFile), { recursive: true, mode: 0o700 });
+      const memoryCheckout = remote && !restoring && remote.probe.memoryLaunchVersion === 1
+        && this.config.remoteMemorySync && lane.cwd === this.config.headCwd && this.memoryDestination(lane)
+        ? await verifyMemoryCheckout(lane) : undefined;
       const beforeLaunch = this.requireLane(lane.id);
       if (this.stopped || this.restartFence() || beforeLaunch.generation !== lane.generation
         || (beforeLaunch.workState !== "open" && !modelReadback && !restoringResumed(beforeLaunch.workState))) return null;
@@ -4865,8 +4882,10 @@ export class Superagent {
           : !pendingModelChange && !restoring && lane.model ? { model: laneModelArgument(lane.model) } : {}),
         subagentConcurrency: Math.floor(this.config.maxSubagents / this.config.maxHosts),
       };
+      const memorySync = memoryCheckout?.() && !!this.memoryDestination(beforeLaunch);
+      if (memorySync) this.store.setMeta(`worker-memory:requested:${lane.id}`, "1");
       if (remote) this.store.setMeta(this.remoteOpenKey(lane), "pending");
-      const { pid } = remote ? await this.adapters.workerOpen(remote.registration, workerRef(lane), launch)
+      const { pid } = remote ? await this.adapters.workerOpen(remote.registration, workerRef(lane), { ...launch, ...(memorySync && { memorySync: true }) })
         : await this.adapters.startHost({
           ...launch, command: this.config.command, cwd: lane.cwd, sessionFile: lane.sessionFile,
           ...(isPrReviewLane(this.store, lane.id) ? { prReviewOnly: true } : {}),
@@ -4905,6 +4924,74 @@ export class Superagent {
       .filter(lane => this.mayOwnHost(lane)).map(lane => lane.id)]);
   }
 
+  private memoryDestination(lane: Lane) {
+    const head = this.live.get("main");
+    if (!head || !this.current(head)) return;
+    try { return this.adapters.workerMemoryDestination?.(head.sessionId, this.headSessionFile(), lane.cwd); }
+    catch { return undefined; } // Optional memory capability never blocks worker admission.
+  }
+
+  /** Try one page in the existing pump, after user work gets its dispatch opportunity. */
+  private maintainWorkerMemory(live: Live, evicting: boolean, closing = false): void {
+    const registration = live.memoryWorker;
+    if (!this.config.remoteMemorySync || !registration || this.memoryPull || live.input || live.busy) return;
+    const now = Date.now();
+    if (evicting ? live.finalMemoryVersion === live.nativeVersion : now < (live.nextMemoryPull ?? 0)) return;
+    const lane = this.requireLane(live.id);
+    const remote = lane.remote;
+    const head = this.live.get("main");
+    if (!head || !remote || lane.cwd !== this.config.headCwd) return;
+    const version = live.nativeVersion, idleVersion = live.modelIdleVersion, headVersion = head.nativeVersion;
+    const pause = this.pauseRevisions.get(lane.id);
+    const stop = this.store.getMeta("head:stop-boundary"), operatorStop = this.store.getMeta("gateway:operator-stop");
+    const budgetMs = 4000;
+    const deadline = performance.now() + budgetMs;
+    const cancel = new AbortController();
+    const signal = AbortSignal.any([cancel.signal, this.stopSignal.signal, AbortSignal.timeout(budgetMs)]);
+    const headClear = () => this.current(head) && head.nativeVersion === headVersion && this.ready
+      && !head.input && !head.busy && !head.preparing && !head.finishing && !head.admitted.size
+      && !this.headStopping && !this.headCompaction && !this.restartFence() && !this.restartActive
+      && !this.bootstrapActive && !this.initializationHoldsHead() && !this.headRotationHeld() && !this.headRecoveryActive()
+      && !this.operations.size && !this.modelChanges.size && !this.controls.size
+      && this.store.getMeta("head:stop-boundary") === stop && this.store.getMeta("gateway:operator-stop") === operatorStop;
+    const current = () => !signal.aborted && performance.now() < deadline && this.current(live)
+      && live.nativeVersion === version && live.modelIdleVersion === idleVersion && headClear()
+      && this.pauseRevisions.get(lane.id) === pause && !live.input && !live.admitted.size && !live.preparing
+      && !live.finishing && !live.busy && !live.running && !live.releasing
+      && this.laneMutations === (closing ? 1 : 0) && !this.blocked.has(lane.id) && !this.modelHolds.has(lane.id)
+      && !this.modelIntent(lane.id) && !this.modelIntent(lane.id, "apply") && !this.remoteShutdownPending(lane)
+      && this.store.lane(lane.id)?.workState === (closing ? "completed" : "open")
+      && !this.store.getMeta(`lane-quota-hold:${lane.id}`) && !this.store.hasWorkerMemoryHold(lane.id);
+    if (!current()) return;
+    const last = this.store.latestLaneRun(lane.id);
+    if (!last?.requestId || last.generation !== live.generation || last.state !== "done") return;
+    live.nextMemoryPull = now + 60_000;
+    if (evicting) live.finalMemoryVersion = version;
+    const confirmIdleHead = async () => {
+      const state = await this.state(head);
+      return !state.mutationHeld && this.recoveryIdle(state);
+    };
+    const ownsStatus = () => this.current(head) && this.store.lane(lane.id)?.generation === live.generation;
+    const done = untilAborted(signal, async () => {
+      // Missing native ownership facts are not negative observations. The worker
+      // independently fences its own snapshot against its current journal and work.
+      if (!await confirmIdleHead() || !current()) return;
+      await pullWorkerMemory(this.store, lane, {
+        connection: live.connection, registration, lookup: () => this.adapters.lookupWorker(this.config.stateDir, remote),
+        probe: reg => this.adapters.workerProbe(reg, workerRef(lane), false, signal),
+        destination: () => this.memoryDestination(lane), current, confirmIdleHead,
+        ownsStatus, canIndex: () => ownsStatus() && headClear()
+          && (!this.laneMutations || closing && this.laneMutations === 1 && this.memoryPull?.cancel === cancel)
+          && this.pauseRevisions.get(lane.id) === pause && !this.store.hasWorkerMemoryHold(lane.id),
+      });
+    }).catch(() => {
+      if (current()) this.store.tryWorkerMemoryMeta(`worker-memory:status:${lane.id}`,
+        JSON.stringify({ generation: lane.generation, at: Date.now(), status: "unavailable" }));
+    }).finally(() => { this.memoryPull = undefined; });
+    this.memoryPull = { live, deadline, done, cancel };
+    this.background(done);
+  }
+
   childEnvironment(id: string): Record<string, string> {
     const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
     for (const name of credentialEnvNames(this.config)) delete env[name];
@@ -4919,7 +5006,8 @@ export class Superagent {
     return env;
   }
 
-  private async release(live: Live, explicit = false): Promise<boolean> {
+  private async release(live: Live, reason: "idle" | "capacity" | "close" = "idle"): Promise<boolean> {
+    const explicit = reason === "close";
     if (this.restartFence()) return false;
     if (live.releasing) {
       const lane = this.requireLane(live.id);
@@ -4944,6 +5032,16 @@ export class Superagent {
       || this.store.inputs(live.id).some(input => input.state !== "pending")) return false;
     const lane = this.requireLane(live.id);
     if (!explicit && (this.remoteShutdownPending(lane) || this.store.hasPendingScopeReview(lane.id))) return false;
+    if (reason === "capacity" && this.memoryPull?.live === live) this.memoryPull.cancel.abort();
+    if (reason !== "capacity" && live.memoryWorker && (lane.workState === "open" || explicit && lane.workState === "completed")) {
+      this.maintainWorkerMemory(live, true, explicit && lane.workState === "completed");
+      const pull = this.memoryPull;
+      if (pull?.live === live && performance.now() < pull.deadline) {
+        if (!explicit) return false; // Other lanes still get a chance at the slot.
+        await Promise.race([pull.done, Bun.sleep(Math.ceil(pull.deadline - performance.now()))]);
+      }
+      if (!this.current(live) || live.releasing || live.preparing || live.input || this.restartFence()) return false;
+    }
     const state = await this.state(live);
     if (!state.isSettled || state.hasPendingAsyncWork || state.hasOwnedRunningWork || state.pendingUiRequests?.length || state.goal?.enabled) return false;
     if (!this.current(live) || this.restartFence() || live.releasing || live.preparing || live.input
@@ -7376,7 +7474,10 @@ export class Superagent {
           } catch (error) { this.blocked.add(input.target); this.report(error); }
         }
         for (const live of [...this.live.values()]) {
-          if (live.id !== "main" && !live.busy && !live.input && Date.now() - live.lastActivity >= this.config.idleMs) {
+          if (live.id === "main" || live.busy || live.input) continue;
+          const evicting = Date.now() - live.lastActivity >= this.config.idleMs;
+          this.maintainWorkerMemory(live, evicting);
+          if (evicting && !(this.memoryPull?.live === live && performance.now() < this.memoryPull.deadline)) {
             try { await this.release(live); } catch (error) { this.report(error); }
           }
         }
@@ -8021,6 +8122,8 @@ export class Superagent {
 
   private observe(live: Live, frame: Record<string, unknown>): void {
     if (!this.current(live)) return;
+    // Read-only maintenance is not user activity, evidence, or input for a model.
+    if (frame.type === "response" && frame.command === "get_worker_memory") return;
     if (live.id === "main" && frame.type !== "response" && frame.type !== "ready")
       this.headActivityAt = performance.now();
     // Managed host_message_update_activity ticks contribute only this heartbeat.

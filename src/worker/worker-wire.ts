@@ -39,8 +39,14 @@ export interface WorkerProbe {
   readonly sealedGeneration?: number;
   /** Exact generation whose persisted native exit the worker verified. */
   readonly exitGeneration?: number;
+  /** The wire accepts opt-in on a fresh, absent, unsealed worker lane. */
+  readonly memoryLaunchVersion?: 1;
+  /** Private storage was prepared for this attempt; readiness can be checked after native init. */
+  readonly memoryPreparedVersion?: 1;
+  /** The exact live worker generation attests its private native memory source. */
+  readonly memorySyncVersion?: 1;
 }
-export type WorkerLaunch = Pick<HostOptions, "model" | "modelPreset" | "subagentConcurrency">;
+export type WorkerLaunch = Pick<HostOptions, "model" | "modelPreset" | "subagentConcurrency"> & { readonly memorySync?: true };
 export const WORKER_HEADER_BYTES = 64 * 1024;
 type Endpoint = Pick<WorkerRegistration, "destination" | "identityFile">;
 
@@ -57,6 +63,8 @@ const probe = Type.Object({
   socket: Type.Boolean(), sessionFile: Type.Boolean(), pidAlive: Type.Boolean(), ownerAlive: Type.Boolean(),
   uncertain: Type.Boolean(), pid: Type.Union([positive, Type.Null()]), sessionId: Type.Union([text, Type.Null()]),
   sealedGeneration: Type.Optional(positive), exitGeneration: Type.Optional(positive),
+  memoryLaunchVersion: Type.Optional(Type.Literal(1)), memoryPreparedVersion: Type.Optional(Type.Literal(1)),
+  memorySyncVersion: Type.Optional(Type.Literal(1)),
 });
 const opened = Type.Object({ pid: positive });
 const attached = Type.Object({ pid: positive, sessionId: text, sessionFile: absolute });
@@ -128,11 +136,12 @@ function readHeader(child: ChildProcessWithoutNullStreams): Promise<Buffer> {
   });
 }
 
-async function exchange<S extends TSchema>(endpoint: Endpoint, request: object, schema: S, attach: boolean) {
+async function exchange<S extends TSchema>(endpoint: Endpoint, request: object, schema: S, attach: boolean, signal?: AbortSignal) {
   const payload = Buffer.from(`${JSON.stringify({ version: 1, ...request })}\n`);
   if (payload.length > WORKER_HEADER_BYTES) throw new Error("Worker request exceeds header limit");
   const { checkWorkerIdentity } = await import("./worker-registration");
   checkWorkerIdentity(endpoint.identityFile);
+  signal?.throwIfAborted();
   const child = startSSH(endpoint);
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
@@ -142,6 +151,8 @@ async function exchange<S extends TSchema>(endpoint: Endpoint, request: object, 
   // then signals detach to the stock RPC client, never native Host death.
   void exited.catch(() => {});
   const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+  const cancel = () => { child.kill("SIGKILL"); };
+  signal?.addEventListener("abort", cancel, { once: true });
   try {
     const response = readHeader(child);
     if (attach) child.stdin.write(payload);
@@ -155,7 +166,10 @@ async function exchange<S extends TSchema>(endpoint: Endpoint, request: object, 
   } catch (error) {
     child.kill();
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+  }
 }
 
 export async function workerDescribe(endpoint: Endpoint, workspace?: Pick<WorkerLaneRef, "repoId" | "revision" | "subdir">): Promise<WorkerDescription> {
@@ -184,9 +198,9 @@ export function workerRef(lane: Pick<Lane, "id" | "remote" | "generation">): Wor
   return { laneId: lane.id, generation: lane.generation, repoId, revision, subdir };
 }
 
-export async function workerProbe(reg: WorkerRegistration, ref: WorkerLaneRef, reconcile = false): Promise<WorkerProbe> {
+export async function workerProbe(reg: WorkerRegistration, ref: WorkerLaneRef, reconcile = false, signal?: AbortSignal): Promise<WorkerProbe> {
   return (await exchange(reg, { op: "probe", workerId: reg.description.workerId, ref, ...(reconcile && { reconcile: true }) },
-    probe, false)).value;
+    probe, false, signal)).value;
 }
 
 export async function workerOpen(reg: WorkerRegistration, ref: WorkerLaneRef, launch: WorkerLaunch) {

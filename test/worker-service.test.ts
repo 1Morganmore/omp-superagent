@@ -93,6 +93,8 @@ test("worker wire refuses injected launch arguments, traversal and a different e
     const open = { op: "open", workerId: policy.workerId, ref, launch: { subagentConcurrency: 1 } };
     for (const payload of [
       { ...open, launch: { ...open.launch, command: ["/usr/bin/false"] } },
+      { ...open, launch: { ...open.launch, memorySync: false } },
+      { ...open, launch: { ...open.launch, memorySync: true, dbPath: "/foreign-bank.db" } },
       { ...open, ref: { ...ref, subdir: "../elsewhere" } },
       { ...open, ref: { ...ref, laneId: `${ref.laneId}\n` } },
       { ...open, workerId: "head-two" },
@@ -123,7 +125,9 @@ test("explicitly reconciling an unreceived open prevents a late reserve without 
   try {
     const probe = { op: "probe", workerId: policy.workerId, ref };
     const absent = { socket: false, sessionFile: false, sessionId: null, pid: null, pidAlive: false, ownerAlive: false, uncertain: false };
-    expect(await request(policy, probe)).toEqual({ ok: true, value: absent });
+    expect(await request(policy, { ...probe, ref: { ...ref, generation: 0 } }))
+      .toEqual({ ok: true, value: { ...absent, memoryLaunchVersion: 1 } });
+    expect(await request(policy, probe)).toEqual({ ok: true, value: { ...absent, memoryLaunchVersion: 1 } });
     const sealed = { ok: true, value: { ...absent, sealedGeneration: ref.generation } };
     expect(await request(policy, { ...probe, reconcile: true })).toEqual(sealed);
     const open = { op: "open", workerId: policy.workerId, ref, launch: { subagentConcurrency: 1 } };
@@ -132,7 +136,7 @@ test("explicitly reconciling an unreceived open prevents a late reserve without 
     expect(WorkerLedger.count(policy)).toBe(0);
 
     const next = { ...ref, generation: ref.generation + 1 };
-    expect(await request(policy, { ...probe, ref: next })).toEqual({ ok: true, value: absent });
+    expect(await request(policy, { ...probe, ref: next })).toEqual({ ok: true, value: { ...absent, memoryLaunchVersion: 1 } });
     // A later open reaches its configured native preflight, which cannot launch /usr/bin/false.
     expect(await request(policy, { ...open, ref: next })).toMatchObject({ ok: false });
     expect(await request(policy, { ...probe, ref: next }))

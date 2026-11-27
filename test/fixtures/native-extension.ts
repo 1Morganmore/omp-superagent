@@ -5,6 +5,7 @@ import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { registerDecisionAsk } from "../../src/lane/decision-tool";
 import { recordHostFixture } from "./host-fixture-processes";
+import { installNativeWorkerMemoryEmbeddings, memoryFixture, nativeWorkerMemoryTurn } from "./native-worker-memory-provider";
 
 const RECORD_TYPE = "omp-superagent-native-test";
 
@@ -42,8 +43,15 @@ export default function nativeFixture(pi: ExtensionAPI): void {
   });
   registerDecisionAsk(pi);
   let serviceRequested = false;
+  const headHome = process.env.OMP_SUPERAGENT_ROLE === "head" ? process.env.HOME : undefined;
+  const memoryHead = headHome !== undefined && existsSync(join(headHome, memoryFixture.directory));
+  if (headHome && memoryHead) installNativeWorkerMemoryEmbeddings(pi, headHome);
   const mock = createMockModel({ provider: "socket-host-smoke", id: "local",
+    // The production HEAD policy itself is large; don't accidentally test context compaction.
+    ...(memoryHead && { contextWindow: 65_536 }),
     handler: context => {
+      const memory = nativeWorkerMemoryTurn(pi, context);
+      if (memory) return memory;
       const lastUser = context.messages.findLast(message => message.role === "user");
       const input = JSON.stringify(lastUser?.content);
       const decision = input?.includes("[native-decision-submit]") ? "submit"

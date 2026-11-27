@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { isAbsolute, normalize } from "node:path";
-import { Type } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox/type";
 import { Value } from "@sinclair/typebox/value";
 import type { Lane } from "../contracts";
 import type { RemotePlacement } from "../worker/worker-wire";

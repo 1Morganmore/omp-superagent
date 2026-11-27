@@ -32,6 +32,10 @@ import { installReplyVoice } from "./omp/host-reply-voice";
 import { matchesPreparedLaunch } from "./omp/stock-head-launch";
 import { NATIVE_PROFILE_ENV, bindNativeProfile, matchesNativeProfile, type HostReadyEvent,
   type NativeProfileBinding, type NativeProfilePaths } from "./omp/native-sessions";
+import { isWorkerMemoryCursor, isWorkerMemoryStamp } from "./worker/worker-memory-page";
+import { canBeginWorkerFact, isWorkerFactRoot, type WorkerFactCarrier } from "./worker/worker-memory-proofs";
+import { bindWorkerMemorySource } from "./worker/worker-memory-source";
+import { WORKER_MEMORY_ENV, WORKER_MEMORY_PROFILE_ENV } from "./worker/worker-memory-storage";
 
 const terminalService = (state: ServiceUnit["state"]) => state === "exited" || state === "failed";
 const serviceGeneration = ({ owner, id, generation, startedAt, restartCount }: ServiceUnit) =>
@@ -90,6 +94,12 @@ export default function hostExtension(pi: ExtensionAPI): void {
   let instanceKey: string | undefined;
   const selectedSuperkit = process.env[MANAGED_ULW_ENV];
   const workerAttempt = process.env.OMP_SUPERAGENT_WORKER_ATTEMPT;
+  const memoryLaunch = workerAttempt && process.env.OMP_SUPERAGENT_ROLE === "lane" ? process.env[WORKER_MEMORY_ENV] : undefined;
+  const workerMemoryProfileBinding: NativeProfileBinding | null = memoryLaunch
+    ? JSON.parse(process.env[WORKER_MEMORY_PROFILE_ENV] ?? "null") : null;
+  let workerMemoryProfile: { readonly root: ReturnType<typeof exact>; readonly paths: NativeProfilePaths } | undefined;
+  let workerMemoryProfileAttempted = false;
+  let workerMemory: ReturnType<typeof bindWorkerMemorySource> | undefined;
   const reviewCwd = process.env.OMP_SUPERAGENT_PR_REVIEW_CWD;
   let replyVoice: ReturnType<typeof installReplyVoice>;
   if (reviewCwd && PR_REVIEW_GITHUB_ENV.some(name => process.env[name]))
@@ -201,6 +211,24 @@ export default function hostExtension(pi: ExtensionAPI): void {
       // An unavailable filesystem cannot prove a profile for shutdown or wake.
       if (!(error instanceof Error)) throw error;
     }
+  };
+  const workerMemoryProfileCurrent = ({ session, ref, id, file }: ReturnType<typeof exact>): boolean => {
+    if (!workerMemoryProfileBinding || !workerMemoryProfile || !file) return false;
+    const { root, paths } = workerMemoryProfile;
+    if (root.session !== session || root.ref !== ref || root.id !== id || root.file !== file) return false;
+    const { profile, discoveryEntry } = workerMemoryProfileBinding;
+    return matchesNativeProfile(paths, profile) && realpathSync(dirname(discoveryEntry)) === dirname(discoveryEntry)
+      && realpathSync(discoveryEntry) === file;
+  };
+  const currentWorkerMemory = (identity: ReturnType<typeof exact>) => {
+    const { session, file } = identity;
+    if (!memoryLaunch || !workerAttempt || !file || !workerMemoryProfileCurrent(identity)) return;
+    // Background native initialization must not delay Host startup or tools.
+    // Keep the attested root/profile even if there is not yet a live source.
+    if (!workerMemory && session.getMnemopiSessionState?.()) {
+      workerMemory = bindWorkerMemorySource(session, { encoded: memoryLaunch, file, attempt: workerAttempt });
+    }
+    return workerMemory;
   };
   const snapshot = () => {
     const { session } = exact();
@@ -682,12 +710,61 @@ export default function hostExtension(pi: ExtensionAPI): void {
       if (observationHeld) throw new Error("Durable native observations are unavailable");
       return { ...ownerIdentity(identity), leafId: identity.session.sessionManager.getLeafId() };
     }
+    if (command.type === "get_worker_memory") {
+      const { after, unchanged } = command;
+      if (!workerMemoryProfile || !isWorkerMemoryCursor(after) || (unchanged !== undefined && (after !== 0 || !isWorkerMemoryStamp(unchanged))))
+        throw new Error("Worker memory is unavailable");
+      const identity = exact();
+      const { session } = identity;
+      const run = runOrdinal;
+      const assertIdle = () => {
+        assertSameRoot(identity);
+        if (runOrdinal !== run || !localIdle() || session.isSessionTransitioning !== false
+          || session.isRunActive !== false || session.getPlanModeState()?.enabled || session.getPrewalkState?.())
+          throw new Error("session_busy");
+        if (!workerMemoryProfileCurrent(identity)) throw new Error("Worker memory profile changed");
+      };
+      assertIdle();
+      const source = currentWorkerMemory(identity);
+      if (!source) throw new Error("Worker memory is unavailable");
+      await source.verifyCheckout();
+      assertIdle();
+      const observed = source.page({ after, ...(unchanged !== undefined && { unchanged }) }, run > 0);
+      // The earlier worker probe alone cannot cover later Git changes while
+      // attached. Check again before releasing any native contents.
+      await source.verifyCheckout();
+      assertIdle();
+      observed.assertCurrent();
+      return { ...ownerIdentity(identity), page: observed.page };
+    }
     if (command.type === "snapshot") {
       const ownership = await owned();
       // The owner requires this first snapshot before opening its public socket.
       const prReviewPolicy = reviewCwd ? reviewPolicy(ownership.identity.session, reviewCwd) : undefined;
       if (!reviewCwd) loadedSuperkitPath ??= await verifyHostSuperkit(ownership.identity.session, selectedSuperkit);
       const { session, ref } = ownership.identity;
+      let workerMemoryControlVersion: 1 | undefined;
+      if (memoryLaunch && workerAttempt && workerMemoryProfileBinding && ownership.identity.file) {
+        try {
+          if (!workerMemoryProfileAttempted) {
+            workerMemoryProfileAttempted = true;
+            const { id, file } = ownership.identity;
+            const paths = await bindNativeProfile(pi.pi, {
+              agentDir: session.settings.getAgentDir(), id, file,
+            }, workerMemoryProfileBinding);
+            assertSameRoot(ownership.identity);
+            workerMemoryProfile = { root: ownership.identity, paths };
+          } else assertSameRoot(ownership.identity);
+          const source = currentWorkerMemory(ownership.identity);
+          if (source) {
+            source.validate();
+            workerMemoryControlVersion = 1;
+          }
+        } catch (error) {
+          // An unavailable bank does not make ordinary observations unavailable.
+          if (!(error instanceof Error)) throw error;
+        }
+      }
       const wakes = session.wakeSources;
       const running = process.env.OMP_SUPERAGENT_ROLE === "head" && ownership.tree
         ? ownership.tree.running.filter(job => job.ownerId === ref.id) : undefined;
@@ -708,6 +785,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
             ? session.effectiveServiceTier(session.model) ?? "none" : undefined,
         } : {}),
         journalCursorControlVersion: 1,
+        ...(workerMemoryControlVersion && { workerMemoryControlVersion }),
         ...(replyVoice?.available() ? { replyVoiceControlVersion: 2 } : {}),
         ...(running ? { headJobs: { running: running.map(job => job.id), awaitingOnly } } : {}),
         fastMode: headFastMode(ownership.identity.session),
@@ -870,6 +948,33 @@ export default function hostExtension(pi: ExtensionAPI): void {
   pi.on("agent_start", () => {
     if (context?.agent.kind === "main") observation("rpc_agent_start", { runOrdinal: ++runOrdinal, hostPid: process.pid });
   });
+  const observeWorkerFact = (tool: string, ctx: ExtensionContext, observe: (source: NonNullable<typeof workerMemory>,
+    name: WorkerFactCarrier) => void, input?: unknown) => {
+    if (!workerMemoryProfile || (tool !== "retain" && tool !== "learn" && tool !== "bash")
+      || ctx.agent.kind !== "main" || ctx.agent.id !== pi.pi.MAIN_AGENT_ID
+      || (!workerMemory && !canBeginWorkerFact(tool, input))) return;
+    try {
+      const identity = exact();
+      if (!isWorkerFactRoot(ctx, pi.pi.MAIN_AGENT_ID, identity.session.sessionManager)
+        || !identity.session.getAllToolInfos().some(info =>
+          info.name === tool && info.sourceInfo.source === "builtin" && info.sourceInfo.path === `<builtin:${tool}>`)) return;
+      const source = currentWorkerMemory(identity);
+      if (source) observe(source, tool);
+    } catch (error) {
+      // Attestation is optional and cannot change the native tool's outcome.
+      if (!(error instanceof Error)) throw error;
+      workerMemory?.clearFactStarts();
+    }
+  };
+  pi.on("tool_execution_start", (event, ctx) => {
+    observeWorkerFact(event.toolName, ctx, (source, tool) => source.startFact(tool, event.toolCallId, event.args), event.args);
+  });
+  pi.on("tool_execution_end", (event, ctx) => {
+    observeWorkerFact(event.toolName, ctx, (source, tool) => source.finishFact(tool, event.toolCallId, !event.isError, event.result));
+  });
+  pi.on("agent_end", (_event, ctx) => {
+    if (ctx.agent.kind === "main" && ctx.agent.id === pi.pi.MAIN_AGENT_ID) workerMemory?.clearFactStarts();
+  });
   pi.on("tool_call", async (event, ctx) => {
     if (reviewCwd) return { block: true, reason: "Static PR review does not execute tools" };
     const input = event.input as Frame;
@@ -927,6 +1032,8 @@ export default function hostExtension(pi: ExtensionAPI): void {
       notDispatched ? "not_dispatched" : undefined);
   });
   pi.on("tool_result", async (event, ctx) => {
+    if (!event.isError && event.parentToolCallId === undefined)
+      observeWorkerFact(event.toolName, ctx, (source, toolName) => source.returnFact({ ...event, toolName }), event.input);
     const owner = serviceOwner(ctx);
     const key = JSON.stringify([owner, event.toolCallId]);
     const start = serviceStarts.get(key);
@@ -1028,6 +1135,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
   });
   pi.on("session_shutdown", async () => {
     if (!context || context.agent.kind !== "main") return;
+    workerMemory?.close();
     server?.close();
     await fs.unlink(socketPath).catch(error => { if (error.code !== "ENOENT") throw error; });
   });

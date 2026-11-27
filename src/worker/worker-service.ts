@@ -7,6 +7,7 @@ import { boundWorkspace, enrolledRepo, privateWorkerDirectory, reserveCheckout }
 import { absentWorkerHost, attestWorkerHost, inspectWorkerHost, readWorkerFiles,
   WORKER_ATTEMPT_ENV, WORKER_SESSION_ENV, workerPaths } from "./worker-host";
 import { WorkerLedger, type WorkerReceipt } from "./worker-ledger";
+import { WORKER_MEMORY_WIRE_ENV } from "./worker-memory-storage";
 import { assertWorkerGitStartup, requireWorkerStartupFlags, workerLaunchProfile, workerManagedUlwPath } from "./worker-profile";
 import { parseWorkerPolicy, parseWorkerRequest, WorkerRefusal } from "./worker-request";
 import type { WorkerDescription, WorkerLaneRef, WorkerLaunch, WorkerPolicy, WorkerProbe, WorkerRepo } from "./worker-wire";
@@ -95,7 +96,7 @@ class WorkerService {
   async probe(ref: WorkerLaneRef, reconcile = false): Promise<WorkerProbe> {
     const lane = this.#lane(ref);
     const observed = this.#receipt(lane);
-    const { exitGeneration, ...probe } = await inspectWorkerHost(this.#ledger, lane.paths, observed);
+    const { exitGeneration, memorySyncVersion, ...probe } = await inspectWorkerHost(this.#ledger, lane.paths, observed);
     // Do not claim ownership or absence for a newer generation unless the current
     // resident was positively released and no different attempt raced this probe.
     if (this.#receipt(lane)?.attempt !== observed?.attempt ||
@@ -103,15 +104,21 @@ class WorkerService {
       return { ...probe, uncertain: true, pid: null, sessionId: null };
     const absent = !probe.uncertain && !probe.socket && !probe.pidAlive && !probe.ownerAlive && probe.pid === null;
     const sealed = absent && this.#ledger.confirmRelease(ref, lane.repo.cwd, { observed, reconcile });
+    const memoryLaunch = process.env[WORKER_MEMORY_WIRE_ENV] === "1" && absent && !probe.sessionFile && !sealed;
     return { ...probe, ...(sealed && { sealedGeneration: ref.generation }),
-      ...(sealed && exitGeneration === ref.generation && { exitGeneration }) };
+      ...(sealed && exitGeneration === ref.generation && { exitGeneration }),
+      ...(memoryLaunch && { memoryLaunchVersion: 1 }),
+      ...(!probe.uncertain && probe.socket && observed?.generation === ref.generation
+        && observed.privateMemoryPrepared && observed.memory?.proof && { memoryPreparedVersion: 1 }),
+      ...(memorySyncVersion === 1 && observed?.generation === ref.generation && { memorySyncVersion }) };
   }
 
   async open(ref: WorkerLaneRef, launch: WorkerLaunch): Promise<{ pid: number }> {
     const lane = this.#lane(ref);
     const preset = launch.modelPreset;
     const launchDigest = createHash("sha256").update(JSON.stringify([launch.model, launch.subagentConcurrency,
-      preset?.name, preset?.preset.defaultThinkingLevel, Object.entries(preset?.preset.modelRoles ?? {}).sort()])).digest("hex");
+      preset?.name, preset?.preset.defaultThinkingLevel, Object.entries(preset?.preset.modelRoles ?? {}).sort(),
+      ...(launch.memorySync ? [true] : [])])).digest("hex");
     const observed = this.#receipt(lane);
     if (observed?.generation === ref.generation) {
       if (observed.launchDigest !== launchDigest)
@@ -131,9 +138,15 @@ class WorkerService {
     if (previous && previous.gitDir !== gitDir) throw new WorkerRefusal("Worker checkout metadata directory changed");
     const initial = await readWorkerFiles(lane.paths);
     if (absentWorkerHost(initial, previous).uncertain) throw new WorkerRefusal("Worker lane has an unverified socket or journal");
+    if (launch.memorySync && process.env[WORKER_MEMORY_WIRE_ENV] !== "1")
+      throw new WorkerRefusal("Worker memory is not supported by this transport");
+    if (launch.memorySync && initial.session && !previous?.memory)
+      throw new WorkerRefusal("Worker memory cannot redirect an existing native session");
+    const memoryKey = previous?.memory?.key ?? (launch.memorySync ? crypto.randomUUID() : undefined);
     // Commit admission before reserving the checkout, publishing any session
     // artifacts, or starting the stock OMP process.
-    const reservation = this.#ledger.reserve(ref, { repoRoot: lane.repo.cwd, gitDir, launchDigest }, previous);
+    const reservation = this.#ledger.reserve(ref, { repoRoot: lane.repo.cwd, gitDir, launchDigest,
+      ...(previous?.memory && { memory: previous.memory }) }, previous);
     let cwd: string;
     let target: ReturnType<typeof workerLaunchProfile>;
     let managedUlwPath: string;
@@ -153,17 +166,21 @@ class WorkerService {
       this.#ledger.retire(reservation);
       throw error;
     }
-    const launching = { ...reservation, phase: "launching" } as const;
+    let launching = { ...reservation, phase: "launching" } as const;
     let preparingSession = false;
     try {
+      const { memorySync: _memorySync, ...hostLaunch } = launch;
       const { pid } = await startHost({
-        ...launch, cwd, command: [target.executable], socketPath: lane.paths.socketPath,
+        ...hostLaunch, cwd, command: [target.executable], socketPath: lane.paths.socketPath,
         sessionFile: lane.paths.sessionFile, logPath: lane.paths.logPath,
         extensionPath: fileURLToPath(new URL("../lane-extension.ts", import.meta.url)),
-        worker: { ...target.profile, managedUlwPath },
+        worker: { ...target.profile, managedUlwPath,
+          ...(memoryKey && { memory: { key: memoryKey, previous: previous?.memory,
+            checkout: { repoRoot: lane.repo.cwd, gitDir, repoId: ref.repoId, revision: ref.revision, subdir: ref.subdir } } }) },
         env: { ...target.env, OMP_SUPERAGENT_ROLE: "lane", OMP_SUPERAGENT_LANE: launching.laneId,
           [WORKER_ATTEMPT_ENV]: launching.attempt, [WORKER_SESSION_ENV]: launching.sessionId ?? "" },
-      }, () => {
+      }, memory => {
+        if (memory) launching = { ...launching, memory, privateMemoryPrepared: true };
         if (!this.#ledger.transition(reservation, launching)) throw new WorkerRefusal("Worker launch reservation is no longer current");
         preparingSession = true;
       });

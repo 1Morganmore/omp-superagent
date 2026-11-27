@@ -100,6 +100,7 @@ async fn prepare(bun: &Path, helper: &Path, policy: &Path, header: &[u8]) -> Res
         .arg("--no-env-file")
         .arg(helper)
         .arg(policy)
+        .env("OMP_SUPERAGENT_WORKER_MEMORY_WIRE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

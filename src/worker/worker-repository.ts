@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { lstat, open, readlink, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { WorkerLaneRef } from "./worker-wire";
@@ -22,7 +22,11 @@ function gitProcess(cwd: string, args: readonly string[], timeout?: number) {
 
 /** Read the local Git repository without ambient Git configuration, hooks, or network access. */
 export async function gitWorkerRepository(cwd: string, args: readonly string[]): Promise<string | null> {
-  const git = gitProcess(cwd, args, gitTimeoutMs);
+  return await readWorkerGit(cwd, args, gitTimeoutMs);
+}
+
+async function readWorkerGit(cwd: string, args: readonly string[], timeout: number): Promise<string | null> {
+  const git = gitProcess(cwd, args, timeout);
   const reader = git.stdout.getReader();
   const decoder = new TextDecoder();
   let size = 0;
@@ -51,8 +55,8 @@ function unavailablePath(error: unknown): boolean {
     && ["ENOENT", "ENOTDIR", "ELOOP", "EACCES", "EPERM", "EINVAL"].includes(error.code);
 }
 
-async function checkoutRoot(canonical: string): Promise<string | null> {
-  const layout = await gitWorkerRepository(canonical,
+async function checkoutRoot(canonical: string, git = gitWorkerRepository): Promise<string | null> {
+  const layout = await git(canonical,
     ["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]);
   const [root, gitDir, commonDir, end, ...extra] = layout?.split("\n") ?? [];
   if (!root || !isAbsolute(root) || controls.test(root) || end !== "" || extra.length) return null;
@@ -64,13 +68,17 @@ async function checkoutRoot(canonical: string): Promise<string | null> {
   return root;
 }
 
-async function repositoryIdentity(root: string): Promise<string | null> {
+async function repositoryIdentity(root: string, git = gitWorkerRepository): Promise<string | null> {
   // Resolve effective fetch URLs locally, including insteadOf rules. Require
   // exactly one URL, and omit credentials from the hashed identity.
-  const output = await gitWorkerRepository(root, ["remote", "get-url", "--all", "origin"]);
+  const output = await git(root, ["remote", "get-url", "--all", "origin"]);
   if (output === null) return null;
   const [origin, end, ...extra] = output.split("\n");
-  if (!origin || end !== "" || extra.length || /[\s?#\\]/u.test(origin)) return null;
+  return origin && end === "" && !extra.length ? repositoryOriginId(origin) : null;
+}
+
+function repositoryOriginId(origin: string): string | null {
+  if (/[\s?#\\]/u.test(origin)) return null;
   const scp = /^(?:([A-Za-z0-9_.-]+)@)?([A-Za-z0-9.-]+):([^/][^:]*)$/.exec(origin);
   const url = URL.parse(scp ? `ssh://${scp[1] ? `${scp[1]}@` : ""}${scp[2]}/${scp[3]}` : origin);
   if (!url || !["http:", "https:", "ssh:"].includes(url.protocol)
@@ -110,6 +118,83 @@ export async function workerRepositoryIdentity(cwd: string): Promise<string | nu
 function withinTree(path: string): boolean {
   return path === "" || (!isAbsolute(path) && path.split(sep).every(part =>
     part && part !== ".." && part !== "." && part.toLowerCase() !== ".git"));
+}
+
+/** Re-attest only the workspace's identity, without scanning the index or tracked bytes. */
+export async function workerMemoryRepositoryMatches(cwd: string, expected: Pick<WorkerLaneRef, "repoId" | "revision" | "subdir"> & {
+  readonly repoRoot: string; readonly gitDir: string;
+}): Promise<boolean> {
+  try {
+    if (!withinTree(expected.subdir) || relative(expected.repoRoot, cwd) !== expected.subdir
+      || join(expected.repoRoot, expected.subdir) !== cwd || join(expected.repoRoot, ".git") !== expected.gitDir
+      || await realpath(cwd) !== cwd || !(await lstat(cwd)).isDirectory()) return false;
+    const git = (dir: string, args: readonly string[]) => readWorkerGit(dir, args, 750);
+    const args = [`--git-dir=${expected.gitDir}`, `--work-tree=${expected.repoRoot}`];
+    const [root, config, revision, type] = await Promise.all([
+      checkoutRoot(cwd, git),
+      git(expected.repoRoot, ["config", "--file", join(expected.gitDir, "config"), "--no-includes", "--list", "--null"]),
+      git(expected.repoRoot, [...args, "rev-parse", "--verify", "HEAD^{commit}"]),
+      expected.subdir ? git(expected.repoRoot, [...args, "cat-file", "-t", `${expected.revision}:${expected.subdir}`]) : "tree\n",
+    ]);
+    if (root !== expected.repoRoot || !config?.endsWith("\0") || revision !== `${expected.revision}\n` || type !== "tree\n") return false;
+    const origins: string[] = [];
+    for (const entry of config.slice(0, -1).split("\0")) {
+      const split = entry.indexOf("\n");
+      const key = split < 0 ? entry : entry.slice(0, split);
+      if (/^(?:include(?:if)?\.|url\.|core\.worktree$|extensions\.(?:worktreeconfig|refstorage)$)/iu.test(key)) return false;
+      if (key === "remote.origin.url" && split >= 0) origins.push(entry.slice(split + 1));
+    }
+    return origins.length === 1 && repositoryOriginId(origins[0] ?? "") === expected.repoId;
+  } catch (error) {
+    if (unavailablePath(error)) return false;
+    throw error;
+  }
+}
+
+/** Bounded stat/read proof surrounding asynchronous Git verification and tool execution. */
+export function workerMemoryCheckoutStamp(cwd: string, binding: { readonly repoRoot: string; readonly gitDir: string }): string | null {
+  try {
+    if (!withinTree(relative(binding.repoRoot, cwd))) return null;
+    // A subdirectory can become another checkout without changing its inode.
+    // Refuse any nested Git boundary between it and the admitted root.
+    for (let dir = cwd; dir !== binding.repoRoot; dir = dirname(dir)) {
+      if (lstatSync(join(dir, ".git"), { throwIfNoEntry: false }) || dirname(dir) === dir) return null;
+    }
+    const dirs = [binding.repoRoot, binding.gitDir, cwd].map(path => {
+      const stat = lstatSync(path, { bigint: true });
+      return stat.isDirectory() && realpathSync(path) === path ? `${stat.dev}:${stat.ino}:${stat.ctimeNs}` : null;
+    });
+    if (dirs.includes(null)) return null;
+    const stamp = (file: string) => {
+      const stat = lstatSync(file, { bigint: true, throwIfNoEntry: false });
+      if (!stat) return "absent";
+      if (!stat.isFile() || stat.nlink !== 1n || realpathSync(file) !== file) throw new Error("Unverifiable Git metadata");
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    };
+    const readRef = (file: string) => {
+      const first = stamp(file);
+      if (first === "absent") return { first, contents: "" };
+      const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const { size } = fstatSync(fd);
+        if (size < 1 || size > 1024) throw new Error("Unverifiable Git reference");
+        const bytes = Buffer.alloc(size);
+        if (readSync(fd, bytes, 0, size, 0) !== size || stamp(file) !== first) throw new Error("Unverifiable Git reference");
+        return { first, contents: bytes.toString("utf8").replace(/\n$/u, "") };
+      } finally { closeSync(fd); }
+    };
+    const { first, contents } = readRef(join(binding.gitDir, "HEAD"));
+    const ref = contents.startsWith("ref: ") ? contents.slice(5) : undefined;
+    if (ref === undefined ? !gitOid.test(contents) : !ref.startsWith("refs/heads/") || controls.test(ref) || !withinTree(ref)) return null;
+    const branch = ref ? readRef(join(binding.gitDir, ref)) : null;
+    if (branch && branch.first !== "absent" && !gitOid.test(branch.contents)) return null;
+    const config = stamp(join(binding.gitDir, "config"));
+    if (config === "absent" || stamp(join(binding.gitDir, "config.worktree")) !== "absent") return null;
+    return JSON.stringify([dirs, first, contents, config, stamp(join(binding.gitDir, "packed-refs")), branch]);
+  } catch (error) {
+    if (error instanceof Error) return null;
+    throw error;
+  }
 }
 
 async function matchesBlob(root: string, indexed: Buffer, committed: Buffer): Promise<boolean> {

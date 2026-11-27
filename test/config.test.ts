@@ -41,6 +41,11 @@ describe("operator execution limits", () => {
       await expect(loadConfig(await config({ headIdleMs }))).rejects.toThrow("headIdleMs");
     }
   });
+  test("worker memory transfer requires boolean opt-in, not a truthy config value", async () => {
+    expect((await loadConfig(await config())).remoteMemorySync).not.toBe(true);
+    expect((await loadConfig(await config({ remoteMemorySync: true }))).remoteMemorySync).toBe(true);
+    await expect(loadConfig(await config({ remoteMemorySync: "false" }))).rejects.toThrow("remoteMemorySync");
+  });
   test("resolves workspace and state paths relative to the configuration", async () => {
     const path = await config();
     const loaded = await loadConfig(path);

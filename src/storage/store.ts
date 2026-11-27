@@ -19,7 +19,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-import { Database } from "bun:sqlite";
+import { Database, SQLiteError } from "bun:sqlite";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -785,6 +785,31 @@ export class Store implements StorePort {
       JOIN metadata ON metadata.key = 'topic-owner:' || inputs.id
       WHERE inputs.target IS NULL AND inputs.state IN ('pending','uncertain') AND metadata.value = ?
       LIMIT 1`).get(target) !== null;
+  }
+
+  hasWorkerMemoryHold(target: string): boolean {
+    return this.db.query(`SELECT 1 WHERE
+      EXISTS (SELECT 1 FROM inputs WHERE (target IS NULL OR target IN ('main', ?1)) AND ${ACTIVE_INPUTS}) OR
+      EXISTS (SELECT 1 FROM approvals WHERE target IN ('main', ?1) AND state = 'pending')`).get(target) !== null
+      || this.hasPendingLaneResult(target);
+  }
+
+  tryWorkerMemoryMeta(keys: string | readonly string[], value: string): boolean {
+    const batch = typeof keys === "string" ? [keys] : keys;
+    if (!batch.every(key => key.startsWith("worker-memory:"))) throw new Error("Invalid worker memory receipt key");
+    const policy = this.db.query<{ timeout: number }, []>("PRAGMA busy_timeout").get();
+    if (!policy || this.db.inTransaction) return false;
+    this.db.run("PRAGMA busy_timeout = 0");
+    try {
+      // One autocommit for the entire page. A concurrent ingress writer
+      // cannot reserve only a suffix/prefix of its native fact IDs.
+      this.db.query(`INSERT INTO metadata(key,value) SELECT value, ?2 FROM json_each(?1) WHERE true
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(batch), value);
+      return true;
+    } catch (error) {
+      if (error instanceof SQLiteError && [5, 6].includes(error.errno & 255)) return false;
+      throw error;
+    } finally { this.db.run(`PRAGMA busy_timeout = ${policy.timeout}`); }
   }
 
   hasHeadRecoveryInput(): boolean {

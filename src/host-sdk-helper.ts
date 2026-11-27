@@ -17,6 +17,7 @@ type Manifest = {
   readonly headRotationSelection?: RotationSelection;
   readonly headHibernationSessionId?: string;
   readonly expectedNativeProfile?: NativeProfile;
+  readonly workerMemoryProfile?: NativeProfile;
 };
 
 async function run(operation: string | undefined, manifest: Manifest, input: unknown, nativeProfile?: NativeProfile) {
@@ -130,6 +131,7 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
         if (options.prReviewOnly) await chmod(options.sessionFile, 0o600);
       }
       let nativeProfileBinding: NativeProfileBinding | undefined;
+      let workerMemoryProfileBinding: NativeProfileBinding | undefined;
       if (!options.prReviewOnly) {
         requireNativeProfile();
         const discoveryEntry = await publishNativeSession(options.sessionFile, options.cwd, parkedSession, nativeProfile);
@@ -137,10 +139,13 @@ async function run(operation: string | undefined, manifest: Manifest, input: unk
           if (!discoveryEntry) throw new Error("Prepared native session could not be found in discovery");
           nativeProfileBinding = { profile: nativeProfile, discoveryEntry };
         }
+        if (manifest.workerMemoryProfile && discoveryEntry
+          && matchesNativeProfile(sdkNativeProfilePaths(), manifest.workerMemoryProfile))
+          workerMemoryProfileBinding = { profile: manifest.workerMemoryProfile, discoveryEntry };
       }
       const { hostInventoryManifest } = await import("./omp/host-inventory-manifest");
       return { toolsExplicitlySelected: parsed.tools !== undefined, noTools: parsed.noTools === true,
-        nativeProfileBinding,
+        nativeProfileBinding, workerMemoryProfileBinding,
         replayableArgvHash: argv.argv[0] === "launch" && !stockReplayRefusal(parsed, options.sessionFile)
           ? launchArgvHash(launchArgs) : undefined,
         ...(options.prReviewOnly ? { emptyToolSelection } : {}),

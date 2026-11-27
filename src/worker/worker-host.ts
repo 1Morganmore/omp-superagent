@@ -106,7 +106,7 @@ export async function attestWorkerHost(paths: WorkerPaths, files: WorkerFiles, r
       receipt.phase === "live" && (receipt.identity.pid !== identity.pid || receipt.identity.ownerPid !== identity.ownerPid
         || !sameFile(receipt.identity, files.socket)))
       throw new WorkerRefusal("Worker native Host identity or launch receipt does not match");
-    return identity;
+    return { ...identity, ...(receipt.memory?.file && state.memorySyncVersion === 1 && { memorySyncVersion: 1 }) };
   } finally { await connection.close(); }
 }
 
@@ -148,7 +148,8 @@ export async function inspectWorkerHost(ledger: WorkerLedger, paths: WorkerPaths
         saved.identity.pid === identity.pid && saved.identity.ownerPid === identity.ownerPid &&
         saved.identity.sessionId === identity.sessionId && sameFile(saved.identity, files.socket)) {
         return { socket: true, sessionFile: true, sessionId: identity.sessionId, pid: identity.pid,
-          pidAlive: true, ownerAlive: true, uncertain: false };
+          pidAlive: true, ownerAlive: true, uncertain: false,
+          ...(identity.memorySyncVersion === 1 && { memorySyncVersion: 1 }) };
       }
     } catch (error) {
       if (!(error instanceof Error)) throw error;

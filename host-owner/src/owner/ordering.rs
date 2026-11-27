@@ -208,6 +208,7 @@ async fn stock_state_cannot_advertise_an_unattested_journal_cursor() {
                 worker_attempt: None,
                 pr_review_only: false,
                 journal_cursor: false,
+                worker_memory: false,
             })
             .is_ok()
     );
@@ -256,6 +257,7 @@ async fn journal_cursor_waits_for_durable_observations_and_validates_its_owner()
                 worker_attempt: None,
                 pr_review_only: false,
                 journal_cursor: true,
+                worker_memory: false,
             })
             .is_ok()
     );

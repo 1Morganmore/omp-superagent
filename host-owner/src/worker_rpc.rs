@@ -1,5 +1,49 @@
 use serde_json::{Map, Value};
 
+const MAX_CURSOR: u64 = (1_u64 << 53) - 1;
+
+fn lower_hex(value: &Value, width: usize) -> bool {
+    value.as_str().is_some_and(|text| {
+        text.len() == width
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+pub(crate) fn memory_page(page: &Value, after: u64) -> bool {
+    let Some(next) = page["next"].as_u64() else {
+        return false;
+    };
+    let Some(records) = page["records"].as_array() else {
+        return false;
+    };
+    if page["after"].as_u64() != Some(after) || next > MAX_CURSOR || (next != 0 && next <= after)
+        || !page.as_object().is_some_and(|fields| fields.len() == 4)
+        || !lower_hex(&page["stamp"], 64) || records.len() > 16
+    {
+        return false;
+    }
+    let mut previous = after;
+    for (index, record) in records.iter().enumerate() {
+        let Some(at) = record["at"].as_u64() else {
+            return false;
+        };
+        if at <= previous || at > MAX_CURSOR || (next != 0 && at > next)
+            || !record.as_object().is_some_and(|fields| fields.len() == 3)
+            || !lower_hex(&record["id"], 16)
+            || records[..index].iter().any(|prior| prior["id"] == record["id"])
+            || !record["content"].as_str().is_some_and(|text| {
+                text.len() <= 2048 && !text.trim().is_empty() && !text.chars().any(char::is_control)
+            })
+        {
+            return false;
+        }
+        previous = at;
+    }
+    serde_json::to_vec(page).is_ok_and(|bytes| bytes.len() <= 24 * 1024)
+}
+
 // The peer and stock SDK share a wire protocol, not an authority level.
 // Check the already decoded frame before any public command can change owner
 // state, use its private lifecycle channel, or reach stock OMP.
@@ -32,6 +76,13 @@ pub(crate) fn allows(kind: &str, frame: &Value) -> bool {
         | "abort"
         | "abort_and_restore_queue"
         | "shutdown_host" => exact(&[]),
+        "get_worker_memory" => {
+            exact(&["after", "unchanged"])
+                && frame["after"].as_u64().is_some_and(|after| {
+                    after <= MAX_CURSOR
+                        && optional(fields, "unchanged", |stamp| after == 0 && lower_hex(stamp, 64))
+                })
+        }
         "get_entries" => exact(&["since"]) && optional(fields, "since", nonempty),
         "prompt" => {
             // Runtime does not transport attachments to remote lanes.

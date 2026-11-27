@@ -16,6 +16,7 @@ import { requireHostOwner } from "./host-owner-path";
 import { inspectInstalledOmp, resolveOmpCommand } from "./installed-omp";
 import type { DialogResponse, LanePresetSnapshot } from "../contracts";
 import type { WorkerHostProfile } from "../worker/worker-profile";
+import { WORKER_MEMORY_PROFILE_ENV, type WorkerMemoryBinding } from "../worker/worker-memory-storage";
 import { activeManagedUlw, managedUlwLaunch, MANAGED_ULW_ENV, MANAGED_ULW_FIXTURE_ENV, MANAGED_ULW_FIXTURE_ROOT_ENV, validateManagedUlwPackage } from "./managed-super";
 
 const CONNECT_TIMEOUT_MS = 5_000;
@@ -390,7 +391,7 @@ function selectManagedUlw(options: HostOptions): string {
 }
 
 /** Launch only a new host. Existing endpoints require the caller's explicit adoption decision. */
-export async function startHost(options: HostOptions, beforeSessionPrepare?: () => void): Promise<{ pid: number }> {
+export async function startHost(options: HostOptions, beforeSessionPrepare?: (memory?: WorkerMemoryBinding) => void): Promise<{ pid: number }> {
   try { return await launchHost(options, beforeSessionPrepare); }
   catch (cause) {
     // Never read child output into errors: logs can contain credentials or prompt content.
@@ -398,7 +399,7 @@ export async function startHost(options: HostOptions, beforeSessionPrepare?: () 
   }
 }
 
-async function launchHost(options: HostOptions, beforeSessionPrepare?: () => void): Promise<{ pid: number }> {
+async function launchHost(options: HostOptions, beforeSessionPrepare?: (memory?: WorkerMemoryBinding) => void): Promise<{ pid: number }> {
   // Snapshot once before any awaits; an updater may activate a newer revision
   // during startup, but this Host must load one exact immutable package.
   if (options.prReviewOnly) {
@@ -461,7 +462,7 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
   const cleanLaunch = () => cleanup ??= fs.rm(launchDirectory, { recursive: true });
   try {
     const initialSettings = options.modelPreset?.preset ?? options.modelSettings;
-    await fs.writeFile(configPath, JSON.stringify({
+    const hostSettings = {
       ...options.worker?.config,
       task: { maxConcurrency: options.subagentConcurrency },
       goal: { continuationModes: [RPC_GOAL_CONTINUATION_MODE] },
@@ -475,7 +476,8 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
         ...(initialSettings.defaultThinkingLevel !== undefined
           ? { defaultThinkingLevel: initialSettings.defaultThinkingLevel } : {}),
       } : options.model ? { modelRoles: { default: options.model } } : {}),
-    }), { flag: "wx", mode: 0o600 });
+    };
+    await fs.writeFile(configPath, JSON.stringify(hostSettings), { flag: "wx", mode: 0o600 });
     log = await fs.open(options.logPath, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
     const stat = await log.stat();
     if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) {
@@ -485,6 +487,7 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
     const { env: _inheritedEnvironment, worker: _workerProfile, ...launchOptions } = options;
     const helperPath = fileURLToPath(new URL("../host-sdk-helper.ts", import.meta.url));
     let manifest: Record<string, unknown> | undefined;
+    let workerMemory: { binding: WorkerMemoryBinding; env: Record<string, string> } | undefined;
     const extensionPaths = managedUlwPath === undefined ? [] : [fileURLToPath(new URL("../../", import.meta.url)),
       managedUlwPath, options.extensionPath,
       fileURLToPath(new URL("../host-extension.ts", import.meta.url))];
@@ -493,13 +496,26 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
     // is sent. Preparation and owner startup share the same deadline.
     const { composition, prepared, deadline } = await managedUlwLaunch({ cwd: options.cwd, managedUlwPath,
       extensionPaths, configPath, parentConfigPath: process.env.OMP_SUPERAGENT_HOST_CONFIG, commandArgs: options.command.slice(1),
-      ...(options.worker ? { worker: { extensionPaths: options.worker.extensionPaths } } : {}),
+      ...(options.worker ? { worker: { extensionPaths: options.worker.extensionPaths, memory: options.worker.memory } } : {}),
       launchArgs: managedUlwPath === undefined ? [] : [...options.command.slice(1), ...await buildHostArgs(options, configPath)],
       env: options.env, bunCommand: [bun, "--no-env-file"] }, {
-      stderr: log.fd, timeoutMs: START_TIMEOUT_MS, beforeManifest: beforeSessionPrepare,
+      stderr: log.fd, timeoutMs: START_TIMEOUT_MS, beforeManifest: () => beforeSessionPrepare?.(workerMemory?.binding),
       manifest: async composition => {
+        if (options.worker?.memory?.previous && !composition.workerMemory && !composition.workerMemoryDormant)
+          throw new Error("Worker memory cannot resume without its verified private bank");
+        if (composition.workerMemory && options.worker?.memory) {
+          const { prepareWorkerMemory } = await import("../worker/worker-memory-storage");
+          const privateMemory = prepareWorkerMemory(options.worker.memory, options, composition.workerMemory);
+          // Discovery verified the actual native backend and scope with no overlay
+          // override. Only redirect the opted-in native bank before journal preparation.
+          const overlay = await fs.open(configPath, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_TRUNC);
+          try { await overlay.writeFile(JSON.stringify({ ...hostSettings, ...privateMemory.config })); }
+          finally { await overlay.close(); }
+          workerMemory = privateMemory;
+        }
         manifest = { options: launchOptions, args: await buildHostArgs(options, configPath, composition), configPath,
           memoryWriteDir: composition.memoryWriteDir, processBackend, helperPath,
+          ...(workerMemory && { workerMemoryProfile: composition.workerMemory?.profile }),
           nativeSocket: path.join(path.dirname(options.socketPath), `.n-${crypto.randomUUID().slice(0, 8)}.sock`) };
         return manifest;
       },
@@ -519,7 +535,8 @@ async function launchHost(options: HostOptions, beforeSessionPrepare?: () => voi
       inventory: flags.inventory, nativeProfileBinding: flags.nativeProfileBinding, replayableArgvHash: flags.replayableArgvHash }), { flag: "wx", mode: 0o600 });
     if (performance.now() >= deadline) throw new Error("Native Host startup timed out before launch");
     child = spawn(hostOwnerExecutable, [manifestPath], {
-      cwd: options.cwd, env: options.env,
+      cwd: options.cwd, env: workerMemory ? { ...options.env, ...workerMemory.env,
+        [WORKER_MEMORY_PROFILE_ENV]: JSON.stringify(flags.workerMemoryProfileBinding ?? null) } : options.env,
       detached: true, stdio: ["ignore", log.fd, log.fd], shell: false,
     });
     child.once("error", error => { failure = error; });

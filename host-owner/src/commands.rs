@@ -99,7 +99,9 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
         reply_voice: None,
     };
     let worker = owner.is_worker();
-    if worker && !worker_rpc::allows(&command.name, &command.frame) {
+    if (worker && !worker_rpc::allows(&command.name, &command.frame))
+        || (command.name == "get_worker_memory" && (!worker || !owner.worker_memory_supported()))
+    {
         return command.worker_refusal(peer);
     }
     if owner.pr_review_only() && !allows_pr_review(&command) {
@@ -157,6 +159,7 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
                 if worker && !worker_rpc::allows_answer(&command.frame, &state.ui[index]) {
                     return command.worker_refusal(peer);
                 }
+                state.invalidate_memory_read();
                 owner.native.send(command.frame)?;
                 state.ui.remove(index);
             }
@@ -223,7 +226,29 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
     }
     // An explicit stock set_event_filter falls through to normal native
     // dispatch, keeping the installed CLI's global behavior.
+    if command.name == "get_worker_memory" {
+        if state.memory_read.is_some() || state.active_commands != 0 || !state.requests.is_empty() {
+            return command.respond(peer, busy("Host is busy (session_busy)"));
+        }
+        state.memory_read = Some(false);
+        drop(state);
+        let owner = Arc::clone(owner);
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let result = worker_memory(&owner, &mut command, &peer).await;
+            if let Ok(mut state) = owner.state() {
+                state.memory_read = None;
+            }
+            if result.is_err() {
+                peer.close();
+            }
+        });
+        return Ok(());
+    }
     let capacity = peer.admit_command()?;
+    if !command.read_only() {
+        state.invalidate_memory_read();
+    }
     if command.interrupt() || command.goal_stop() {
         state.generation = state.generation.checked_add(1).ok_or(Error::Unavailable(
             "Host admission generation is unavailable",
@@ -452,6 +477,23 @@ async fn idle(owner: &Owner) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Unavailable("Host is busy (session_busy)"))
+    }
+}
+
+async fn worker_memory(owner: &Owner, command: &mut Command, peer: &Channel) -> Result<()> {
+    if idle(owner).await.is_err() || owner.state()?.memory_read != Some(false) {
+        return command.respond(peer, busy("Host is busy (session_busy)"));
+    }
+    let page = owner.worker_memory_page(std::mem::take(&mut command.frame)).await;
+    let state = owner.state()?;
+    if state.memory_read != Some(false) || state.fenced() || state.active_commands != 0
+        || !state.requests.is_empty() || !state.ui.is_empty() || !owner.observations_known(&state)
+    {
+        return command.respond(peer, busy("Host is busy (session_busy)"));
+    }
+    match page {
+        Ok(page) => command.respond(peer, json!({"success": true, "data": page})),
+        Err(_) => command.respond(peer, json!({"success": false, "error": "Worker memory is unavailable"})),
     }
 }
 

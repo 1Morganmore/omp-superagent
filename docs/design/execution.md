@@ -14,9 +14,9 @@ host requires it, unless the operator explicitly requests Git worktrees. No
 checkout is needed just for a read-only lane or separate reporting; checkouts
 do not isolate shared refs, services or integration effects.
 
-### Management tools
+### Remote placement
 
-**Remote placement.** The head may bind a new lane to a verified SSH worker.
+The head may bind a new lane to a verified SSH worker.
 The durable binding includes the target enrollment, repository identity, revision
 and subdirectory. Admission, approvals and messenger delivery remain head-owned;
 the worker launches the stock Host and owns its Unix socket, processes and native
@@ -43,6 +43,133 @@ ordinary prompts, not the full stock RPC surface. In particular, callers
 cannot use attach to choose a different session or invoke native shell commands.
 The target account and its explicitly approved extensions remain trusted;
 OpenSSH command restrictions are not an OS sandbox for native agent tools.
+
+### Idle remote memory pull
+
+`remoteMemorySync` is an opt-in HEAD config setting, not a lane tool. The privacy
+boundary is a newly negotiated, paired worker lane in the **same canonical
+workspace as HEAD**. Both ends must use Mnemopi's `per-project` mode, not
+`per-project-tagged` or `global`. A participating worker lane starts with a private native
+bank and no previously shared project memories. Older sessions keep their
+original native store; neither it nor its contents are moved or removed.
+The controller never searches the worker's normal profile for historical records.
+
+| Native backend | As worker source | As HEAD destination |
+| --- | --- | --- |
+| Mnemopi | Explicit project `retain`/`learn` facts in the isolated lane's native project bank. Exclude global writes, automatic transcripts, synthesized episodes, scratchpads, context/metadata and skills. | The live HEAD's matching project write bank only. Import text, not vectors, using the local bank's indexing policy. |
+| Local | No session-bound record iterator for the shared rollout summary / `learned.md`. | No independent non-overwriting, searchable record import; the summary is developer-instruction input. |
+| Hindsight | Remote bank listing and project tags are not a lane-owned export. | A queued remote retain is neither a local import nor a confirmed index. |
+| Sharpshooter | Shared project files, not a lane-owned native record stream. | No supported isolated record import with replay confirmation. |
+| Off, unavailable, unknown or older peer | No pull. | No import. |
+
+Both ends must qualify; a mixed pair is not converted in either direction.
+An unsupported pair keeps its ordinary lane lifecycle, including the existing
+managed-memory launch preflight. Sync does not enable memory, change auth,
+silently create a vector provider or upgrade the peer.
+
+**Why not an OMP export or an SSH file copy?** In
+[OMP 19.2.1 at `b55cd1b`](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/coding-agent/src/memory-backend/types.ts),
+the generic extension API exposes `status`, `search` and `save`. Search is ranked,
+clipped and scoped for recall; it is not iteration. Mnemopi opens its project
+store [with the bank as the BEAM session ID](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/coding-agent/src/mnemopi/state.ts);
+that ID alone does not identify the OMP lane. Its
+[snapshot and import](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/mnemopi/src/core/beam/store.ts)
+operate on a bank, not an authenticated lane; a snapshot includes scratchpad
+and consolidation data. Superagent neither calls a full export nor accepts a
+database, filesystem path, table selector, provider option or command over SSH.
+
+Children can share the parent's native bank and edit a row without replacing its
+creation metadata. The worker therefore also requires a content digest witnessed
+at a successful **root, built-in** `retain` or `learn` call. It correlates
+the root execution start, effective tool result and terminal execution event.
+If stock presents `retain` or `learn` as a Bash command, only a single literal
+foreground invocation with a successful typed native dispatch receipt counts;
+command output, file- or stdin-backed arguments, help, compound commands and
+background jobs do not.
+Only matching project text is sealed in the form of a digest, never a second
+copy of the text. Indirect calls without that proof, partial successes, oversized
+batches, skill writes, replaced text and facts predating enrollment remain local.
+The worker caps the witness at 65,536 entries per private bank; after that it
+still retains ordinary native memories but does not attest additional facts.
+
+After an admitted run has settled, the existing controller pump can pull one
+bounded page per minute while the native lane remains resident. It gives
+queued work priority, uses a single in-flight pull, rechecks enrollment and
+native identity, and discards a page if its authority or destination changed
+before import. The live Git root, repository-relative path and revision must
+still match after native idle confirmation. Preparing a private bank makes
+that worker eligible for a later readiness check, not for a read: its native
+backend may initialize after attachment. Idle eviction permits one bounded final attempt; release does
+not wait indefinitely for indexing, retry a missing acknowledgement or wake a
+Host just to copy memory. Capacity eviction bypasses maintenance for a queued
+lane. Stop or expiry cancels the pull's SSH probe without disconnecting the
+lane's normal control channel. A short residency can leave records on the worker
+until a later eligible run. Memory is never removed on either side by sync.
+
+The durable cursor is bound to the native session, worker enrollment and
+placement, and the HEAD destination. A bounded, cyclic scan can rediscover an
+edited row or a reused SQLite row ID. Each page examines at most 64 working
+rows plus one lookahead and returns at most 16 facts, 2 KiB each, in a 24 KiB
+page. After a complete scan with one stable bank-change stamp the worker can
+answer without reading or transmitting the same facts. A new Host attempt
+invalidates that stamp, not the destination's record IDs. Native import IDs bind the
+logical destination, origin and fact text, not the source row number or ID: two
+rows with the same witnessed text in the same lane represent one imported fact.
+Replay cannot overwrite existing records
+or schedule another embedding for unchanged text. HEAD keeps a destination-scoped
+digest receipt, not the fact text: forgetting an imported fact locally does not
+make replay recreate it. A crash after reserving the digest but before native
+commit leaves that uncertain fact on the worker rather than replaying it.
+This is an append-only
+transfer of observed facts, **not** a replica of updates or deletions. Neither
+the cursor nor an SSH acknowledgement proves a vector exists. `lane_inspect`
+reports page-level counts; only readback of a matching local model/vector
+counts as indexed. `pending` counts a running native embedding task; `deferred`
+means the text is present but no current task or vector was confirmed;
+`disabled` means the configured policy is text-only. Imported records
+are marked `IMPORTED` and receive lexical indexing. The HEAD adapter calls the
+live BEAM `importFromDict({ working_memory: … }, false)`, never the worker's
+export or a vector insert. Only new records are submitted for native
+[embedding](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/mnemopi/src/core/beam/store.ts).
+An active-model vector is checked locally
+after the native task settles; a missing vector is not proof of provider
+failure or an instruction to send the text again. The adapter uses the
+pinned SDK's document embedding and conditional live-vector insert for just
+the new rows. It never rewrites fact text or starts a whole-bank reindex.
+The package's normal postinstall prepares `.upstream/worker-memory-sdk.mjs`
+from the locked dependencies for stock CLIs that cannot import those helpers
+directly. This does not build or replace OMP; a missing supported capability
+does not switch the lane to a shared memory store.
+Coordination receipts, text inserts and delayed vector writes all defer on
+lock contention rather than blocking HEAD's event loop.
+HEAD must have a persistent profile that remains safe on a normal bank reopen:
+`mnemopi.noEmbeddings: true` for lexical-only use, or `models.offline: true`.
+Immediate vector indexing requires an embedding provider already scoped and
+authorized on the live HEAD bank. A local model name or cached weights alone
+are not such a handle: text is searchable and the vector is reported as
+deferred. The importer does not initialize an unscoped model, download one or
+launch another CLI. A temporary offline or text-only override alone is not sufficient.
+
+An online HEAD with embeddings enabled is **not** a destination, even if its
+model name is local. The pinned stock [reopen repair](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/mnemopi/src/core/beam/store.ts)
+embeds missing vectors and, on any stale model stamp, the whole bank. Other
+native sessions can write stamps into the same project bank. The [embedding
+resolver](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/mnemopi/src/core/embeddings.ts)
+can use a process-wide provider before the named local model. Sync cannot bind
+a future stock reopen to a provider per imported row. An enabled HTTP profile
+is also ineligible; stock does not authorize redirect targets individually.
+Changing the operator's durable policy later can change how native OMP uses
+facts already stored.
+
+No transferred text is submitted as a prompt, published to a messenger or
+included in a sync diagnostic. Once stored, the destination's normal OMP
+recall and compaction policies still apply to it as memory data. Anyone with
+access to that native repository/profile can potentially recall those facts.
+Only enable transfer for a trusted workspace. Secret-pattern checks reject
+recognizable credentials; they cannot determine whether an arbitrary
+natural-language fact is confidential.
+
+### Management tools
 
 The [head extension](../../src/extension.ts) restricts manager tools to
 the managed root. Use live tool schemas for arguments and [head role
