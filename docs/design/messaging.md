@@ -37,6 +37,10 @@ still parses as a command.
 The owner, guild and parent-channel checks still apply. Owner DMs, Discord
 application commands, approval components and restricted group rooms retain
 their existing policies.
+An ordinary message from the configured owner in an allowed guild but excluded
+parent channel is not admitted or answered. Once routing identifies the
+exclusion, the Gateway can log only the guild, destination and parent IDs, at
+most once per second per Discord adapter, with no additional metadata lookup.
 
 Standalone owner preferences, such as the shared reply voice, cannot be set
 through a reply, forward, or attachment. Adapters keep that provenance even
@@ -221,6 +225,21 @@ job's origin, not the mixed assistant text. A foreground answer observed
 before the foreign completion is still sent to its own conversation. If a
 native batch cannot be split by origin, only individually identified job
 receipts are sent.
+
+Same-conversation Discord HEAD steers still share one final answer. When the
+native session has observed a steer before that answer and completed its
+correlated prompt, the controller records its physical source with the answer.
+The opening request may be a Discord application command with no physical
+message of its own. An unrelated background result or notification cannot
+prove that a joined message was answered, even in the same topic. A clean
+answer observed before that input can still provide proof if selected for
+delivery. An observed job launched in a continuation proved by a completion
+from the same request can contribute to its answer.
+Once Discord confirms the answer's message ID, the outbox queues a short inline
+link for each distinct joined message; a deleted source cannot fall back to a
+standalone link. This does not duplicate the answer or claim that each
+request's work succeeded. An uncertain or failed answer send does not produce
+a link.
 
 ### Uncertain submissions
 

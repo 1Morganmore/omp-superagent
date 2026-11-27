@@ -54,6 +54,8 @@ impl Output {
 pub(super) struct MessageReference {
     route: Route,
     message_id: String,
+    #[serde(default)]
+    require_existing: bool,
 }
 
 #[derive(Deserialize)]
@@ -290,7 +292,7 @@ impl State {
                 && let Some(reply) = &output.reply_to
             {
                 payload.body["message_reference"] =
-                    json!({"message_id": reply.message_id, "fail_if_not_exists": false});
+                    json!({"message_id": reply.message_id, "fail_if_not_exists": reply.require_existing});
             }
             let request = payload.apply(
                 self.rest

@@ -786,6 +786,10 @@ Slack은 [`reactions.add`](https://docs.slack.dev/reference/methods/reactions.ad
 바꾸거나 자동 재시도하지 않는다. 이 표시는 작업 성공·완료 검증이나 플랫폼 read receipt가
 아니다. 강제 종료·API 실패 시 원격 반응 정리는 보장하지 않는다.
 
+같은 Discord 대화의 후속 메시지가 실행 중인 HEAD 턴에 합류한 경우 최종 답변 본문은
+한 번만 전송한다. native 실행에서 후속 메시지가 그 답변 전에 들어왔고 해당 요청의
+종료가 확인되면, 답변 전송이 확인된 뒤 각각의 원본 후속 메시지에 통합 답변 링크를 단다.
+
 ## 3. 설정
 
 ### 터미널 셋업
@@ -1075,6 +1079,9 @@ start는 **detached Gateway를 먼저 실행**하고 Gateway가 지정 head 하�
 영수증이 아니다. CLI가 출력한 Gateway/Host 로그에서 해당 단계의 실제 오류·상태를 구분한다.
 Gateway 로컬 endpoint는 `<stateDir>/run/gateway.sock`, 실제 어댑터·감독 로그는
 `<stateDir>/logs/gateway.log`다. native head 로그와 transport 로그를 혼동하지 않는다.
+Discord 소유자 메시지가 부모 채널 allowlist에서 제외되면 이 로그에서
+`Discord owner input ignored: channel not allowlisted`를 확인한다. 빈도를 제한하며
+서버·전송 대상·부모 채널 ID만 남긴다. 제외된 채널에는 아무것도 게시하지 않는다.
 헤드 부재 중에도 준비된 Gateway는 ACK 전에 수신을 저장한다. 미해결 접수/답변은
 pending 순서를 유지하고 `gateway.unresolvedEvents`와 `head.ready: false`로 표시한다.
 재연결·접수 재전달은 원래 작업·외부 효과의 재실행 허가가 아니다. 운영자는 로그·원래 receipt와

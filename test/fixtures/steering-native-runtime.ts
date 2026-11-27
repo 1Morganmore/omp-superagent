@@ -11,7 +11,7 @@ import { Superagent } from "../../src/runtime/controller";
 import { Store } from "../../src/storage/store";
 import { nativeDisabledProviders } from "./native-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
-import { steeringModel, steeringRecord } from "./steering-native-extension";
+import { steeringContinuationJobGate, steeringJobGate, steeringModel, steeringRecord } from "./steering-native-extension";
 import { nativeTestCommand } from "./native-command";
 import { offlineMnemopi } from "./native-memory";
 
@@ -54,7 +54,7 @@ class RecordingMessenger implements Messenger {
   }
   async send(output: OutputRecord): Promise<string> {
     this.sent.push({ ...structuredClone(output), ...this.snapshot() });
-    return `native-steering-receipt:${output.id}`;
+    return String(9000 + this.sent.length);
   }
   async canCreateThread(): Promise<boolean> { return true; }
   async createThread(route: Route, title: string, sourceMessageId?: string): Promise<Route> {
@@ -228,7 +228,7 @@ export async function nativeSteeringRuntime(): Promise<void> {
     if (!current || current.socket.destroyed) throw new Error(`Native barrier is not live: ${token}`);
     current.socket.write("release\n");
   };
-  const requireAdmission = (id: string, socketPath: string, steer: boolean) => {
+  const requireAdmission = (id: string, socketPath: string, steer: boolean, sessionSettled = true) => {
     const input = store.input(id)!;
     const admitted = admissions.filter(value => value.id === input.requestId);
     expect(admitted).toHaveLength(1);
@@ -238,7 +238,7 @@ export async function nativeSteeringRuntime(): Promise<void> {
     // A queued prompt opens a real correlated native completion ticket; bare steer does not.
     expect(admitted[0]!.response).not.toHaveProperty("data");
     expect(results(id)).toHaveLength(1);
-    expect(results(id)[0]!.frame).toMatchObject({ status: "completed", agentInvoked: true, sessionSettled: true });
+    expect(results(id)[0]!.frame).toMatchObject({ status: "completed", agentInvoked: true, sessionSettled });
   };
   try {
     const started = await startHost(mainOptions);
@@ -252,11 +252,22 @@ export async function nativeSteeringRuntime(): Promise<void> {
     await runtime.start();
 
     const first = inbound("101", route, "First head request [native-barrier:head-live]");
-    const follow = inbound("102", route, "Ordinary same-route followup [native-follow]");
+    const follow = inbound("102", route, "Ordinary same-route followup [native-barrier:head-follow]");
+    const secondFollow = inbound("104", route, "Another ordinary same-route followup [native-steering-finish]");
     const cross = headInput("103", otherRoute, "Independent cross-topic request [native-cross]");
     await messenger.deliver(first);
     const firstGate = await gate("head-live");
     expect(firstGate).toMatchObject({ pid: started.pid, sessionId: mainIdentity.sessionId, run: 1 });
+    const expectBusyGoal = async () => expect(await main.client.getState()).toMatchObject({
+      isSettled: false, isStreaming: true, hasOwnedRunningWork: true, hasPendingAsyncWork: true,
+      goal: { goal: { status: "active" } },
+    });
+    await expectBusyGoal();
+    expect(trace.some(({ frame }) => {
+      const message = frame.message as { toolName?: string; details?: { async?: { state: string; jobId: string } } } | undefined;
+      return frame.type === "message_end" && message?.toolName === "bash"
+        && message.details?.async?.state === "running" && !!message.details.async.jobId;
+    })).toBe(true);
     expect(store.input(first.id)?.state).toBe("submitted");
     await messenger.deliver(follow);
     await checkpoint(main, 1);
@@ -270,32 +281,52 @@ export async function nativeSteeringRuntime(): Promise<void> {
     expect(results(follow.id)).toHaveLength(0);
     expect(messenger.sent).toHaveLength(0);
     release("head-live");
-    await wait(() => done(first.id, follow.id, cross.id) && messenger.sent.length === 2, "coalesced first answer and isolated cross-topic answer");
-    requireAdmission(first.id, mainPaths.socketPath, false);
-    requireAdmission(follow.id, mainPaths.socketPath, true);
+    expect(await gate("head-follow")).toMatchObject({ pid: started.pid, sessionId: mainIdentity.sessionId, run: 1 });
+    await messenger.deliver(secondFollow);
+    await checkpoint(main, 1);
+    expect(store.input(secondFollow.id)?.state).toBe("submitted");
+    await expectBusyGoal();
+    expect(messenger.sent).toHaveLength(0);
+    release("head-follow");
+    await wait(() => [first.id, follow.id, secondFollow.id].every(id => results(id).length === 1),
+      "native prompt results at the async yield, before session settlement");
+    expect(await main.client.getState()).toMatchObject({ isSettled: false, hasPendingAsyncWork: true });
+    expect(messenger.sent).toHaveLength(0);
+    await fs.writeFile(path.join(headCwd, steeringJobGate), "", { flag: "wx", mode: 0o600 });
+    await wait(() => trace.some(({ frame }) => frame.type === "message_end"
+      && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "steering-continuation-job"),
+    "second native Bash job launched from the original request's async continuation");
+    expect(messenger.sent).toHaveLength(0);
+    await fs.writeFile(path.join(headCwd, steeringContinuationJobGate), "", { flag: "wx", mode: 0o600 });
+    await wait(() => done(first.id, follow.id, secondFollow.id, cross.id)
+      && store.output(`${cross.id}:answer`)?.state === "sent", "coalesced first answer and isolated cross-topic answer");
+    requireAdmission(first.id, mainPaths.socketPath, false, false);
+    requireAdmission(follow.id, mainPaths.socketPath, true, false);
+    requireAdmission(secondFollow.id, mainPaths.socketPath, true, false);
     requireAdmission(cross.id, mainPaths.socketPath, false);
     expect(store.input(first.id)!.requestId).not.toBe(store.input(follow.id)!.requestId);
     const firstAnswer = messenger.sent.find(output => output.sourceId === first.id)!;
-    expect(firstAnswer).toMatchObject({ route, text: "Native final 102; sources 101,102", inputStates: { "101": "done", "102": "done" } });
-    expect(messenger.sent.filter(output => [first.id, follow.id].includes(output.sourceId))).toHaveLength(1);
+    expect(firstAnswer).toMatchObject({ route, replyTo: { route, messageId: first.id },
+      text: "Native final 104; sources 101,102,104", inputStates: { "101": "done", "102": "done", "104": "done" } });
     expect(messenger.sent.find(output => output.sourceId === cross.id)).toMatchObject({ route: otherRoute });
-    const firstCompletion = results(first.id)[0]!;
-    const followCompletion = results(follow.id)[0]!;
-    expect(firstCompletion.inputStates).toMatchObject({ "101": "submitted", "102": "submitted" });
-    expect(followCompletion.inputStates).toMatchObject({ "101": "submitted", "102": "submitted" });
-    expect(firstAnswer.sequence).toBeGreaterThan(Math.max(firstCompletion.sequence, followCompletion.sequence));
+    const completions = [first.id, follow.id, secondFollow.id].map(id => results(id)[0]!);
+    for (const completion of completions)
+      expect(completion.inputStates).toMatchObject({ "101": "submitted", "102": "submitted", "104": "submitted" });
+    const lastCompletion = Math.max(...completions.map(value => value.sequence));
+    expect(firstAnswer.sequence).toBeGreaterThan(lastCompletion);
     expect(trace.some(event => event.socketPath === mainPaths.socketPath && event.frame.type === "session_settled"
-      && event.sequence > Math.max(firstCompletion.sequence, followCompletion.sequence) && event.sequence < firstAnswer.sequence)).toBe(true);
+      && event.sequence > lastCompletion && event.sequence < firstAnswer.sequence)).toBe(true);
     const headObservations = observations(await entries());
     expect(headObservations.filter(value => value.phase === "answer")).toEqual([
-      expect.objectContaining({ run: 1, requestId: follow.id, requestIds: [first.id, follow.id], sourceIds: [first.id, follow.id] }),
-      expect.objectContaining({ run: 2, requestId: cross.id, requestIds: [first.id, follow.id, cross.id] }),
+      expect.objectContaining({ run: 1, requestId: secondFollow.id, requestIds: [first.id, follow.id, secondFollow.id],
+        sourceIds: [first.id, follow.id, secondFollow.id] }),
+      expect.objectContaining({ run: 2, requestId: secondFollow.id, requestIds: [first.id, follow.id, secondFollow.id] }),
+      expect.objectContaining({ run: 3, requestId: secondFollow.id, requestIds: [first.id, follow.id, secondFollow.id] }),
+      expect.objectContaining({ run: 4, requestId: cross.id, requestIds: [first.id, follow.id, secondFollow.id, cross.id] }),
     ]);
     // This is the decisive native proof: no terminal agent_end between the live
     // tool barrier's run and the model call which actually consumed the second user input.
-    const crossStart = trace.find(event => event.frame.type === "agent_start" && event.sequence > firstCompletion.sequence)!;
-    expect(crossStart.sequence).toBeGreaterThan(followCompletion.sequence);
-    expect(trace.filter(event => event.frame.type === "agent_start" && event.sequence < firstCompletion.sequence)).toHaveLength(1);
+    expect(trace.filter(event => event.frame.type === "agent_start" && event.sequence < lastCompletion)).toHaveLength(1);
     const receivedFollow = trace.find(event => {
       const message = event.frame.message as { role?: string; content?: unknown } | undefined;
       if (event.frame.type !== "message_start" || message?.role !== "user") return false;
@@ -304,10 +335,20 @@ export async function nativeSteeringRuntime(): Promise<void> {
       return nativeRequestEnvelope(text)?.requestId === follow.id;
     });
     expect(receivedFollow).toBeDefined();
-    expect(receivedFollow!.sequence).toBeLessThan(firstCompletion.sequence);
+    expect(receivedFollow!.sequence).toBeLessThan(lastCompletion);
     expect(users(await entries())).toEqual([
-      { requestId: first.id, sourceId: first.id }, { requestId: follow.id, sourceId: follow.id }, { requestId: cross.id, sourceId: cross.id },
+      { requestId: first.id, sourceId: first.id }, { requestId: follow.id, sourceId: follow.id },
+      { requestId: secondFollow.id, sourceId: secondFollow.id }, { requestId: cross.id, sourceId: cross.id },
     ]);
+    const firstReceipt = store.output(firstAnswer.id);
+    expect(firstReceipt).toMatchObject({ state: "sent", remoteId: "9001" });
+    for (const joined of [follow, secondFollow]) {
+      expect(messenger.sent.filter(output => output.sourceId === joined.id)).toEqual([
+        expect.objectContaining({ route, replyTo: { route, messageId: joined.id, requireExisting: true },
+          text: expect.stringContaining(`https://discord.com/channels/3/4/${firstReceipt!.remoteId}`) }),
+      ]);
+    }
+    expect(messenger.sent.filter(output => output.text === firstAnswer.text)).toHaveLength(1);
 
     const sourceOne = inbound("201", route, "[native-delegate] Topic one [native-barrier:lane-one]");
     const sourceTwo = headInput("202", route, "[native-delegate] Topic two [native-barrier:lane-two]");
@@ -399,6 +440,7 @@ export async function nativeSteeringRuntime(): Promise<void> {
       main: users(await entries()), one: users(await entries(laneStateOne.sessionFile)), two: users(await entries(laneStateTwo.sessionFile)) };
     await messenger.deliver(first);
     await messenger.deliver(follow);
+    await messenger.deliver(secondFollow);
     await messenger.deliver(sourceOne);
     expect((await runtime.startLane(selection(sourceOne.id, 0))).id).toBe(laneOne.id);
     await messenger.deliver(laneFollow);
@@ -547,6 +589,8 @@ export async function nativeSteeringRuntime(): Promise<void> {
     throw new Error(`${cause instanceof Error ? cause.message : String(cause)}\nNative steering diagnostics retained: ${root}/failure.json`, { cause });
   } finally {
     try {
+      await fs.writeFile(path.join(headCwd, steeringJobGate), "", { mode: 0o600 });
+      await fs.writeFile(path.join(headCwd, steeringContinuationJobGate), "", { mode: 0o600 });
       await runtime.stop();
       const laneRows = ledger.query("SELECT data FROM lanes").all() as Array<{ data: string }>;
       for (const { data } of laneRows) {

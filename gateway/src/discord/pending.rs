@@ -159,7 +159,12 @@ impl Pending {
         if self.exact_guild && self.guild_id != channel.guild_id {
             return Ok(Resolution::Refused);
         }
-        let Ok(route) = state.route_for(&channel) else { return Ok(Resolution::Refused) };
+        let Ok(route) = state.route_for(&channel) else {
+            if let Some(wire) = live {
+                state.log_excluded_owner_channel(&wire.data, self.create, &channel);
+            }
+            return Ok(Resolution::Refused);
+        };
         if state.group_route(&route) {
             // The durable record is never a basis for a group effect.
             return Ok(if live.is_some_and(|wire| wire.group) {

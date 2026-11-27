@@ -90,7 +90,9 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Some((status, value)) = fixture.responses.lock().unwrap().get(&target) {
-        if method == "GET" && (status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS) {
+        if method == "PUT" && path.contains("/reactions/")
+            || method == "GET" && (status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS)
+        {
             drop(fixture.emitted.send((path, Value::Null)));
         }
         return (*status, Json(value.clone())).into_response();
@@ -320,6 +322,7 @@ async fn discord_fixture_with_store(mut config: Value, store: &Arc<Store>) -> (
                 stopping: AtomicBool::new(false),
                 identity: OnceLock::new(),
                 channels: RwLock::default(),
+                excluded_owner_log: Mutex::new(None),
                 voice,
                 cards: Cards::default(),
                 purpose_lock: Mutex::new(()),
@@ -332,6 +335,94 @@ async fn discord_fixture_with_store(mut config: Value, store: &Arc<Store>) -> (
     })
     .unwrap();
     (hub, ws, observed, last_card, server, responses, state.unwrap())
+}
+
+#[tokio::test]
+async fn discord_receipt_tracks_each_durable_message_without_waiting_for_head() {
+    let temporary = Temp::new();
+    let store = Arc::new(Store::open(&temporary.0).unwrap());
+    let (hub, ws, mut observed, _, server, responses, _) =
+        discord_fixture_with_store(json!({"discord":{}}), &store).await;
+    let mut socket = addressing_tests::start(&hub, &ws, false).await;
+    for (sequence, id) in [(3, "201"), (5, "202"), (7, "203")] {
+        let reaction = format!("/channels/88/messages/{id}/reactions/%F0%9F%91%80/@me");
+        addressing_tests::respond(&responses, &reaction, StatusCode::NO_CONTENT, Value::Null);
+        let input = addressing_tests::owner(id, "owner request");
+        dispatch(&mut socket, sequence, "MESSAGE_CREATE", input.clone()).await;
+        received(&mut observed, &reaction).await;
+        // No HEAD is attached or acting on these inputs.
+        let row = queued_event(&hub, &store).await;
+        assert_eq!(row.event["input"]["messageId"], id);
+        dispatch(&mut socket, sequence + 1, "MESSAGE_CREATE", input).await;
+        store.receipt(row.sequence, GatewayReceipt::Accepted).unwrap();
+    }
+    addressing_recovery_tests::assert_checkpoint(&mut socket, 8).await;
+    hub.stop().await.unwrap();
+    assert!(observed.is_empty());
+    assert_eq!(store.pending().unwrap(), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn discord_excluded_owner_inputs_are_not_admitted() {
+    let temporary = Temp::new();
+    let store = Arc::new(Store::open(&temporary.0).unwrap());
+    let (hub, ws, observed, _, server, responses, state) =
+        discord_fixture_with_store(json!({"discord":{}}), &store).await;
+    let mut socket = addressing_tests::start(&hub, &ws, false).await;
+    for path in ["/channels/89", "/channels/91"] {
+        addressing_tests::respond(&responses, path, StatusCode::SERVICE_UNAVAILABLE, Value::Null);
+    }
+    let mut bot = message("203", Some("77"), "89", "42", "private bot text");
+    bot["author"]["bot"] = json!(true);
+    let mut mention = message("204", Some("77"), "89", "42", "<@71> private team text");
+    mention["mentions"] = json!([{"id":"71","bot":true}]);
+    for (sequence, source) in [
+        (3, message("201", Some("77"), "89", "43", "private non-owner text")),
+        (4, message("202", Some("78"), "89", "42", "private other guild text")),
+        (5, bot),
+    ] {
+        dispatch(&mut socket, sequence, "MESSAGE_CREATE", source).await;
+    }
+    addressing_recovery_tests::assert_checkpoint(&mut socket, 5).await;
+    assert!(state.excluded_owner_log.lock().await.is_none());
+    for (sequence, source) in [
+        (6, mention),
+        (7, message("205", Some("77"), "91", "42", "private excluded thread text")),
+        (8, message("206", Some("77"), "90", "42", "allowed inherited thread")),
+    ] {
+        dispatch(&mut socket, sequence, "MESSAGE_CREATE", source).await;
+    }
+    let admitted = event(&hub, &store).await;
+    assert_eq!(admitted["input"]["messageId"], "206");
+    assert_eq!(admitted["input"]["route"]["channelId"], "88");
+    assert_eq!(admitted["input"]["route"]["threadId"], "90");
+    assert!(state.excluded_owner_log.lock().await.is_some());
+    hub.stop().await.unwrap();
+    assert!(observed.is_empty());
+    assert_eq!(store.pending().unwrap(), 0);
+    assert!(addressing_recovery_tests::journal(&temporary).is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn discord_head_link_requires_the_exact_original_reply_target() {
+    let (_temporary, _store, hub, ws, mut observed, _, server) =
+        discord_fixture(json!({"discord":{}})).await;
+    let _socket = addressing_tests::start(&hub, &ws, false).await;
+    let route = addressing_tests::parent();
+    let text = "이 후속 메시지와 함께 처리한 [HEAD 통합 답변](<https://discord.com/channels/77/88/700>)";
+    let receipt = hub.effect("send", &[json!({
+        "id":"answer:joined:202","route":route,"text":text,
+        "replyTo":{"route":route,"messageId":"202","requireExisting":true}
+    })]).await.unwrap();
+    assert_eq!(receipt, "700");
+    let delivery = received(&mut observed, "/channels/88/messages").await;
+    assert_eq!(delivery["content"], text);
+    assert_eq!(delivery["message_reference"], json!({"message_id":"202","fail_if_not_exists":true}));
+    assert_eq!(delivery["allowed_mentions"], rest::no_mentions());
+    hub.stop().await.unwrap();
+    server.abort();
 }
 
 #[tokio::test]

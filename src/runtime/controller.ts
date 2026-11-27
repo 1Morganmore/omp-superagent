@@ -188,7 +188,7 @@ interface Live {
   connection: RuntimeHost;
   input?: InputRecord;
   result?: NativePromptResult;
-  admitted: Map<string, { input: InputRecord; result?: NativePromptResult }>;
+  admitted: Map<string, { input: InputRecord; result?: NativePromptResult; discordFollowupEnteredAt?: number }>;
   running: boolean;
   preparing: number;
   ownedRuns: number;
@@ -210,7 +210,11 @@ interface Live {
   headJobPromptSeen?: boolean;
   headJobBatch?: Map<string, string>;
   headJobMixed?: boolean;
-  headJobCleanAnswer?: string;
+  headJobCleanAnswer?: { text: string; discordFollowupProofAt?: number };
+  discordNonCohortJobSeen?: boolean;
+  discordJobContinuation?: boolean;
+  discordContinuationJobIds?: Set<string>;
+  discordJoinedAnswer?: { text: string; observedAt: number };
   releasing?: boolean;
   lostDuringRelease?: boolean;
   nextReleaseProbe?: number;
@@ -7855,6 +7859,10 @@ export class Superagent {
       live.headJobStarts = undefined;
       live.headJobMixed = false;
       live.headJobCleanAnswer = undefined;
+      live.discordNonCohortJobSeen = false;
+      live.discordJobContinuation = false;
+      live.discordContinuationJobIds = undefined;
+      live.discordJoinedAnswer = undefined;
       live.scopeReviewUnsafe = false;
       if (live.id === "main") this.markActiveLaneReview(this.isLaneRecoveryReport(input.id)
         || input.id.startsWith(scopeReviewPrefix) || input.id.startsWith(laneDecisionReview)
@@ -7986,6 +7994,35 @@ export class Superagent {
     if (text !== null) live.text = text;
   }
 
+  private observeDiscordHeadFollowup(live: Live, owner: InputRecord, message: Record<string, unknown>): void {
+    if (live.id !== "main" || owner.route.platform !== "discord" || live.admitted.size < 2 || !live.running) return;
+    if (message.role === "user" && !message.synthetic) {
+      const first = Array.isArray(message.content)
+        ? record(message.content.find(part => record(part).type === "text")).text : message.content;
+      if (typeof first !== "string") return;
+      const header = /^`{3,}superagent-runtime-context\nRequest ID: ([^\r\n]+)\n\nOriginal source ID: ([^\r\n]+)\n\nOriginal authorized conversation: ([^\r\n]+)\n\n/u.exec(first);
+      if (!header) return;
+      const sourceId = header[1];
+      if (!sourceId || sourceId !== header[2] || sourceId === owner.id || header[3] !== routeKey(owner.route)) return;
+      const admitted = live.admitted.get(`sg-${key(sourceId)}-${live.generation}`);
+      if (admitted?.input.id === sourceId && admitted.input.messageId
+        && routeKey(admitted.input.route) === routeKey(owner.route)) {
+        admitted.discordFollowupEnteredAt ??= live.nativeVersion;
+      }
+    } else if (message.role === "assistant" && !live.headJobMixed) {
+      if (message.stopReason === "error" || message.stopReason === "aborted") {
+        live.discordJoinedAnswer = undefined;
+        return;
+      }
+      const text = assistantText(message);
+      // A native final uses the same block classification as canonical
+      // delivery. A later answer after an unrelated job cannot inherit proof,
+      // even if its text happens to be identical to the earlier final.
+      if (text !== null) live.discordJoinedAnswer = live.discordNonCohortJobSeen ? undefined
+        : { text, observedAt: live.nativeVersion };
+    }
+  }
+
   private observeLaneToolResult(live: Live, message: Record<string, unknown>, replay = false): void {
     if (live.id === "main" || !live.input || !this.current(live) || this.stopped) return;
     try {
@@ -8028,21 +8065,54 @@ export class Superagent {
     if (message.role === "assistant" && live.headJobPromptSeen && live.running && !live.headJobMixed) {
       // Once a foreign result enters the run, only the final answer that
       // was already observed can still be attributed to the input.
-      if (message.stopReason === "stop")
-        live.headJobCleanAnswer = assistantText(message) ?? live.headJobCleanAnswer;
-      else if (message.stopReason === "error" || message.stopReason === "aborted")
+      if (message.stopReason === "stop") {
+        const text = assistantText(message);
+        if (text !== null) live.headJobCleanAnswer = { text,
+          ...(input?.route.platform === "discord" && !live.discordNonCohortJobSeen
+            ? { discordFollowupProofAt: live.nativeVersion } : {}) };
+      } else if (message.stopReason === "error" || message.stopReason === "aborted")
         live.headJobCleanAnswer = undefined;
     }
-    if (message.role === "toolResult" && live.headJobPromptSeen && live.running && message.isError !== true) {
+    if (message.role === "toolResult" && (live.headJobPromptSeen || live.discordJobContinuation)
+      && live.running && message.isError !== true) {
       const job = record(record(message.details).async);
       if (job.state === "running" && typeof job.jobId === "string" && job.type === message.toolName
         && typeof message.toolCallId === "string" && message.toolCallId
-        && (job.type === "bash" || job.type === "eval" || job.type === "task"))
-        (live.headJobStarts ??= new Map()).set(job.jobId, message.toolCallId);
+        && (job.type === "bash" || job.type === "eval" || job.type === "task")) {
+        if (live.headJobPromptSeen) (live.headJobStarts ??= new Map()).set(job.jobId, message.toolCallId);
+        else (live.discordContinuationJobIds ??= new Set()).add(job.jobId);
+      }
     }
-    if (message.role !== "custom" || message.customType !== "async-result" || !live.headJobOwners?.size) return;
-    const items = headJobResults(message);
-    if (!items.size) return;
+    if (message.role !== "custom") return;
+    const items = message.customType === "async-result" ? headJobResults(message) : undefined;
+    // The existing delivery boundary is the conversation. The stricter link
+    // boundary is the current set of admitted requests, even in that same topic.
+    if (input?.route.platform === "discord") {
+      const ownsJob = (id: unknown) => {
+        if (typeof id !== "string" || !id) return false;
+        const owner = live.headJobOwners?.get(id)?.input;
+        return owner ? owner.id === input.id || live.admitted.get(owner.requestId ?? "")?.input.id === owner.id
+          : live.headJobStarts?.has(id) || live.discordContinuationJobIds?.has(id);
+      };
+      if (message.customType === "async-notify") {
+        const reports = record(message.details).reports;
+        // A service name belongs to a different namespace than an async job ID.
+        if (!Array.isArray(reports) || !reports.length || reports.some(item => {
+          const report = record(item);
+          return report.type !== "bash" || !ownsJob(report.id);
+        })) live.discordNonCohortJobSeen = true;
+      } else if (message.customType === "launch-completion") {
+        // No supervised-service launch is bound to a request by this path.
+        live.discordNonCohortJobSeen = true;
+      } else if (items) {
+        if (!items.size || [...items.keys()].some(id => !ownsJob(id))) live.discordNonCohortJobSeen = true;
+        // A matched completion can prove that a new native run continues the
+        // same admissions without re-emitting the original user's prompt.
+        if (live.running && !live.discordNonCohortJobSeen) live.discordJobContinuation = true;
+      }
+      if (live.discordNonCohortJobSeen) live.discordJobContinuation = false;
+    }
+    if (!items?.size || !live.headJobOwners?.size) return;
     const batch = live.headJobBatch ??= new Map();
     for (const [id, text] of items) batch.set(id, text);
     if (input && [...batch.keys()].some(id => {
@@ -8176,6 +8246,7 @@ export class Superagent {
       if (live.id === "main") {
         live.headJobYield = undefined;
         live.headJobPromptSeen = false;
+        live.discordJobContinuation = false;
         live.headJobLoop = live.input ? "foreground" : "background";
       }
       this.resultAttachments.clearStarts(live);
@@ -8247,6 +8318,7 @@ export class Superagent {
     if (frame.type === "message_end" && live.id === "main") this.observeHeadJobMessage(live, record(frame.message));
     if (frame.type === "message_end" && live.input) {
       const message = record(frame.message);
+      this.observeDiscordHeadFollowup(live, live.input, message);
       if (message.role === "toolResult") {
         this.syncLaneObservations(live, message);
       }
@@ -8467,7 +8539,7 @@ export class Superagent {
       const state = completed ? "done" : outcome === "aborted" || toolFree ? "cancelled" : "uncertain";
       headFailed = live.id === "main" && state === "uncertain";
       const text = completed ? (live.headJobMixed
-        ? live.headJobCleanAnswer ?? "다른 요청의 백그라운드 결과와 함께 생성된 응답이라 이 대화에 전달하지 않았습니다. HEAD 세션에서 확인할 수 있습니다."
+        ? live.headJobCleanAnswer?.text ?? "다른 요청의 백그라운드 결과와 함께 생성된 응답이라 이 대화에 전달하지 않았습니다. HEAD 세션에서 확인할 수 있습니다."
         : result!.agentInvoked || result!.goalResume && live.ownedRuns > 0 ? earlyAnswer ?? live.text : "") : outcome === "aborted"
         ? "실행이 중단되었습니다. 작업 완료로 처리하지 않았습니다."
         : laneError
@@ -8477,6 +8549,9 @@ export class Superagent {
           : headFailed
             ? `실행이 실패했습니다. 작업 완료로 처리하지 않았고 다시 실행하지 않았습니다. 실패 전에 도구가 실행됐거나 효과를 확인할 수 없어 뒤 HEAD 요청이 막혀 있습니다. 원래 작업을 확인한 뒤 /resolve ${input.id} 로 이 요청을 닫으면 다음 요청을 처리합니다.`
             : "실행이 실패했습니다. 작업 완료로 처리하지 않았습니다.";
+      const discordHeadFollowups: string[] = [];
+      const sharedAnswerAt = !completed ? undefined : live.headJobMixed ? live.headJobCleanAnswer?.discordFollowupProofAt
+        : live.discordJoinedAnswer?.text === text ? live.discordJoinedAnswer.observedAt : undefined;
       for (const admitted of admissions) {
         this.activity(admitted.input, false);
         if (admitted.input.id === input.id || this.store.input(admitted.input.id)?.state === "cancelled") continue;
@@ -8486,12 +8561,16 @@ export class Superagent {
           catch (error) { this.report(error); }
         }
         // Ordinary joined completions share the owner's answer. An independent
-        // failed steering command must not disappear behind a successful owner.
+        // failed lane steering command must not disappear behind a successful owner.
         const separateError = live.id !== "main" && status === "error"
           && (!laneError || Boolean(admitted.result?.quota) !== Boolean(quota));
-        this.store.settle(admitted.input.id, status === "completed" ? "done" : status === "aborted" ? "cancelled" : "uncertain",
+        const settled = this.store.settle(admitted.input.id, status === "completed" ? "done" : status === "aborted" ? "cancelled" : "uncertain",
           separateError ? { id: `${admitted.input.id}:answer`, laneFailure: admitted.result?.quota ? "quota" : "recover",
             text: laneFailureNotice(this.store, admitted.input, { quota: !!admitted.result?.quota, toolFree: false, result: admitted.result }) } : undefined);
+        if (settled && status === "completed" && admitted.result?.agentInvoked && sharedAnswerAt !== undefined
+          && admitted.discordFollowupEnteredAt !== undefined && admitted.discordFollowupEnteredAt < sharedAnswerAt) {
+          discordHeadFollowups.push(admitted.input.id);
+        }
       }
       let headModel: HeadModelChange | undefined;
       if (live.id === "main" && completed && result?.agentInvoked && !this.headStopping && !this.restartFence()) {
@@ -8502,7 +8581,7 @@ export class Superagent {
           headModel = { sourceId: intent.sourceId, model: intent.model };
         }
       }
-      // Joined receipts are durable, not separate answers or duplicate lane reports.
+      // Joined receipts share one final text, not separate model answers.
       const reviewingLaneDecision = live.id === "main" && input.id.startsWith(laneDecisionReview);
       // A goal-resume fallback without an observed assistant error is not
       // evidence of a native failure. Its durable uncertainty is observed separately.
@@ -8512,7 +8591,8 @@ export class Superagent {
       }
       this.store.settle(input.id, state, !reviewingLaneDecision && (text || live.id !== "main" || input.id.startsWith(scopeReviewPrefix))
         ? { id: `${input.id}:answer`, text, ...(scopeReviewEligible ? { scopeReviewEligible: true } : {}),
-          ...(laneError ? { laneFailure: quota ? "quota" : "recover" } : {}) }
+          ...(laneError ? { laneFailure: quota ? "quota" : "recover" } : {}),
+          ...(discordHeadFollowups.length ? { discordHeadFollowups } : {}) }
         : undefined, headModel, this.config.discord?.editProgressInPlace === true);
       if (live.id === "main") this.headCoordinationActivityAt = performance.now();
       if (live.input === input) {

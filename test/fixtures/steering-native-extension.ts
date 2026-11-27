@@ -7,6 +7,8 @@ import { nativeRequestEnvelope } from "./native-request-envelope";
 
 export const steeringModel = { provider: "steering-native", id: "local" } as const;
 export const steeringRecord = "omp-superagent-native-steering";
+export const steeringJobGate = ".release-steering-job";
+export const steeringContinuationJobGate = ".release-steering-continuation-job";
 
 export default function steeringFixture(pi: ExtensionAPI): void {
   let run = 0;
@@ -64,6 +66,33 @@ export default function steeringFixture(pi: ExtensionAPI): void {
       if (!latest) throw new Error("Native steering model did not receive a runtime-authored user envelope");
       const snapshot = { run, sessionId, requestId: latest.requestId,
         requestIds: users.map(user => user.requestId), sourceIds: users.map(user => user.sourceId) };
+      const toolResult = (id: string) => context.messages.some(message => {
+        if (message.role !== "toolResult" || message.toolCallId !== id) return false;
+        if (message.isError) throw new Error(`Native steering fixture tool failed: ${id}`);
+        return true;
+      });
+      if (latest.text.includes("[native-barrier:head-live]")) {
+        if (!toolResult("steering-goal-create")) return {
+          content: [{ type: "toolCall", id: "steering-goal-create", name: "goal", arguments: {
+            op: "create", objective: "Receive the two authorized follow-ups, then give one consolidated reply.",
+          } }],
+        };
+        if (!toolResult("steering-job")) return {
+          content: [{ type: "toolCall", id: "steering-job", name: "bash", arguments: { async: true, timeout: 45,
+            command: `while [ ! -e '${steeringJobGate}' ]; do /bin/sleep 0.05; done`,
+          } }],
+        };
+      }
+      if (latest.text.includes("[native-steering-finish]")) {
+        if (!toolResult("steering-goal-complete")) return {
+          content: [{ type: "toolCall", id: "steering-goal-complete", name: "goal", arguments: { op: "complete" } }],
+        };
+        if (run === 2 && !toolResult("steering-continuation-job")) return {
+          content: [{ type: "toolCall", id: "steering-continuation-job", name: "bash", arguments: { async: true, timeout: 45,
+            command: `while [ ! -e '${steeringContinuationJobGate}' ]; do /bin/sleep 0.05; done`,
+          } }],
+        };
+      }
       // Head intake explicitly authorizes fixture-driven public lane operations.
       // A meaningful acknowledgment completes normally, without native empty-answer retries.
       if (latest.requestId === latest.sourceId && latest.text.includes("[native-delegate]")) {
