@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Type, type Static } from "@sinclair/typebox/type";
 import { Value } from "@sinclair/typebox/value";
 import { releaseCheckout } from "./worker-checkout";
+import { workerMemoryBinding, type WorkerMemoryBinding } from "./worker-memory-storage";
 import { WorkerRefusal } from "./worker-request";
 import type { WorkerLaneRef, WorkerPolicy } from "./worker-wire";
 
@@ -19,6 +20,7 @@ const identity = Type.Object({
   ...identityFields,
   dev: Type.Number(),
   ino: Type.Number(),
+  memorySyncVersion: Type.Optional(Type.Literal(1)),
 });
 export const workerExit = Type.Object({
   ...identityFields,
@@ -40,6 +42,8 @@ const receiptFields = {
   attempt: Type.String({ pattern: "^[0-9a-f-]{36}$" }),
   launcherPid: workerPid,
   sessionId: Type.Union([sessionId, Type.Null()]),
+  memory: Type.Optional(workerMemoryBinding),
+  privateMemoryPrepared: Type.Optional(Type.Literal(true)),
 };
 const receipt = Type.Union([
   Type.Object({ ...receiptFields, phase: Type.Literal("reserved") }),
@@ -147,7 +151,9 @@ export class WorkerLedger {
     return options.reconcile ? confirm.immediate() : confirm();
   }
 
-  reserve(ref: WorkerLaneRef, binding: { readonly repoRoot: string; readonly gitDir: string; readonly launchDigest: string }, previous: WorkerReceipt | null): ReservedReceipt {
+  reserve(ref: WorkerLaneRef, binding: {
+    readonly repoRoot: string; readonly gitDir: string; readonly launchDigest: string; readonly memory?: WorkerMemoryBinding;
+  }, previous: WorkerReceipt | null): ReservedReceipt {
     return this.#db.transaction(() => {
       if ((this.#sealedGeneration(ref, binding.repoRoot) ?? 0) >= ref.generation)
         throw new WorkerRefusal("Worker lane generation was sealed and cannot open");
@@ -179,9 +185,11 @@ export class WorkerLedger {
       if (actual?.attempt !== current.attempt || actual.phase !== current.phase) return false;
       exit?.cleanup();
       releaseCheckout(current);
-      const { laneId, generation, repoId, revision, subdir, repoRoot, gitDir, attempt, launcherPid, launchDigest } = current;
+      const { laneId, generation, repoId, revision, subdir, repoRoot, gitDir, attempt, launcherPid, launchDigest, memory } = current;
+      const sessionId = exit?.sessionId ?? current.sessionId;
       this.#write({ laneId, generation, repoId, revision, subdir, repoRoot, gitDir, attempt, launcherPid, launchDigest,
-        phase: "released", sessionId: exit?.sessionId ?? current.sessionId, ...(exit?.clean && { exitVerified: true }) });
+        phase: "released", sessionId, ...(sessionId !== null && memory ? { memory } : {}),
+        ...(exit?.clean && { exitVerified: true }) });
       return true;
     }).immediate();
   }

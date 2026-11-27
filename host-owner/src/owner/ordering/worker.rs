@@ -13,6 +13,7 @@ fn ordinary_identity(worker: bool) -> OnceLock<Identity> {
         worker_attempt: worker.then(|| "worker-attempt".into()),
         pr_review_only: false,
         journal_cursor: true,
+        worker_memory: false,
     })
 }
 
@@ -70,6 +71,7 @@ async fn worker_peer_refuses_non_head_rpc_before_native_dispatch() {
         json!({"type": "abort_and_prompt", "message": "Start something else"}),
         json!({"type": "prompt", "message": "Do work", "cwd": "/another-checkout"}),
         json!({"type": "get_entries", "since": "leaf", "sessionFile": "/another-session.jsonl"}),
+        json!({"type": "get_worker_memory", "after": 0}),
         json!({"type": "set_model_preset", "name": "code", "preset": {"modelRoles": {}}, "preserveActiveModel": true}),
         json!({"type": "set_model_preset", "name": "code", "preset": {"modelRoles": {}, "configPath": "/another-config"}}),
         json!({"type": "set_lane_model", "provider": "test-offline", "modelId": "coding", "role": "smol"}),
@@ -137,34 +139,84 @@ async fn worker_can_apply_a_frozen_preset_through_the_owned_maintenance_path() {
 
 async fn answer_idle_checks(fixture: &mut Fixture, worker: bool) {
     for _ in 0..2 {
-        let native = fixture.native.frame().await;
-        assert_eq!(native["type"], "get_state");
-        fixture
-            .native
-            .reply(
-                &native,
-                json!({"success": true, "data": {
-                    "sessionId": "worker-session", "sessionFile": "/worker-session.jsonl",
-                    "isSettled": true, "isStreaming": false, "isCompacting": false,
-                    "hasPendingAsyncWork": false, "queuedMessageCount": 0,
-                }}),
-            )
-            .await;
-        let snapshot = fixture.control.frame().await;
-        assert_eq!(snapshot["type"], "snapshot");
-        let mut data = json!({
-            "sessionId": "worker-session", "sessionFile": "/worker-session.jsonl",
-            "hostPid": 1, "hasOwnedRunningWork": false,
-            "admitted": false, "postPromptWork": false, "mutationHeld": false,
-        });
-        if worker {
-            data["workerAttempt"] = json!("worker-attempt");
-        }
-        fixture
-            .control
-            .reply(&snapshot, json!({"success": true, "data": data}))
-            .await;
+        answer_idle_check(fixture, worker).await;
     }
+}
+
+async fn answer_idle_check(fixture: &mut Fixture, worker: bool) {
+    let native = fixture.native.frame().await;
+    assert_eq!(native["type"], "get_state");
+    fixture
+        .native
+        .reply(
+            &native,
+            json!({"success": true, "data": {
+                "sessionId": "worker-session", "sessionFile": "/worker-session.jsonl",
+                "isSettled": true, "isStreaming": false, "isCompacting": false,
+                "hasPendingAsyncWork": false, "queuedMessageCount": 0,
+            }}),
+        )
+        .await;
+    let snapshot = fixture.control.frame().await;
+    assert_eq!(snapshot["type"], "snapshot");
+    let mut data = memory_control_identity();
+    data["hasOwnedRunningWork"] = json!(false);
+    data["admitted"] = json!(false);
+    data["postPromptWork"] = json!(false);
+    data["mutationHeld"] = json!(false);
+    if !worker {
+        data.as_object_mut().unwrap().remove("workerAttempt");
+    }
+    fixture
+        .control
+        .reply(&snapshot, json!({"success": true, "data": data}))
+        .await;
+}
+
+fn memory_control_identity() -> Value {
+    json!({
+        "sessionId": "worker-session", "sessionFile": "/worker-session.jsonl",
+        "hostPid": 1, "workerAttempt": "worker-attempt",
+    })
+}
+
+#[tokio::test]
+async fn worker_memory_is_exact_and_loses_to_ordinary_input() {
+    let mut identity = worker_identity();
+    identity.get_mut().unwrap().worker_memory = true;
+    let mut fixture = Fixture::with_identity(identity).await;
+    for request in [
+        json!({"type": "get_worker_memory", "id": "refused", "after": 1, "unchanged": "a".repeat(64)}),
+        json!({"type": "get_worker_memory", "id": "refused", "after": 0, "sessionFile": "/foreign"}),
+        json!({"type": "get_worker_memory", "id": "refused", "after": 1.25}),
+        json!({"type": "get_worker_memory", "id": "refused", "after": 9007199254740992_u64}),
+    ] {
+        expect_refusal(&mut fixture.peer, request).await;
+    }
+    fixture.peer.send(json!({"type": "get_worker_memory", "id": "exact", "after": 64})).await;
+    answer_idle_check(&mut fixture, true).await;
+    let exact = fixture.control.frame().await;
+    assert_eq!(exact["type"], "get_worker_memory");
+    assert_eq!(exact["after"], 64);
+    let page = json!({"after": 64, "next": 0, "records": [], "stamp": "a".repeat(64)});
+    let mut reply = memory_control_identity();
+    reply["page"] = page.clone();
+    reply["nativeDiagnostics"] = json!("never forwarded");
+    fixture.control.reply(&exact, json!({"success": true, "data": reply})).await;
+    assert_eq!(fixture.peer.frame().await["data"], page);
+
+    fixture.peer.send(json!({"type": "get_worker_memory", "id": "race", "after": 64})).await;
+    answer_idle_check(&mut fixture, true).await;
+    let race = fixture.control.frame().await;
+    fixture.peer.send(json!({"type": "prompt", "id": "ordinary", "message": "Do ordinary work"})).await;
+    let native = fixture.native.frame().await;
+    assert_eq!(native["type"], "prompt");
+    fixture.control.reply(&race, json!({"success": true, "data": reply})).await;
+    let discarded = fixture.peer.frame().await;
+    assert_eq!(discarded["id"], "race");
+    assert_eq!(discarded["code"], "session_busy");
+    fixture.native.reply(&native, json!({"success": true})).await;
+    assert_eq!(fixture.peer.frame().await["id"], "ordinary");
 }
 
 #[tokio::test]
@@ -248,6 +300,7 @@ async fn restricted_review_socket_cannot_use_the_ordinary_lane_model_endpoint() 
         worker_attempt: None,
         pr_review_only: true,
         journal_cursor: true,
+        worker_memory: false,
     });
     let mut fixture = Fixture::with_identity(identity).await;
     fixture

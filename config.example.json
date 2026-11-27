@@ -6,6 +6,7 @@
   "maxSubagents": 8,
   "idleMs": 300000,
   "headIdleMs": 1800000,
+  "remoteMemorySync": false,
   "groupRooms": [],
   "discord": {
     "tokenEnv": "DISCORD_BOT_TOKEN",

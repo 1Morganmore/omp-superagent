@@ -104,6 +104,7 @@ struct Identity {
     worker_attempt: Option<String>,
     pr_review_only: bool,
     journal_cursor: bool,
+    worker_memory: bool,
 }
 
 #[derive(Default)]
@@ -122,6 +123,7 @@ pub(crate) struct State {
     pub(crate) dispatch: Option<Barrier>,
     pub(crate) interrupts: Option<Barrier>,
     pub(crate) maintenance_active: bool,
+    pub(crate) memory_read: Option<bool>,
     pub(crate) unresolved_effect: bool,
     child_exited: bool,
     pub(crate) observation_failed: bool,
@@ -138,6 +140,12 @@ impl State {
             || self.unresolved_effect
             || self.child_exited
             || self.observation_failed
+    }
+
+    pub(crate) fn invalidate_memory_read(&mut self) {
+        if let Some(invalidated) = &mut self.memory_read {
+            *invalidated = true;
+        }
     }
 }
 
@@ -485,6 +493,9 @@ impl Owner {
     }
 
     async fn native_event(&self, mut frame: Value) -> Result<()> {
+        if self.worker_memory_supported() {
+            self.state()?.invalidate_memory_read();
+        }
         if frame["type"] == "extension_ui_request" && frame["method"] == "form" {
             // Managed Hosts have no safe HTML renderer. Answer stock RPC
             // before translating IDs or queuing anything for a socket peer.
@@ -633,6 +644,24 @@ impl Owner {
         }
     }
 
+    pub(crate) fn worker_memory_supported(&self) -> bool {
+        self.identity.get().is_some_and(|identity| identity.worker_memory)
+    }
+
+    pub(crate) async fn worker_memory_page(&self, request: Value) -> Result<Value> {
+        if !self.worker_memory_supported() {
+            return Err(Error::Unavailable("Worker memory is unavailable"));
+        }
+        let after = request["after"].as_u64().ok_or(Error::Unavailable("Worker memory is unavailable"))?;
+        let mut owned = data(self.control()?.request(request).await?)?;
+        self.validate_control_identity(&owned)?;
+        let page = owned["page"].take();
+        if !crate::worker_rpc::memory_page(&page, after) {
+            return Err(Error::Unavailable("Worker memory is unavailable"));
+        }
+        Ok(page)
+    }
+
     pub(crate) async fn snapshot(&self) -> Result<Value> {
         self.observations_flushed().await?;
         let control = self.control()?;
@@ -679,6 +708,9 @@ impl Owner {
         let owned_voice = owned
             .remove("replyVoiceControlVersion")
             .and_then(|value| value.as_u64());
+        let owned_worker_memory = owned
+            .remove("workerMemoryControlVersion")
+            .is_some_and(|value| value.as_u64() == Some(1));
         native.remove("prReviewPolicy");
         native.extend(owned);
         // Only publish the capability attested by this owner's private launch control.
@@ -686,6 +718,8 @@ impl Owner {
         native.remove("journalCursorVersion");
         native.remove("replyVoiceVersion");
         native.remove("replyVoiceControlVersion");
+        native.remove("workerMemoryControlVersion");
+        native.remove("memorySyncVersion");
         if let Some(version) = owned_voice
             && self.state()?.reply_voice_control == Some(version) && self.supports_reply_voice()
         {
@@ -698,6 +732,9 @@ impl Owner {
         native.insert("adapterProtocol".to_owned(), json!("owned-stock-stdio-v1"));
         if identity.journal_cursor {
             native.insert("journalCursorVersion".to_owned(), json!(1));
+        }
+        if identity.worker_memory && owned_worker_memory {
+            native.insert("memorySyncVersion".to_owned(), json!(1));
         }
         let pending_ui = self
             .state()?
@@ -1166,6 +1203,7 @@ async fn initialize(owner: &Arc<Owner>, manifest: &Manifest) -> anyhow::Result<(
         identity["workerAttempt"].as_str() == worker_attempt.as_deref(),
         "Native worker launch attempt identity mismatch"
     );
+    let worker_memory = worker_attempt.is_some() && env::var_os("OMP_SUPERAGENT_WORKER_MEMORY").is_some();
     owner
         .identity
         .set(Identity {
@@ -1179,6 +1217,7 @@ async fn initialize(owner: &Arc<Owner>, manifest: &Manifest) -> anyhow::Result<(
             worker_attempt,
             pr_review_only: manifest.options.pr_review_only,
             journal_cursor: identity["journalCursorControlVersion"].as_u64() == Some(1),
+            worker_memory,
         })
         .map_err(|_| anyhow::anyhow!("Duplicate native launch identity"))?;
     owner.state()?.reply_voice_control = identity["replyVoiceControlVersion"]

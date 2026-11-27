@@ -25,6 +25,12 @@ binary: `host-owner/bin/notices/<platform>-<arch>/` or
 
 ## oh-my-pi: adapted code and artwork
 
+- The opt-in worker memory import verifies Mnemopi's project-bank naming
+  contract from [`mnemopi/config.ts` in v19.2.1](https://github.com/can1357/oh-my-pi/blob/b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac/packages/coding-agent/src/mnemopi/config.ts).
+  `scripts/prepare-worker-memory.ts` builds the small embedded-CLI helper
+  locally from the installed MIT-licensed `@oh-my-pi/pi-coding-agent` and
+  `@oh-my-pi/pi-mnemopi` dependencies;
+  the generated module is not part of either distribution.
 - `src/host-extension.ts` adapts the `get_state` projection from
   [`rpc-mode.ts` in v18.22.0](https://github.com/can1357/oh-my-pi/blob/3e8cff3b7ce19a805c11a26a6dd1703066435851/packages/coding-agent/src/modes/rpc/rpc-mode.ts).
 - `host-owner/src/wire.rs` adapts the wire limits, v1 shrink thresholds, and

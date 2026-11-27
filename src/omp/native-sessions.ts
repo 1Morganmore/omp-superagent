@@ -37,6 +37,18 @@ function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+/** Match stock getProjectDir's Darwin spelling for bank hashing, never an arbitrary alias. */
+export function nativeMemoryProjectCwd(canonical: string): string {
+  if (!isAbsolute(canonical) || realpathSync(canonical) !== canonical)
+    throw new Error("Worker memory requires a physically canonical checkout");
+  if (process.platform === "darwin" && canonical.startsWith("/private/")) {
+    const alias = canonical.slice("/private".length);
+    try { if (realpathSync(alias) === canonical) return alias; }
+    catch (error) { if (!isMissing(error)) throw error; }
+  }
+  return canonical;
+}
+
 /** Resolve through existing ancestors without creating directories or accepting dangling symlinks. */
 function canonicalDirectory(path: string): string {
   if (!isAbsolute(path)) throw new Error("Native profile paths must be absolute");

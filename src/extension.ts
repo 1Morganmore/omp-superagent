@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { Type } from "@sinclair/typebox";
 import { configuredPlatforms, hostPaths, loadConfigSnapshot } from "./config/config";
 import { loadWakeConfig } from "./config/wake-config";
@@ -28,6 +29,38 @@ import { soulUpdateSchema } from "./omp/soul";
 // from this package so a same-name workspace skill cannot change the procedure.
 const headInstructions = readFileSync(new URL("../skills/head/SKILL.md", import.meta.url), "utf8");
 const headReferenceDirectory = fileURLToPath(new URL("../skills/head/references", import.meta.url));
+
+type WorkerMemoryModule = typeof import("./omp/worker-memory-import");
+type WorkerMemorySdk = typeof import("./omp/worker-memory-sdk");
+
+function workerMemoryModule(value: unknown): value is WorkerMemoryModule {
+  return !!value && typeof value === "object" && "prepareWorkerMemoryImport" in value
+    && typeof value.prepareWorkerMemoryImport === "function";
+}
+
+function workerMemorySdk(value: unknown): value is WorkerMemorySdk {
+  const functions: ReadonlyArray<keyof WorkerMemorySdk> = ["computeMnemopiBankScope", "fastembedModelName",
+    "withMnemopiRuntimeOptions", "getMnemopiRuntimeOptions", "embed", "insertLiveEmbeddings"];
+  return !!value && typeof value === "object"
+    && functions.every(key => typeof Reflect.get(value, key) === "function");
+}
+
+async function loadWorkerMemoryDestination() {
+  const options = { reload: false };
+  try {
+    const [sdk, memory] = await Promise.all([
+      loadLegacyPiModule(fileURLToPath(new URL("../.upstream/worker-memory-sdk.mjs", import.meta.url)), options),
+      loadLegacyPiModule(fileURLToPath(new URL("./omp/worker-memory-import.ts", import.meta.url)), options),
+    ]);
+    if (workerMemorySdk(sdk) && workerMemoryModule(memory))
+      return (session: Parameters<WorkerMemoryModule["prepareWorkerMemoryImport"]>[0], cwd: string) =>
+        memory.prepareWorkerMemoryImport(session, cwd, sdk);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    // Optional capability: don't activate a remote-memory lane without it.
+  }
+}
+
 const managerTools: Record<string, true> = {
   head_recovery: true, head_set_model: true, cron_create: true, soul_update: true,
   lane_models: true, lane_init_presets: true, lane_set_model: true, lane_review_decision: true,
@@ -537,6 +570,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
           throw new Error("Gateway configuration changed before replacement HEAD initialization");
         const { config } = snapshot;
         delete process.env.OMP_SUPERAGENT_RESTART_CONFIG_SHA256;
+        const workerMemory = config.remoteMemorySync ? await loadWorkerMemoryDestination() : undefined;
         const store = new Store(join(config.stateDir, "coordination.sqlite"));
         let messenger: ReturnType<typeof createGatewayMessenger>;
         try {
@@ -555,6 +589,13 @@ export default function superagentExtension(pi: ExtensionAPI): void {
           pi.logger.error(`Superagent: ${error instanceof Error ? error.message : String(error)}`);
         }, {
           topicMemory: ctx.memory,
+          workerMemoryDestination: (id, file, cwd) => {
+            const root = pi.pi.AgentRegistry.global().get(pi.pi.MAIN_AGENT_ID);
+            const session = root?.session;
+            return root?.id === ctx.agent.id && session instanceof pi.pi.AgentSession
+              && session.sessionId === id && session.sessionFile === file && cwd === ctx.cwd
+              ? workerMemory?.(session, cwd) : undefined;
+          },
           readHeadQuota: (failure, sessionId, signal) => {
             const session = pi.pi.AgentRegistry.global().get(pi.pi.MAIN_AGENT_ID)?.session;
             return session instanceof pi.pi.AgentSession && session.sessionId === sessionId

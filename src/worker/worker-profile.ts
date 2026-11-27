@@ -6,12 +6,14 @@ import { gitWorkerRepository } from "./worker-repository";
 import { WorkerRefusal } from "./worker-request";
 import { trustedWorkerPath, workerInstallRoot } from "./worker-trust";
 import type { WorkerPolicy, WorkerRepo } from "./worker-wire";
+import type { WorkerMemoryLaunch } from "./worker-memory-storage";
 
 export interface WorkerHostProfile {
   readonly config: Readonly<Record<string, unknown>>;
   readonly flags: readonly string[];
   readonly extensionPaths: readonly string[];
   readonly managedUlwPath: string;
+  readonly memory?: WorkerMemoryLaunch;
 }
 
 const flags = ["--no-extensions", "--no-lsp"] as const;

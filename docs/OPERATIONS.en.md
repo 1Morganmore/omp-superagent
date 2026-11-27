@@ -2208,6 +2208,28 @@ Check `omp-sa status --config ./config.local.json` for the saved placement.
 To revoke new SSH connections, remove **only this enrollment's key** on the
 worker. That is not a stop command for an already running lane.
 
+**Optional project memory pull.** Before starting a **new** remote lane, set
+`"remoteMemorySync": true` in HEAD's private config if explicit facts retained
+on that worker may be stored in HEAD's native project bank. The default is
+off. Use Mnemopi in `per-project` mode on both ends and place the lane in HEAD's
+own approved repository directory. The new worker lane starts with a private
+bank, without pre-existing shared facts. Existing sessions and other backends are not migrated.
+For text-only search, keep `mnemopi.noEmbeddings: true` in the persistent HEAD
+profile. For vector indexing, HEAD must already use persistent `models.offline: true`
+and authorize an in-process embedding provider on its live bank. A local model
+name or cached weights alone leave indexing deferred. A temporary
+override is not enough. Online HEADs with embeddings enabled are ineligible,
+even when a local model is named: on reopen, stock OMP can send stored facts
+to a process-wide provider. Sync never changes your chat or embedding settings.
+This setting takes effect with the normal authorized config activation; do not
+restart a live service just to inspect it. Check the lane's `memorySync` field
+with `lane_inspect`. A checked page is not necessarily a vector-indexed page.
+`pending` means embedding is in flight; `deferred` means no vector or active
+task is confirmed. Text search can already work in either case.
+No transfers run while a lane is unloaded. Setting the option to `false` stops
+future pulls after config activation; it does not erase facts already stored.
+See the [backend matrix, indexing and privacy limits](design/execution.md#idle-remote-memory-pull).
+
 ## 5. Operational scope and recovery constraints
 
 - Autonomous work uses the existing native task/job, goal, and workflow owners. It preserves

@@ -73,6 +73,7 @@ export interface Config {
   maxSubagents: number;
   idleMs: number;
   readonly headIdleMs?: number;
+  readonly remoteMemorySync?: boolean;
   model?: string;
   discord?: DiscordConfig;
   telegram?: TelegramConfig;
@@ -243,6 +244,8 @@ export function parseConfig(value: unknown, path: string): Config {
   const editProgressInPlace = discord?.editProgressInPlace;
   if (editProgressInPlace !== undefined && typeof editProgressInPlace !== "boolean")
     throw new Error("discord.editProgressInPlace must be a boolean");
+  if (raw.remoteMemorySync !== undefined && typeof raw.remoteMemorySync !== "boolean")
+    throw new Error("remoteMemorySync must be a boolean");
   const voice = discord?.voice === undefined ? undefined : record(discord.voice, "discord.voice");
   let voiceConfig: DiscordVoiceConfig | undefined;
   if (voice) {
@@ -286,6 +289,7 @@ export function parseConfig(value: unknown, path: string): Config {
     maxSubagents,
     idleMs: integer(raw.idleMs, "idleMs", 0),
     headIdleMs: raw.headIdleMs === undefined ? DEFAULT_HEAD_IDLE_MS : integer(raw.headIdleMs, "headIdleMs", 0),
+    ...(raw.remoteMemorySync === true && { remoteMemorySync: true }),
     ...(raw.model === undefined ? {} : { model: text(raw.model, "model") }),
     ...(discord ? { discord: {
       tokenEnv: tokenEnv(discord.tokenEnv, "discord.tokenEnv"),

@@ -4,6 +4,7 @@ import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WorkerHostProfile } from "../worker/worker-profile";
+import type { WorkerMemoryPlan } from "../worker/worker-memory-storage";
 import type { NativeProfile, NativeProfileBinding, NativeProfilePaths } from "./native-sessions";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -200,7 +201,7 @@ export type ManagedUlwLaunchInput = {
   commandArgs: string[];
   /** Exact native OMP argv, including the original command's flags and generated Host args; no executable prefix. */
   launchArgs: string[];
-  worker?: Pick<WorkerHostProfile, "extensionPaths">;
+  worker?: Pick<WorkerHostProfile, "extensionPaths" | "memory">;
   expectedNativeProfile?: NativeProfile;
 };
 type ManagedUlwLaunchOptions = Omit<ManagedUlwLaunchInput, "managedUlwPath"> & {
@@ -216,6 +217,8 @@ export type ManagedUlwLaunchComposition = {
   nativeProfile?: NativeProfile;
   nativeProfilePaths?: NativeProfilePaths;
   nativeDotenvPaths?: string[];
+  workerMemory?: WorkerMemoryPlan;
+  workerMemoryDormant?: true;
 };
 
 const LAUNCH_DISCOVERY_TIMEOUT_MS = 30_000;
@@ -345,7 +348,9 @@ export async function managedUlwLaunchComposition(input: ManagedUlwLaunchInput):
   return input.worker ? workerLaunchComposition({ ...input, worker: input.worker }) : launchComposition(input);
 }
 
-async function workerLaunchComposition(input: ManagedUlwLaunchInput & { worker: Pick<WorkerHostProfile, "extensionPaths"> }): Promise<ManagedUlwLaunchComposition> {
+async function workerLaunchComposition(input: ManagedUlwLaunchInput & {
+  worker: Pick<WorkerHostProfile, "extensionPaths" | "memory">;
+}): Promise<ManagedUlwLaunchComposition> {
   const { assertWorkerWorkspaceStartup } = await import("../worker/worker-profile");
   const { homedir } = await import("node:os");
   assertWorkerWorkspaceStartup(input.cwd, homedir());
@@ -358,11 +363,27 @@ async function workerLaunchComposition(input: ManagedUlwLaunchInput & { worker: 
   const { effectiveManagedMemory, memoryBlockReason } = await import("./managed-memory");
   const memory = await effectiveManagedMemory(settings, null);
   if (memory.status !== "enabled") throw new Error(memoryBlockReason(memory));
+  let workerMemory: WorkerMemoryPlan | undefined;
+  if (input.worker.memory && memory.backend === "mnemopi") {
+    const { cfgMnemopiBank, cfgMnemopiScoping } = await import("@oh-my-pi/pi-coding-agent/mnemopi/settings");
+    const { computeMnemopiBankScope } = await import("@oh-my-pi/pi-coding-agent/mnemopi/config");
+    const configured = settings.rawValue(cfgMnemopiScoping);
+    if ((configured === undefined || cfgMnemopiScoping.accepts(configured)) && cfgMnemopiScoping.get(settings) === "per-project") {
+      const { nativeMemoryProjectCwd, resolveNativeProfile, sdkNativeProfilePaths } = await import("./native-sessions");
+      workerMemory = {
+        bank: computeMnemopiBankScope(cfgMnemopiBank.get(settings), nativeMemoryProjectCwd(input.cwd), "per-project").retainBank,
+        profile: resolveNativeProfile(sdkNativeProfilePaths(parsed.launchAgentDir)),
+      };
+    }
+  }
+  if (input.worker.memory?.previous && memory.backend === "mnemopi" && !workerMemory)
+    throw new Error("Worker memory cannot resume with a different native backend or bank scope");
   // Do not enumerate ambient packages/hooks for a worker. The operator pins
   // opt-in modules as files, while managed packages retain their own resources.
   const managed = validateManagedUlwPackage(input.managedUlwPath);
   const extensionPaths = [...new Set([...input.extensionPaths, managed, ...input.worker.extensionPaths])];
-  return { extensionPaths, noExtensions: true, memoryWriteDir: null };
+  return { extensionPaths, noExtensions: true, memoryWriteDir: null, workerMemory,
+    ...(input.worker.memory?.previous && memory.backend !== "mnemopi" && { workerMemoryDormant: true }) };
 }
 
 async function launchComposition(input: ManagedUlwLaunchInput): Promise<ManagedUlwLaunchComposition> {

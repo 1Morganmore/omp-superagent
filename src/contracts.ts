@@ -451,6 +451,10 @@ export interface StorePort {
   /** A current scope review or granted correction still needs this lane generation. */
   hasPendingScopeReview(target: string): boolean;
   hasPendingLanePlacement(target: string): boolean;
+  /** Check both transfer endpoints without reading their queued messages or private dialog contents. */
+  hasWorkerMemoryHold(target: string): boolean;
+  /** Optional maintenance must never wait for a competing Gateway writer. */
+  tryWorkerMemoryMeta(keys: string | readonly string[], value: string): boolean;
   /** An uncertain HEAD input with a nonempty original native-owner record. */
   hasHeadRecoveryInput(): boolean;
   /** No automatic head replacement while an original HEAD delivery is unresolved. */

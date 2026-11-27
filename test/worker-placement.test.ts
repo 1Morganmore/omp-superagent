@@ -1,4 +1,5 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
@@ -7,6 +8,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addWorker, listWorkers } from "../src/worker/worker-registration";
 import { workerRepositoryHead, workerRepositoryIdentity } from "../src/worker/worker-repository";
+import { pullWorkerMemory, verifyMemoryCheckout, workerMemoryStatus } from "../src/runtime/worker-memory";
+import { Store } from "../src/storage/store";
 import type { WorkerDescription, WorkerSelector } from "../src/worker/worker-wire";
 
 const placementModule = fileURLToPath(new URL("../src/worker/worker-placement.ts", import.meta.url));
@@ -63,6 +66,204 @@ exec /bin/cat "$DESCRIBE_REPLIES/$2.json"
 }
 
 type Fixture = Awaited<ReturnType<typeof setup>>;
+
+async function memoryFixture() {
+  const f = await setup();
+  await mkdir(f.stateDir);
+  const store = new Store(join(f.stateDir, "coordination.sqlite"));
+  const registration = { description: { workerId: "lab", stateDir: "/worker/state", platform: "linux" as const,
+    capacity: 1, active: 1, repos: [{ id: f.repoId, cwd: "/worker/project" }] },
+    destination: "worker@lab.invalid", identityFile: "/head/worker.key" };
+  const remote = { workerId: "lab", stateDir: "/worker/state", subdir: "", repoId: f.repoId, revision: git(f.cwd, "rev-parse", "HEAD") };
+  const lane = { id: "lane-scope", generation: 3, cwd: f.cwd, repoRoot: f.cwd, sessionId: "native-session",
+    sessionFile: "/worker/state/sessions/lane-scope/session.jsonl", pid: 42, remote };
+  const probe = async () => ({ socket: true, sessionFile: true, ownerAlive: true, pidAlive: true,
+    uncertain: false, pid: lane.pid, sessionId: lane.sessionId, memorySyncVersion: 1 as const });
+  return { f, lane, registration, store, probe };
+}
+
+test("an idle read that loses its enrollment or native owner cannot commit or advance the pull cursor", async () => {
+  const { lane, registration, store, probe } = await memoryFixture();
+  try {
+    git(lane.cwd, "branch", "-m", "release+hotfix");
+    for (const revoked of ["owner", "enrollment", "head work", "native policy", "checkout revision"]) {
+      let responded = false, writes = 0;
+      await pullWorkerMemory(store, lane, {
+        registration, lookup: async () => responded && revoked === "enrollment"
+          ? { ...registration, destination: "worker@other.invalid" } : registration,
+        current: () => !(responded && revoked === "owner"), confirmIdleHead: async () => {
+          if (revoked === "checkout revision") git(lane.cwd, "commit", "--allow-empty", "-qm", "Changed during idle readback");
+          return revoked !== "head work";
+        },
+        ownsStatus: () => true, canIndex: () => true,
+        probe,
+        connection: { request: async command => {
+          expect(command).toEqual({ type: "get_worker_memory", after: 0 });
+          responded = true;
+          return { success: true, data: { after: 0, next: 1, stamp: "b".repeat(64), records: [] } };
+        } },
+        destination: () => {
+          const revision = responded;
+          return { namespace: "original-project", receiptNamespace: "project-scope", importPage() {
+            if (revoked === "native policy" && revision !== responded) return undefined;
+            writes++; return undefined;
+          } };
+        },
+      });
+      expect(responded).toBe(true);
+      expect(writes).toBe(0);
+      expect(workerMemoryStatus(store, lane.id)).toBeNull();
+    }
+  } finally { store.close(); }
+});
+
+test("ordinary placement with a Git include does not qualify for a private memory bank", async () => {
+  const { lane, store, f } = await memoryFixture();
+  try {
+    const before = await verifyMemoryCheckout(lane);
+    expect(before?.()).toBe(true);
+    const extra = join(f.root, "user.gitconfig");
+    await writeFile(extra, "[user]\n\tname = Offline Fixture\n");
+    git(lane.cwd, "config", "include.path", extra);
+    expect(await workerRepositoryIdentity(lane.cwd)).toBe(lane.remote.repoId);
+    expect(git(lane.cwd, "rev-parse", "HEAD")).toBe(lane.remote.revision);
+    expect(before?.()).toBe(false);
+    expect(await verifyMemoryCheckout(lane)).toBeUndefined();
+  } finally { store.close(); }
+});
+
+test("an enrolled subdirectory replaced by a nested clone of the same revision cannot pull facts", async () => {
+  const { lane, registration, store, probe } = await memoryFixture();
+  try {
+    const cwd = join(lane.cwd, "docs");
+    const nested = join(lane.repoRoot, "nested-clone");
+    git(lane.repoRoot, "clone", "--local", "--no-hardlinks", "--no-checkout", lane.repoRoot, nested);
+    git(nested, "remote", "set-url", "origin", origin);
+    await fs.rename(join(nested, ".git"), join(cwd, ".git"));
+    expect(git(cwd, "rev-parse", "HEAD")).toBe(lane.remote.revision);
+    expect(await workerRepositoryIdentity(cwd)).toBe(lane.remote.repoId);
+    let pages = 0;
+    await pullWorkerMemory(store, { ...lane, cwd, remote: { ...lane.remote, subdir: "docs" } }, {
+      registration, lookup: async () => registration, probe, current: () => true, confirmIdleHead: async () => true,
+      ownsStatus: () => true, canIndex: () => true,
+      connection: { request: async () => { pages++; return { success: false }; } },
+      destination: () => ({ namespace: "original", receiptNamespace: "project", importPage() { return undefined; } }),
+    });
+    expect(pages).toBe(0);
+    expect(workerMemoryStatus(store, lane.id)).toBeNull();
+  } finally { store.close(); }
+});
+
+test("only a complete stable scan suppresses retransmission after HEAD reopens its coordination store", async () => {
+  const { f, lane, registration, store, probe } = await memoryFixture();
+  let currentStore = store;
+  const first = "1".repeat(64), second = "2".repeat(64);
+  const requests: Record<string, unknown>[] = [];
+  const pages = [{ after: 0, next: 1, stamp: first }, { after: 1, next: 0, stamp: second },
+    { after: 0, next: 0, stamp: second }, null, { after: 0, next: 0, stamp: second }];
+  let imports = 0;
+  try {
+    for (const page of pages) {
+      await pullWorkerMemory(currentStore, lane, {
+        registration, lookup: async () => registration, current: () => true, confirmIdleHead: async () => true,
+        ownsStatus: () => true, canIndex: () => true, probe,
+        connection: { request: async command => {
+          requests.push(command);
+          if (!page) return { success: false };
+          return { success: true, data: { ...page, records: [] } };
+        } },
+        destination: () => ({ namespace: "original-project", receiptNamespace: "project-scope", importPage() {
+          imports++;
+          return { inserted: 0, skipped: 0, rejected: 0, lexical: 0, indexed: 0, disabled: 0, pending: 0, deferred: 0 };
+        } }),
+      });
+      if (!page) expect(workerMemoryStatus(currentStore, lane.id)?.status).toBe("unavailable");
+      currentStore.close();
+      currentStore = new Store(join(f.stateDir, "coordination.sqlite"));
+    }
+    expect(requests).toEqual([0, 1, 0, 0, 0].map((after, i) => ({
+      type: "get_worker_memory", after, ...(i >= 3 && { unchanged: second }),
+    })));
+    expect(imports).toBe(3);
+    expect(workerMemoryStatus(currentStore, lane.id)?.status).toBe("unchanged");
+  } finally { currentStore.close(); }
+});
+
+test("optional memory receipts yield to durable Gateway admission without blocking HEAD", async () => {
+  const { f, store } = await memoryFixture();
+  const keys = ["worker-memory:imported:first", "worker-memory:imported:second"];
+  try {
+    using gateway = new Database(join(f.stateDir, "coordination.sqlite"), { readwrite: true });
+    gateway.exec("BEGIN IMMEDIATE");
+    try {
+      const before = performance.now();
+      expect(store.tryWorkerMemoryMeta(keys, "1")).toBe(false);
+      expect(performance.now() - before).toBeLessThan(750);
+      expect(keys.map(key => store.getMeta(key))).toEqual([null, null]);
+    } finally { gateway.exec("ROLLBACK"); }
+    expect(store.tryWorkerMemoryMeta(keys, "1")).toBe(true);
+    expect(keys.map(key => store.getMeta(key))).toEqual(["1", "1"]);
+  } finally { store.close(); }
+});
+
+test("an index task lost on HEAD restart is reported as unconfirmed without copying the fact again", async () => {
+  const { f, lane, registration, store, probe } = await memoryFixture();
+  const task = Promise.withResolvers<undefined>();
+  const stamp = "a".repeat(64);
+  let imports = 0, opened = store;
+  try {
+    for (const restarted of [false, true]) {
+      await pullWorkerMemory(opened, lane, {
+        registration, lookup: async () => registration, probe, current: () => true, confirmIdleHead: async () => true,
+        ownsStatus: () => opened === store, canIndex: () => true,
+        connection: { request: async command => {
+          expect(command.unchanged).toBe(restarted ? stamp : undefined);
+          return { success: true, data: { after: 0, next: 0, stamp,
+            records: restarted ? [] : [{ at: 1, id: "1".repeat(16), content: "Local build fixture." }] } };
+        } },
+        destination: () => ({ namespace: "bank", receiptNamespace: "project", importPage() {
+          imports++;
+          return { inserted: 1, skipped: 0, rejected: 0, lexical: 1, indexed: 0, disabled: 0,
+            pending: 1, deferred: 0, confirmation: task.promise };
+        } }),
+      });
+      expect(workerMemoryStatus(opened, lane.id)).toMatchObject({
+        indexed: 0, pending: restarted ? 0 : 1, deferred: restarted ? 1 : 0,
+      });
+      if (!restarted) {
+        opened.close();
+        opened = new Store(join(f.stateDir, "coordination.sqlite"));
+      }
+    }
+    expect(imports).toBe(1);
+  } finally { task.resolve(undefined); opened.close(); }
+});
+
+test("replacing the native bank invalidates the scan but preserves forget receipts for that logical destination", async () => {
+  const { lane, registration, store, probe } = await memoryFixture();
+  const seenBefore: boolean[] = [];
+  const put = "a".repeat(64);
+  try {
+    for (const namespace of ["old-inode", "new-inode"]) {
+      await pullWorkerMemory(store, lane, {
+        registration, lookup: async () => registration, current: () => true, confirmIdleHead: async () => true,
+        ownsStatus: () => true, canIndex: () => true, probe,
+        connection: { request: async command => {
+          expect(command).toEqual({ type: "get_worker_memory", after: 0 });
+          return { success: true, data: { after: 0, next: 0, stamp: "c".repeat(64),
+            records: [{ at: 1, id: "a".repeat(16), content: "The manifest uses a four byte tag." }] } };
+        } },
+        destination: () => ({ namespace, receiptNamespace: "same-native-project", importPage(_records, _origin, receipts) {
+          if (!receipts) throw new Error("Expected private HEAD coordination receipts");
+          seenBefore.push(receipts.seen(put));
+          receipts.mark([put]);
+          return { inserted: 0, skipped: 0, rejected: 0, lexical: 0, indexed: 0, disabled: 0, pending: 0, deferred: 0 };
+        } }),
+      });
+    }
+    expect(seenBefore).toEqual([false, true]);
+  } finally { store.close(); }
+});
 
 async function pair(f: Fixture, worker: {
   readonly id: string;

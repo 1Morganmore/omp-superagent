@@ -36,6 +36,7 @@ const launch = Type.Object({
     }, strict),
   }, strict)),
   subagentConcurrency: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+  memorySync: Type.Optional(Type.Literal(true)),
 }, strict);
 const envelope = { version: Type.Literal(1) };
 const bound = { ...envelope, workerId: id, ref: laneRefSchema };
