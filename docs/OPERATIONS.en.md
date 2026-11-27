@@ -4,7 +4,7 @@
 [Design](../DESIGN.md) · [Example configuration](../config.example.json) ·
 [Attribution and license notices](../THIRD_PARTY_NOTICES.md)
 
-[Install](#1-local-preparation--does-not-start-the-bot) · [Platform apps](#2-platform-apps-and-access) · [Configuration](#3-configuration) · [Daily use](#4-commands-and-daily-use) · [Recovery](#5-operational-scope-and-recovery-constraints) · [Developer verification](#6-developer-verification)
+[Install](#1-local-preparation--does-not-start-the-bot) · [Update](#update-an-existing-installation) · [Platform apps](#2-platform-apps-and-access) · [Configuration](#3-configuration) · [Daily use](#4-commands-and-daily-use) · [Recovery](#5-operational-scope-and-recovery-constraints) · [Developer verification](#6-developer-verification)
 
 This guide covers installation, configuration, day-to-day operation, and recovery. Unless
 otherwise noted, file and code paths and shell commands are relative to the **repository root**.
@@ -256,26 +256,201 @@ OMP 19's per-user daemon does not take over services from the previous broker. A
 in the new daemon is not evidence that you may stop or reclaim work whose completion was
 never confirmed in the old session.
 
-**Upgrading from the Bun journal verifier:** before replacing an installation in
-place, let work settle and gracefully stop its resident lane Hosts (including
-remote workers) and its Gateway/HEAD using the old installation. Check their
-exit receipts and verify the owners have exited. `stop main` alone does not stop
-independent lanes. Old owners still need their original helper files until exit;
-the new owners verify their journals in Rust. Keep the state and session files.
-
 The default `command: ["omp"]` looks up OMP on PATH. To use a different installation, put
 its OMP path in the first entry of `command`. A relative path is resolved against the
 configuration file's directory, and all lanes use the same path. This repository does not
 download OMP or build it from source.
 
+### Update an Existing Installation
+
+**Do not replace files while an affected process can still use them.** Schedule a quiet
+window: hold new work, avoid concurrent starts/restarts or login activation, and let
+active work, approvals, goals, deliveries and owned services settle. Inventory every
+configured instance and enrolled worker account using the copy being replaced, not just
+the currently selected config. In `omp-sa status --config FILE`, `lanes[]` and `workers[]`
+are saved records, not live ownership or exit evidence. On each machine, cross-check the
+inventory against local processes, for example with `ps -axo pid=,ppid=,uid=,comm=` and
+`lsof -nP -a -p PID -d txt` to locate a candidate Gateway or owner executable if needed.
+Do not read process environments or print credential files. If you cannot account for
+an affected process, machine or installation, do not replace that copy.
+
+#### Capture before stopping
+
+Keep [`upgrade-evidence.mjs`](../scripts/upgrade-evidence.mjs) and its two helpers,
+[`upgrade-host-wire.mjs`](../scripts/upgrade-host-wire.mjs) and
+[`upgrade-evidence-files.mjs`](../scripts/upgrade-evidence-files.mjs), together from the same
+revision as this guide, **outside every directory being replaced**, on each affected
+machine. They use Bun and the installed 0.1.10+ private Gateway/Host protocol; they
+need no package install. `capture`, `recheck` and `verify` are read-only. Only
+`stop-local` requests shutdown, for one verified local lane. Keep captures private.
+
+On the Gateway machine, use the account and CLI from the **old installation**.
+Substitute your absolute paths and save the status for each instance:
+
 ```sh
-bun add --global --trust omp-superagent@0.1.11
+OLD_OMP_SA=/path/to/old/omp-sa
+CONFIG=/path/to/config.local.json
+PROBE=/path/outside/installation/upgrade-evidence.mjs
+umask 077
+EVIDENCE_DIR=$(mktemp -d /tmp/omp-sa-upgrade.XXXXXX) &&
+  "$OLD_OMP_SA" status --config "$CONFIG" > "$EVIDENCE_DIR/status-before.json"
+```
+
+For a source installation, use `bun --no-env-file /path/to/old/src/cli.ts` in
+place of `"$OLD_OMP_SA"` for the old CLI commands. From the saved status, take the
+absolute `main.socketPath` and use its sibling `gateway.sock` for the Gateway.
+For each previously running Gateway, capture the Gateway and its HEAD together:
+
+```sh
+GATEWAY_SOCKET=/absolute/state/run/gateway.sock
+bun --no-env-file "$PROBE" capture gateway "$GATEWAY_SOCKET" > "$EVIDENCE_DIR/gateway.json"
+```
+
+- For a resident HEAD the probe matches its native PID and session ID against
+  `gateway.head.pid` and `gateway.head.initialization.sessionId`. For a **sleeping**
+  HEAD it records `gateway.head.hibernation.sessionId` with no live Host to stop.
+  A positive `sleeping` stage from a live Gateway is different from an absent socket,
+  `gateway: null`, or a failed probe. Do not wake a sleeping HEAD for evidence.
+- Do not run `stop` or `start` for an instance or lane already confirmed intentionally
+  stopped. Use the known prior stop/exit and machine process inventory to establish
+  this; a missing socket, saved state, or an unrelated receipt is not proof. An absent
+  or unconfirmed owner, an in-progress wake/rotation, or a failed capture is a reason to
+  resolve ownership before replacing files, not to mark it stopped or force a start.
+
+For each affected resident lane, take `id`, `socketPath` and `sessionId` from the
+corresponding `lanes[]` entry and confirm `placement.target`. On the physical machine
+holding that socket, capture the live identity:
+
+```sh
+LANE_ID=lane-example
+LANE_SOCKET=/absolute/state/run/lane-example.sock
+LANE_SESSION=SESSION_ID_FROM_STATUS
+bun --no-env-file "$PROBE" capture host "$LANE_SOCKET" "$LANE_SESSION" > "$EVIDENCE_DIR/$LANE_ID.json"
+```
+
+For `placement.target: "remote"`, match `placement.workerId` to `workers[].workerId`.
+Use a separate authorized login on that enrolled machine **as the enrolled OS account**.
+Set `PROBE` and create a private `EVIDENCE_DIR` on that machine using the same steps.
+Use the recorded remote socket and add `--worker` to capture and verify the launch
+attempt as well:
+
+```sh
+bun --no-env-file "$PROBE" capture host "$LANE_SOCKET" "$LANE_SESSION" --worker > "$EVIDENCE_DIR/$LANE_ID.json"
+```
+
+The enrolled SSH key's forced command is not a shell; do not loosen it, tunnel the
+socket, or use same-named paths on the HEAD machine. If you lack authorized access
+to the affected worker, cannot correlate all its dependent Hosts to their managing
+HEADs, or cannot prove their ownership, leave that installation intact. A HEAD-only
+update does not replace worker files or require stopping lanes on unchanged
+installations.
+
+#### Stop, verify, and replace
+
+For a **local** lane, use the private status saved from its managing instance and
+the capture from that host. `stop-local` checks that the lane's recorded socket
+is the one derived from that instance's `main.socketPath` and lane ID. It compares
+the live session and owner to the capture and sends a single shutdown on that
+same connection. Do not substitute the old CLI's `stop LANE_ID`: it reconnects
+by pathname. A refusal or lost reply is not permission to send another stop.
+
+```sh
+bun --no-env-file "$PROBE" stop-local "$EVIDENCE_DIR/$LANE_ID.json" "$EVIDENCE_DIR/status-before.json" "$LANE_ID" &&
+  bun --no-env-file "$PROBE" verify "$EVIDENCE_DIR/$LANE_ID.json"
+```
+
+For a remote lane, run `bun --no-env-file "$PROBE" recheck "$EVIDENCE_DIR/$LANE_ID.json"`
+on the worker first. Only if it succeeds, run `"$OLD_OMP_SA" stop "$LANE_ID" --config "$CONFIG"`
+on its managing HEAD machine. Once accepted, run
+`bun --no-env-file "$PROBE" verify "$EVIDENCE_DIR/$LANE_ID.json"` on the worker.
+
+After the affected lanes, stop each previously running Gateway using its old CLI
+and saved capture. `stop main` does not stop independent lanes:
+
+```sh
+bun --no-env-file "$PROBE" recheck "$EVIDENCE_DIR/gateway.json" &&
+  "$OLD_OMP_SA" stop main --config "$CONFIG" &&
+  bun --no-env-file "$PROBE" verify "$EVIDENCE_DIR/gateway.json"
+```
+
+If HEAD hibernates after the first capture, the resident `recheck` fails. Take a fresh
+Gateway capture only after it positively reports `sleeping` with the same session ID
+and resume the stop procedure with that capture.
+
+Each capture binds the Gateway PID and each live Host's native PID, adapter owner PID,
+session ID and journal path to the socket's device and inode. The journal's device
+and inode must still match at recheck and verification. An ordinary local journal
+may be an owned symlink to the same owned regular file; a worker journal cannot be
+a symlink. `verify` must report
+`exit-confirmed` on the same machine/account before proceeding. It requires actual
+process absence (`ESRCH`, not a reused PID or a permission error), absent old socket
+paths, and for each formerly resident Host a **new** private `<socketPath>.exit.json`
+inode, matching the captured identity (including the worker attempt where applicable),
+`code: 0`, `signal: null`, `persisted: true`, and `observationsFlushed: true`. For an
+already-sleeping HEAD, stopping Gateway does not create a new Host receipt: its live
+Gateway had already verified the hibernation exit. If shutdown was accepted but still
+completing, run `verify` again after the processes have had time to exit. Do not resend
+stop blindly, delete socket or receipt files, or interpret a stale receipt, a shutdown
+ACK, or a missing socket alone as success. If exit is refused or still unconfirmed,
+leave the old files in place.
+
+Only then use `bun add --global --trust omp-superagent@VERSION` or
+`npm install --global omp-superagent@VERSION` with the target version, or rebuild the
+source installation. Replace worker files only on the relevant worker after its
+dependent Hosts have stopped. Keep the same config, state, enrollment and journals;
+do not rerun `setup`.
+
+#### Restore only what was running
+
+On each Gateway machine, `omp-sa doctor --config FILE` checks local prerequisites
+without starting anything. Run `omp-sa start --config FILE` **only for Gateways that
+were running before the maintenance window**. A running Gateway with a sleeping HEAD
+counts as running: explicit start brings that HEAD up using its saved session, rather
+than returning it to sleep immediately. Do not manually start lanes; they are managed
+by HEAD. Select the **explicit path to the upgraded installation** for all three
+commands, not a different `omp-sa` that happens to be on `PATH`. For a package install:
+
+```sh
+NEW_OMP_SA=/absolute/path/to/upgraded/bin/omp-sa
+"$NEW_OMP_SA" doctor --config "$CONFIG" &&
+  "$NEW_OMP_SA" start --config "$CONFIG" &&
+  "$NEW_OMP_SA" status --config "$CONFIG"
+```
+
+For a source installation, use the upgraded checkout instead:
+
+```sh
+NEW_CLI=/absolute/path/to/upgraded/checkout/src/cli.ts
+bun --no-env-file "$NEW_CLI" doctor --config "$CONFIG" &&
+  bun --no-env-file "$NEW_CLI" start --config "$CONFIG" &&
+  bun --no-env-file "$NEW_CLI" status --config "$CONFIG"
+```
+
+In `status`, `gateway.gateway.ready`
+is transport readiness, `gateway.gateway.admissionReady` is the initial approval
+reconciliation barrier for durable intake, and `gateway.head.ready` is live controller
+and preset readiness. `start` can return before all three are true. While HEAD is
+resident, compare `gateway.head.initialization.sessionId` to the captured session
+(using `gateway.head.hibernation.sessionId` as the **before** value if HEAD was asleep).
+Do not force redelivery of held inputs or uncertain outputs.
+
+**If 0.1.10 files were already overwritten:** do not use the new helper to finish an
+old owner's shutdown. It cannot authenticate that `exit` request and will not write
+an exit receipt. Preserve the instance, config, journal and logs for recovery; do
+not restart, manufacture a receipt, or repeat an uncertain shutdown. Restoring
+files alone does not release an owner whose verification already failed. Starting
+with 0.1.11, owners verify their own exits in-process in Rust.
+
+### First Installation
+
+```sh
+bun add --global --trust omp-superagent@0.1.12
 omp-sa --help
 ```
 
 `--trust` allows package installation scripts, including preparation of the managed
 omp-superkit. Add the output of `bun pm bin --global` to PATH. If Bun is on PATH, you can
-also use `npm install --global omp-superagent@0.1.11`. Create the configuration in your
+also use `npm install --global omp-superagent@0.1.12`. Create the configuration in your
 own working directory, not the installation directory, with
 `omp-sa setup --config ./config.local.json`. Installation alone does not activate the bot.
 

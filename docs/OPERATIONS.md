@@ -3,7 +3,7 @@
 [프로젝트 소개로 돌아가기](../README.ko.md) · [English](OPERATIONS.en.md) · [설계](../DESIGN.md) ·
 [설정 예제](../config.example.json) · [출처·라이선스 고지](../THIRD_PARTY_NOTICES.md)
 
-[설치](#1-로컬-준비--봇은-시작하지-않음) · [플랫폼별 앱](#2-플랫폼별-앱과-접근-범위) · [설정](#3-설정) · [일상 사용](#4-명령과-일상-사용) · [복구](#5-운영-범위와-복구-제약) · [개발자 검증](#6-개발자-검증)
+[설치](#1-로컬-준비--봇은-시작하지-않음) · [업데이트](#기존-설치-업데이트) · [플랫폼별 앱](#2-플랫폼별-앱과-접근-범위) · [설정](#3-설정) · [일상 사용](#4-명령과-일상-사용) · [복구](#5-운영-범위와-복구-제약) · [개발자 검증](#6-개발자-검증)
 
 이 문서는 설치·설정·일상 제어와 복구 절차를 다룬다. 파일·코드 경로와 셸 명령은 별도
 설명이 없으면 **저장소 루트 기준**이다. npm 설치에서는 같은 관리 명령을
@@ -209,24 +209,189 @@ SUPER 스킬 조회·추가 레인·goal·모델 변경·workflow artifact가 �
 데몬은 이전 브로커의 서비스를 인수하지 않는다. 새 데몬의 목록이 비어 있어도 이전 세션에서
 완료를 확인하지 못한 작업의 종료·회수를 승인하는 증거는 아니다.
 
-**Bun 저널 검증기를 사용하던 설치를 덮어쓸 때:** 기존 설치를 유지한 상태에서 작업 정산을
-기다리고, 상주 레인 Host(원격 워커 포함)와 Gateway/HEAD를 정상 종료한다. 종료 영수증과
-소유 프로세스의 실제 종료를 확인한 뒤 파일을 교체한다. `stop main`만으로는 독립 레인이
-종료되지 않는다. 이전 소유자는 종료 시까지 원래 helper 파일이 필요하고, 새 소유자는 Rust로
-저널을 검증한다. 상태 DB와 세션 파일은 그대로 보존한다.
-
 기본 `command: ["omp"]`는 PATH에서 찾는다. 다른 설치를 쓰려면 `command`의 첫 항목에
 그 OMP 경로를 넣는다. 상대 경로는 설정 파일의 디렉터리 기준이며 모든 레인이 같은 경로를
 사용한다. 이 저장소는 OMP를 다운로드하거나 소스에서 빌드하지 않는다.
 
+### 기존 설치 업데이트
+
+**해당 프로세스가 기존 파일을 사용하는 동안에는 덮어쓰지 않는다.** 점검 시간을 잡고 새 작업을
+넣지 않는다. 다른 시작·재시작이나 로그인 자동 실행이 겹치지 않게 하고, 실행 중인 작업·승인·goal·
+전달·소유 서비스가 정리될 때까지 기다린다. 현재 선택한 설정만 보지 말고, 교체할 설치본을 쓰는
+모든 인스턴스와 등록된 워커 계정을 파악한다. `omp-sa status --config FILE`의 `lanes[]`와
+`workers[]`는 저장된 기록이지 현재 소유권이나 종료 증거가 아니다. 머신별로
+`ps -axo pid=,ppid=,uid=,comm=` 등으로 실행 중인 프로세스를 대조하고, 필요하면
+`lsof -nP -a -p PID -d txt`로 Gateway 또는 소유 프로세스의 실행 파일 위치를 확인한다.
+프로세스의 환경 변수나 자격 증명 파일을 출력하지 않는다. 해당 프로세스·머신·설치본을 빠짐없이
+확인할 수 없다면 그 설치본을 교체하지 않는다.
+
+#### 중지 전 증거 수집
+
+이 가이드와 같은 리비전의 [`upgrade-evidence.mjs`](../scripts/upgrade-evidence.mjs),
+[`upgrade-host-wire.mjs`](../scripts/upgrade-host-wire.mjs),
+[`upgrade-evidence-files.mjs`](../scripts/upgrade-evidence-files.mjs)를 각 대상 머신의 **교체하지 않을
+디렉터리에 나란히** 둔다. Bun과 기존 0.1.10 이상의 비공개 Gateway·Host 프로토콜을 사용하며
+패키지 설치는 필요 없다. `capture`, `recheck`, `verify`는 읽기 전용이다. `stop-local`만
+검증된 로컬 레인 하나에 종료를 요청한다. 수집 파일은 비공개로 보관한다.
+
+Gateway 머신에서 **기존 설치본**의 CLI와 계정을 사용한다. 각 인스턴스의 실제 절대 경로를
+지정하고 상태를 저장한다.
+
 ```sh
-bun add --global --trust omp-superagent@0.1.11
+OLD_OMP_SA=/path/to/old/omp-sa
+CONFIG=/path/to/config.local.json
+PROBE=/path/outside/installation/upgrade-evidence.mjs
+umask 077
+EVIDENCE_DIR=$(mktemp -d /tmp/omp-sa-upgrade.XXXXXX) &&
+  "$OLD_OMP_SA" status --config "$CONFIG" > "$EVIDENCE_DIR/status-before.json"
+```
+
+소스 설치라면 기존 CLI 명령의 `"$OLD_OMP_SA"` 대신
+`bun --no-env-file /path/to/old/src/cli.ts`를 사용한다. 저장한 상태의 `main.socketPath`와
+같은 디렉터리에 있는 `gateway.sock`이 Gateway 소켓이다. 실행 중인 각 Gateway를 HEAD와 함께
+기록한다.
+
+```sh
+GATEWAY_SOCKET=/absolute/state/run/gateway.sock
+bun --no-env-file "$PROBE" capture gateway "$GATEWAY_SOCKET" > "$EVIDENCE_DIR/gateway.json"
+```
+
+- 상주 HEAD는 실제 OMP PID와 세션 ID가 `gateway.head.pid`,
+  `gateway.head.initialization.sessionId`와 일치해야 한다. HEAD가 **절전 중**이면
+  `gateway.head.hibernation.sessionId`를 기록하며, 중지할 상주 Host는 없다. 살아 있는
+  Gateway가 보고한 `sleeping` 상태는 소켓 부재, `gateway: null`, 조회 실패와 다르다.
+  증거를 얻으려고 절전 중인 HEAD를 깨우지 않는다.
+- 의도적으로 이미 중지됐음이 확인된 인스턴스나 레인에는 `stop`도 `start`도 실행하지 않는다.
+  이전 정상 종료 증거와 머신의 프로세스 목록을 대조한다. 소켓 부재·저장된 상태·다른 종료
+  영수증으로는 충분하지 않다. 소유자가 보이지 않거나 확인되지 않거나, HEAD 복귀·교체가 진행
+  중이거나, 수집에 실패하면 소유 상태를 먼저 확인한다. 중지된 것으로 간주하거나 강제로
+  시작하지 않는다.
+
+교체할 설치본을 쓰는 각 상주 레인은 해당 `lanes[]` 항목의 `id`, `socketPath`, `sessionId`를
+확인하고 `placement.target`을 확인한다. 소켓이 있는 실제 머신에서 현재 소유권을 기록한다.
+
+```sh
+LANE_ID=lane-example
+LANE_SOCKET=/absolute/state/run/lane-example.sock
+LANE_SESSION=SESSION_ID_FROM_STATUS
+bun --no-env-file "$PROBE" capture host "$LANE_SOCKET" "$LANE_SESSION" > "$EVIDENCE_DIR/$LANE_ID.json"
+```
+
+`placement.target: "remote"`라면 `placement.workerId`를 `workers[].workerId`와 대조한다.
+그 등록 머신에 **등록된 OS 계정**으로 별도 승인된 관리 접속을 사용한다. 해당 머신에서 같은
+방법으로 `PROBE`를 지정하고 비공개 `EVIDENCE_DIR`를 만든다. 기록된 원격 소켓 경로를 쓰고,
+`--worker`를 추가해 워커 실행 시도 ID까지 기록한다.
+
+```sh
+bun --no-env-file "$PROBE" capture host "$LANE_SOCKET" "$LANE_SESSION" --worker > "$EVIDENCE_DIR/$LANE_ID.json"
+```
+
+등록된 SSH 키의 강제 명령은 셸이 아니다. 제한을 풀거나 소켓을 터널링하거나 HEAD 머신의
+동일한 이름의 경로를 쓰지 않는다. 대상 워커에 승인된 접속 수단이 없거나, 해당 설치본에
+의존하는 모든 Host를 각 관리 HEAD와 대조할 수 없거나, 소유 상태를 확인할 수 없다면 해당
+설치본을 그대로 둔다. HEAD 쪽만 업데이트할 때는 바꾸지 않는 설치본의 파일을 교체하거나 그
+레인을 중지할 필요가 없다.
+
+#### 중지·검증·교체
+
+**로컬 레인**은 관리 인스턴스에서 비공개로 저장한 상태 파일과 해당 Host의 수집 파일을 함께
+사용한다. `stop-local`은 레인에 기록된 소켓이 해당 인스턴스의 `main.socketPath`와 레인 ID로
+계산한 소켓인지 확인한다. 실제 소유자와 세션이 수집 시점과 일치할 때만 **확인한 바로 그 연결**로
+종료를 한 번 요청한다. 경로만 보고 다시 접속하는 구버전 CLI의 `stop LANE_ID`로 대체하지 않는다.
+거부되거나 응답을 잃었을 때 종료 요청을 반복하지 않는다.
+
+```sh
+bun --no-env-file "$PROBE" stop-local "$EVIDENCE_DIR/$LANE_ID.json" "$EVIDENCE_DIR/status-before.json" "$LANE_ID" &&
+  bun --no-env-file "$PROBE" verify "$EVIDENCE_DIR/$LANE_ID.json"
+```
+
+원격 레인은 워커에서 먼저
+`bun --no-env-file "$PROBE" recheck "$EVIDENCE_DIR/$LANE_ID.json"`을 실행한다.
+성공한 경우에만 관리 HEAD 머신에서 `"$OLD_OMP_SA" stop "$LANE_ID" --config "$CONFIG"`를
+실행한다. 수락되면 워커에서 `bun --no-env-file "$PROBE" verify "$EVIDENCE_DIR/$LANE_ID.json"`을
+실행한다.
+
+대상 레인을 정리한 뒤, 원래 실행 중이던 각 Gateway를 기존 CLI와 수집 파일로 중지·검증한다.
+`stop main`은 독립 레인을 중지하지 않는다.
+
+```sh
+bun --no-env-file "$PROBE" recheck "$EVIDENCE_DIR/gateway.json" &&
+  "$OLD_OMP_SA" stop main --config "$CONFIG" &&
+  bun --no-env-file "$PROBE" verify "$EVIDENCE_DIR/gateway.json"
+```
+
+처음 수집한 뒤 HEAD가 절전에 들어가면 상주 상태의 `recheck`는 실패한다. 동일 세션의
+`sleeping` 상태가 확인된 뒤에만 Gateway를 다시 수집하고, 그 수집 파일로 중지 절차를 이어간다.
+
+수집할 때 Gateway PID와 각 상주 Host의 OMP PID, 어댑터 소유 PID, 세션 ID, 저널 경로를
+실제 소켓의 장치 번호와 inode에 연결한다. 재확인·종료 검증 때 저널의 장치 번호와 inode도
+같아야 한다. 일반 로컬 저널은 같은 계정 소유의 일반 파일을 가리키는 소유 링크여도 되지만,
+워커 저널은 심볼릭 링크일 수 없다. 같은 머신·계정에서 `verify`가 `exit-confirmed`를
+반환해야 한다. 해당 PID가 실제로 없어야 하고(`ESRCH`만 인정하며 PID 재사용·권한 오류는
+종료 증거가 아님), 기존 소켓 경로도 없어야 한다. 종료한 상주 Host마다 비공개
+`<socketPath>.exit.json`의 inode가 **새로 생겼는지** 확인하고, 저장한 소유 정보(해당 시
+워커 실행 시도 ID 포함)와 일치하는지, `code: 0`, `signal: null`, `persisted: true`,
+`observationsFlushed: true`인지 대조한다. HEAD가 이미 절전 중이면 Gateway 중지 시 새 Host
+영수증이 생기지 않는다. 살아 있던 Gateway가 절전 시 해당 Host 종료를 이미 검증했다.
+중지 요청이 수락된 뒤 아직 종료 중이라면 프로세스가 끝난 후 `verify`만 다시 실행한다.
+중지 요청을 무작정 반복하거나 소켓·영수증을 삭제하지 않는다. 오래된 영수증, 요청 수락,
+소켓 부재만으로는 정상 종료가 아니다. 종료가 거부됐거나 끝내 확인되지 않으면 기존 파일을
+유지한다.
+
+검증 후에만 `bun add --global --trust omp-superagent@VERSION` 또는
+`npm install --global omp-superagent@VERSION`으로 대상 버전을 설치하거나 소스 설치를
+다시 빌드한다. 워커 파일은 그 설치본에 의존하는 Host의 종료를 확인한 뒤 해당 워커에서만
+교체한다. 기존 설정·상태·등록 정보·저널을 보존하고 `setup`은 다시 실행하지 않는다.
+
+#### 원래 실행 중이던 Gateway만 복구
+
+각 Gateway 머신에서 `omp-sa doctor --config FILE`로 시작하지 않고 로컬 준비 상태를 확인할
+수 있다. 점검 전에 **실행 중이던 Gateway에만** `omp-sa start --config FILE`을 실행한다.
+HEAD가 절전 중이었어도 Gateway는 실행 중인 인스턴스다. 명시적 시작은 저장된 동일 세션으로
+HEAD를 올리며, 바로 절전 상태로 돌려놓는 명령은 아니다. 레인은 HEAD가 관리하므로 수동으로
+시작하지 않는다. 아래 세 명령에는 `PATH`에서 우연히 찾은 `omp-sa`가 아니라 **업데이트한
+설치본의 절대 경로**를 쓴다. 패키지 설치라면 다음과 같이 실행한다.
+
+```sh
+NEW_OMP_SA=/absolute/path/to/upgraded/bin/omp-sa
+"$NEW_OMP_SA" doctor --config "$CONFIG" &&
+  "$NEW_OMP_SA" start --config "$CONFIG" &&
+  "$NEW_OMP_SA" status --config "$CONFIG"
+```
+
+소스 설치라면 대신 업데이트한 체크아웃의 CLI를 직접 실행한다.
+
+```sh
+NEW_CLI=/absolute/path/to/upgraded/checkout/src/cli.ts
+bun --no-env-file "$NEW_CLI" doctor --config "$CONFIG" &&
+  bun --no-env-file "$NEW_CLI" start --config "$CONFIG" &&
+  bun --no-env-file "$NEW_CLI" status --config "$CONFIG"
+```
+
+`status`에서 `gateway.gateway.ready`는
+메신저 연결 준비, `gateway.gateway.admissionReady`는 최초 승인 복구를 마쳐 내구성 있는
+입력 접수가 가능하다는 뜻이고, `gateway.head.ready`는 상주 컨트롤러와 프리셋 준비 상태다.
+`start`는 셋이 모두 참이 되기 전에 반환할 수 있다. HEAD가 상주할 때
+`gateway.head.initialization.sessionId`를 앞서 수집한 세션과 대조한다. 절전 상태를
+수집했다면 **이전 값**은 `gateway.head.hibernation.sessionId`다. 보류된 입력이나 발송 결과가
+불확실한 응답을 강제로 재전달하지 않는다.
+
+**0.1.10의 파일을 이미 덮어썼다면** 새 helper로 기존 소유 프로세스의 종료를 마무리하지 않는다.
+새 helper는 구버전의 `exit` 요청 출처를 증명할 수 없어 종료 영수증을 발행하지 않는다.
+복구를 위해 인스턴스·설정·저널·로그를 보존하고, 재시작하거나 영수증을 직접 작성하거나 불확실한
+종료 요청을 반복하지 않는다. 이미 검증에 실패한 소유 프로세스는 파일만 되돌려도 풀리지 않는다.
+0.1.11부터 소유 프로세스는 Rust에서 자신의 종료를 직접 검증한다.
+
+### 처음 설치
+
+```sh
+bun add --global --trust omp-superagent@0.1.12
 omp-sa --help
 ```
 
 `--trust`는 관리형 omp-superkit 준비 등 패키지 설치 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
-`npm install --global omp-superagent@0.1.11`도 사용할 수 있다.
+`npm install --global omp-superagent@0.1.12`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
 `omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
 

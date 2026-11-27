@@ -1,6 +1,6 @@
 {
   "name": "omp-superagent",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "One messenger-connected OMP head with independent work sessions",
   "license": "MIT",
   "author": "dbc-hbin",
@@ -17,6 +17,9 @@
     "scripts/build-host-owner.ts",
     "scripts/prepare-super.ts",
     "scripts/setup.sh",
+    "scripts/upgrade-evidence-files.mjs",
+    "scripts/upgrade-evidence.mjs",
+    "scripts/upgrade-host-wire.mjs",
     "skills/",
     "host-owner/bin/",
     "gateway/bin/",

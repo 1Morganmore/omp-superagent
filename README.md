@@ -46,7 +46,9 @@
 
 ## Quick start
 
-### 1. Install
+### 1. First install
+
+**Already installed?** Follow the [update procedure](docs/OPERATIONS.en.md#update-an-existing-installation): capture live owners, stop the verified processes before replacing files, and restart only previously running Gateways using the upgraded CLI. A shutdown ACK alone is not enough.
 
 Use macOS or Linux (arm64 or x64), [Bun 1.4.4+](https://bun.sh), and a separately installed [stock OMP](https://github.com/can1357/oh-my-pi#install). Authenticate your model provider in OMP.
 

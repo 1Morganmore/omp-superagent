@@ -16,7 +16,8 @@ rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 # Stock RPC v1 keeps the first object fields when a large event must be shrunk.
 # Keep raw_value off: it gives a private meaning to otherwise literal RPC objects.
-serde_json = { version = "1", features = ["preserve_order"] }
+# Journal numbers must round to the same IEEE-754 value as stock JSON.parse.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 

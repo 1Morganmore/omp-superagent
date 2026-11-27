@@ -212,6 +212,13 @@ jobs:
             printf 'Installed Gateway failed its CLI smoke:\n%s\n' "$output" >&2
             exit 1
           fi
+      - name: Verify stop-first npm upgrade and resume the same HEAD
+        shell: bash
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          filename=$(bun --no-env-file -p 'const { name, version } = require("./package.json"); `${name}-${version}.tgz`')
+          bun --no-env-file test/fixtures/npm-upgrade.ts "$RUNNER_TEMP/distributions/$filename" "$NATIVE_PLATFORM"
 
   release:
     name: Publish GitHub Release

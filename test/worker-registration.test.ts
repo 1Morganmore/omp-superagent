@@ -309,14 +309,14 @@ test.each([false, true])("worker add --default pins the configured or explicitly
   expect(listWorkers(options.stateDir).map(worker => worker.defaultRepository)).toEqual([{ root: cwd, repoId }]);
 });
 
-test("CLI stop does not connect to a local namesake when the durable remote worker is unregistered", async () => {
+test.each(["unregistered worker", "copied local state"] as const)("CLI stop does not connect to a namesake socket for %s", async placement => {
   const { root, options: { stateDir } } = fixture();
   const config = join(root, "config.json");
   writeFileSync(config, JSON.stringify({
     headCwd: root, stateDir, command: [process.execPath], maxHosts: 2, maxSubagents: 2, idleMs: 0,
     telegram: { tokenEnv: "UNUSED_FIXTURE_TOKEN", ownerId: "123", allowedChatIds: [] },
   }));
-  const laneId = "lane-owned-remote";
+  const laneId = "lane-owned";
   const remote = { workerId: "worker-not-enrolled", repoId: "a".repeat(64), revision: "b".repeat(40),
     subdir: "", stateDir: "/fixture-worker" };
   const lane = { id: laneId, generation: 1, pid: 12345, sessionId: "fixture-session",
@@ -327,7 +327,9 @@ test("CLI stop does not connect to a local namesake when the durable remote work
   const db = new Database(join(stateDir, "coordination.sqlite"));
   try {
     db.run("CREATE TABLE lanes (data TEXT NOT NULL, remote TEXT)");
-    db.run("INSERT INTO lanes (data, remote) VALUES (?, ?)", [JSON.stringify(lane), JSON.stringify(remote)]);
+    db.run("INSERT INTO lanes (data, remote) VALUES (?, ?)", [
+      JSON.stringify(lane), placement === "unregistered worker" ? JSON.stringify(remote) : null,
+    ]);
   } finally { db.close(); }
   const localSocket = join(localRun, `${laneId}.sock`);
   let connections = 0;
@@ -335,7 +337,8 @@ test("CLI stop does not connect to a local namesake when the durable remote work
   await new Promise<void>((resolve, reject) => { server.once("error", reject).listen(localSocket, resolve); });
   try {
     chmodSync(localSocket, 0o600);
-    await expect(main(["stop", laneId, "--config", config])).rejects.toThrow("Remote lane has no matching verified worker registration");
+    await expect(main(["stop", laneId, "--config", config])).rejects.toThrow(placement === "unregistered worker"
+      ? "Remote lane has no matching verified worker registration" : "no recorded Host identity eligible for shutdown");
     expect(connections).toBe(0);
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => { if (error) reject(error); else resolve(); }));

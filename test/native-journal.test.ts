@@ -131,6 +131,25 @@ async function exitFixture(
 }
 
 test.each([
+  { condition: "all observations are present", lastOrdinal: 4, terminal: true, flushed: true },
+  { condition: "a terminal observation is missing", lastOrdinal: 4, terminal: false, flushed: false },
+  { condition: "the last ordinal is just below four", lastOrdinal: 3.9999999999999996, terminal: true, flushed: false },
+])("native exit verification checks whether $condition", async ({ lastOrdinal, terminal, flushed }) => {
+  const { result, receipt, receiptPath, sessionFile } = await exitFixture(({ start, receipt }) => {
+    const starts = [1, 2, 3, lastOrdinal].map((runOrdinal, index) => ({
+      ...start, id: `start-${index}`, parentId: index === 0 ? null : `start-${index - 1}`, data: { ...start.data, runOrdinal },
+    }));
+    return titleSlot + [header, ...starts, ...(terminal ? [{ ...receipt, parentId: `start-${starts.length - 1}` }] : [])]
+      .map(line).join("");
+  }, { runOrdinal: 4 });
+  expect(result.code, result.stderr).toBe(flushed ? 0 : 1);
+  expect(result.stdout).toBe("");
+  expect(receipt).toEqual({ pid, ownerPid, sessionId, sessionFile, workerAttempt: "fixture-attempt", code: 0,
+    signal: null, persisted: true, observationsFlushed: flushed });
+  expect((await stat(receiptPath)).mode & 0o777).toBe(0o600);
+});
+
+test.each([
   { prefixKind: "a title slot after a blank line", prefix: "\n" + titleSlot },
   { prefixKind: "a title slot across multiple lines", prefix: JSON.stringify(JSON.parse(titleSlot), null, 2) + "\n" },
   { prefixKind: "a BOM before a slotless header", prefix: "\uFEFF" },

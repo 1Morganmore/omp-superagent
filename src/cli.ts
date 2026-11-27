@@ -8,7 +8,6 @@ import { inspectInstalledOmp } from "./omp/installed-omp";
 import { requireHostOwner } from "./omp/host-owner-path";
 import { loadCredentials } from "./config/credentials";
 import { WORKFLOW_NAMES, type Lane } from "./contracts";
-import type { HostConnection } from "./omp/host";
 import { readLaneRows } from "./lane/lane-rows";
 
 // Keep Host/SDK imports out of setup, doctor and command registration:
@@ -375,28 +374,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     const lane = laneRows(config.stateDir).find(record => record.id === target);
     if (!lane) throw new Error("Unknown managed lane");
-    const remote = lane.remote;
-    let host: HostConnection;
-    if (remote) {
-      const { lookupWorker, remoteLanePaths, workerConnect, workerRef } = await import("./worker/worker-wire");
-      const paths = remoteLanePaths(remote, lane.id);
-      if (lane.pid === null || !lane.sessionId || lane.sessionFile !== paths.sessionFile || lane.socketPath !== paths.socketPath)
-        throw new Error("Remote lane has no recorded Host identity eligible for shutdown");
-      host = await workerConnect(await lookupWorker(config.stateDir, remote), workerRef(lane));
-    } else {
-      const { connect } = await import("./omp/host");
-      host = await connect(hostPaths(config, target).socketPath);
-    }
-    try {
-      if (remote) {
-        const state = await host.client.getState();
-        if (state.hostPid !== lane.pid || state.sessionId !== lane.sessionId || state.sessionFile !== lane.sessionFile)
-          throw new Error("Remote Host identity no longer matches the recorded lane; shutdown was not sent");
-      }
-      const response = await host.request({ type: "shutdown_host" });
-      if (!response.success) throw new Error(response.error ?? "Host refused shutdown");
-      console.log(`Host ${target} accepted graceful shutdown.`);
-    } finally { await host.close(); }
+    const { stopManagedLane } = await import("./operator/stop-lane");
+    await stopManagedLane(config, lane);
+    console.log(`Host ${target} accepted graceful shutdown.`);
     return;
   }
   if (target !== "main") {

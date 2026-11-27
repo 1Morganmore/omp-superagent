@@ -83,6 +83,15 @@ contracts. Use the [operations guide](docs/OPERATIONS.md) for operator procedure
 
 ## Verification and changes
 
+- For an in-place upgrade, follow the [operations runbook](docs/OPERATIONS.en.md#update-an-existing-installation).
+  Capture live identity at each physical socket. Request local lane shutdown on the verified
+  connection; stop affected remote lanes and Gateway/HEAD with the **old installation**.
+  If any dependent Host is outside scope,
+  leave the installation intact. Verify matching fresh Host exit receipts and actual process
+  exits before overwriting files; neither a stop ACK nor a missing socket proves exit.
+  Restore only previously running Gateways with the original config, checking the same
+  HEAD session and transport, admission and controller readiness. Leave intentionally stopped
+  instances stopped; a sleeping HEAD does not mean its Gateway was stopped.
 - From the repository root: `bun run check` for types, `bun test test` for regressions,
   and `bun run test:ci` for the same checks with native Host and setup PTY fixtures enabled
   using the installed stock OMP and prepared managed integration. `bun run test:baseline`

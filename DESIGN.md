@@ -107,6 +107,19 @@ part of the native build.
    no `KeepAlive`, immediate activation, or second supervisor. `uninstall` removes
    only future startup. There is no Linux service installer or Windows support.
 
+An [in-place package update](docs/OPERATIONS.en.md#update-an-existing-installation)
+requires verified shutdown of every Gateway and resident Host using that installation.
+Capture live identity from the physical socket before stopping. A local lane stop must
+match the selected instance, recorded socket and native session on the connection that
+sends the shutdown. Match the exact process, session and physical journal to a fresh
+Host exit receipt and independently verify process exit.
+Restore only previously running Gateways. A positively sleeping HEAD has no resident
+process to stop; explicit start of its previously running Gateway resumes the same session.
+Starting with 0.1.11, Rust owners verify journal persistence and flushed observations
+in-process. A 0.1.10 owner must finish using its original helper before replacement.
+The new installation cannot authenticate the old helper's `exit` request and does not
+publish a receipt for it. Replacing the files does not release an already-fenced owner.
+
 ### Idle HEAD hibernation
 
 `headIdleMs` controls how long a fully idle HEAD stays resident (default 30

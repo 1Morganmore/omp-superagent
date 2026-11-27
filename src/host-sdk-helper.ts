@@ -219,10 +219,14 @@ try {
   }
   else if (operation === "prepare") throw new Error("Session preparation follows launch discovery");
   else if (operation === "inventory" || operation === "fit") {
+    if (!path) throw new Error("Host manifest is required");
     const input = await Bun.stdin.json();
-    const manifest: Manifest = await Bun.file(path!).json();
+    const manifest: Manifest = await Bun.file(path).json();
     process.stdout.write(JSON.stringify(await run(operation, manifest, input)));
-  } else throw new Error("Unknown Host SDK operation");
+  } else {
+    console.error("Unsupported Host SDK operation");
+    process.exitCode = 1;
+  }
 } catch {
   // SDK errors may contain native frames, authorization data or prompt content.
   console.error("Host SDK operation failed");

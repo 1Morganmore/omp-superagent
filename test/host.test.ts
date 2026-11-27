@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
@@ -8,6 +9,7 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-cod
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { main } from "../src/cli";
 import hostExtension from "../src/host-extension";
 import { MANAGED_ULW_ENV } from "../src/omp/managed-super";
 import { buildHostArgs, connect, HostConnection, HostStartError, startHost, type HostFrame, type HostOptions } from "../src/omp/host";
@@ -304,6 +306,30 @@ test("connect negotiates through public RpcClient and probes the live session", 
   cleanups.push(() => connection.close());
   expect(host.received.map(frame => frame.type)).toEqual(["negotiate_protocol", "get_state"]);
   expect((await connection.client.getState()).sessionFile).toBe(host.sessionFile);
+});
+
+test.each([true, false])("CLI sends shutdown only on the connection matching the saved local lane (match: %s)", async matches => {
+  const host = await fixture();
+  const run = path.join(host.root, "run");
+  const socketPath = path.join(run, "lane-one.sock");
+  const config = path.join(host.root, "config.json");
+  await fs.mkdir(run, { mode: 0o700 });
+  await fs.rename(host.socketPath, socketPath);
+  await fs.writeFile(config, JSON.stringify({ stateDir: host.root, headCwd: host.root, command: [process.execPath],
+    maxHosts: 2, maxSubagents: 2, idleMs: 0,
+    telegram: { tokenEnv: "UNUSED_FIXTURE_TOKEN", ownerId: "123", allowedChatIds: [] } }));
+  const db = new Database(path.join(host.root, "coordination.sqlite"));
+  try {
+    db.run("CREATE TABLE lanes (data TEXT NOT NULL)");
+    db.run("INSERT INTO lanes VALUES (?)", [JSON.stringify({ id: "lane-one", pid: process.pid,
+      sessionId: matches ? "fixture-session" : "former-session", sessionFile: host.sessionFile, socketPath })]);
+  } finally { db.close(); }
+
+  const stop = main(["stop", "lane-one", "--config", config]);
+  if (matches) await stop;
+  else await expect(stop).rejects.toThrow("shutdown was not sent");
+  expect(host.received.filter(frame => frame.type === "shutdown_host")).toHaveLength(matches ? 1 : 0);
+  expect(host.connections).toBe(1);
 });
 
 test("managed attachment to a verified owner without activity projection preserves its native event filter", async () => {
