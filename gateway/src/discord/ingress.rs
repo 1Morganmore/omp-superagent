@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::time::Duration;
 
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::group::{Candidate, Output as GroupOutput};
 use crate::store::DiscordSourceReceipt;
@@ -160,12 +162,40 @@ impl State {
         if exact && channel.guild_id.as_deref() != raw_guild {
             return None;
         }
-        let route = self.route_for(channel).ok()?;
+        let Ok(route) = self.route_for(channel) else {
+            self.log_excluded_owner_channel(raw, create, channel);
+            return None;
+        };
         if let Some(room) = self.ctx.group_room(route.guild_id.as_deref(), &route.channel_id) {
             return (create && author.as_deref().is_some_and(|id| room.permits(id)))
                 .then_some(CandidateKind::Group);
         }
         owner_possible.then_some(CandidateKind::Owner(Some(route)))
+    }
+
+    pub(super) fn log_excluded_owner_channel(&self, raw: &Value, create: bool, channel: &Channel) {
+        // This is diagnostic only; use metadata already obtained for routing.
+        let Some(guild) = channel.guild_id.as_deref().filter(|id| {
+            self.allowed_guild(Some(id)) && raw["guild_id"].as_str() == Some(id)
+        }) else { return };
+        let parent = if channel.is_thread() { channel.parent_id.as_deref() } else { Some(channel.id.as_str()) };
+        let Some(parent) = parent.filter(|id| snowflake(id) && !self.config.allowed_channel_ids.contains(*id))
+        else { return };
+        if !create || !snowflake(&channel.id) || raw["author"]["id"] != self.config.owner_id
+            || raw["author"]["bot"] == true || raw["author"]["system"] == true
+            || !raw["webhook_id"].is_null() || !matches!(raw["type"].as_u64(), Some(0 | 19))
+            || !(raw["content"].as_str().is_some_and(|text| !text.trim().is_empty())
+                || raw["attachments"].as_array().is_some_and(|files| !files.is_empty()))
+        {
+            return;
+        }
+        if let Ok(mut last) = self.excluded_owner_log.try_lock() {
+            let now = Instant::now();
+            if last.is_none_or(|prior| now.duration_since(prior) >= Duration::from_secs(1)) {
+                *last = Some(now);
+                eprintln!("Discord owner input ignored: channel not allowlisted (guild={guild} channel={} parent={parent})", channel.id);
+            }
+        }
     }
 
     pub(super) fn voice_control<'a>(&self, raw: &'a Value, voice: &Voice) -> Option<Cow<'a, str>> {

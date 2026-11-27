@@ -1415,8 +1415,11 @@ export class Store implements StorePort {
           } else {
             this.queueOutput({ ...output, sourceId: id, route: input.route });
           }
-        } else {
-          this.queueOutput({ ...output, sourceId: id, route: input.route });
+        } else if (this.queueOutput({ ...output, sourceId: id, route: input.route })
+          && settlement?.discordHeadFollowups?.length && state === "done" && input.state === "submitted"
+          && input.target === "main" && input.route.platform === "discord" && output.id === `${id}:answer`
+          && !output.picker && output.text.trim() && this.ownerSource(id)?.id === id) {
+          this.setMeta(`discord-head-followups:${output.id}`, JSON.stringify(settlement.discordHeadFollowups));
         }
       }
       this.db.query("UPDATE inputs SET state = ? WHERE id = ?").run(state, id);
@@ -1584,6 +1587,7 @@ export class Store implements StorePort {
           || !isDeepStrictEqual(existing.resultAttachment, output.resultAttachment)
           || output.replyTo !== undefined && (!existing.replyTo
             || existing.replyTo.messageId !== output.replyTo.messageId
+            || existing.replyTo.requireExisting !== output.replyTo.requireExisting
             || physicalRouteKey(existing.replyTo.route) !== physicalRouteKey(output.replyTo.route))) {
           throw new Error(`Output identity conflict: ${output.id}`);
         }
@@ -1620,7 +1624,8 @@ export class Store implements StorePort {
       const replyOrigin = original ?? laneWatchReplySource(this, source, output.id);
       const replyTo = replyOrigin?.route.platform === "discord" && replyOrigin.messageId
         && physicalRouteKey(replyOrigin.route) === physicalRouteKey(output.route)
-        ? { route: physicalRoute(replyOrigin.route), messageId: replyOrigin.messageId } : undefined;
+        ? { route: physicalRoute(replyOrigin.route), messageId: replyOrigin.messageId,
+          ...(output.replyTo?.requireExisting ? { requireExisting: true } : {}) } : undefined;
       if (output.replyTo !== undefined && (!replyTo || output.replyTo.messageId !== replyTo.messageId
         || physicalRouteKey(output.replyTo.route) !== physicalRouteKey(replyTo.route))) {
         throw new Error(`Output reply differs from its source: ${output.id}`);
@@ -1744,6 +1749,9 @@ export class Store implements StorePort {
       }
       this.db.query("UPDATE outputs SET state = ?, remote_id = ?, error = ? WHERE id = ?")
         .run(state, state === "pending" ? null : remoteId ?? output.remoteId, error ?? null, id);
+      if (state === "sent" && remoteId && output.route.platform === "discord") {
+        this.queueDiscordHeadFollowupLinks(output, remoteId);
+      }
       const stream = this.getMeta(`status-stream:${id}`);
       if (stream) {
         const anchorKey = `status-anchor:${stream}`;
@@ -1763,6 +1771,35 @@ export class Store implements StorePort {
         this.setMeta(`topic-choice-deadline:${output.sourceId}`, String(Date.now() + TOPIC_CHOICE_WAIT_MS));
       }
     }).immediate();
+  }
+
+  private queueDiscordHeadFollowupLinks(output: OutputRecord, remoteId: string): void {
+    const key = `discord-head-followups:${output.id}`;
+    const saved = this.getMeta(key);
+    if (!saved) return;
+    const owner = this.input(output.sourceId);
+    const target = output.replyTo;
+    const guild = output.route.guildId;
+    const channel = output.route.threadId ?? output.route.channelId;
+    const snowflake = /^\d{1,20}$/u;
+    if (owner?.target !== "main" || owner.state !== "done"
+      || (owner.messageId === null ? !owner.interactionId || target !== undefined : target?.messageId !== owner.messageId)
+      || !snowflake.test(channel) || guild !== null && !snowflake.test(guild) || !snowflake.test(remoteId)) return;
+    const url = `https://discord.com/channels/${guild ?? "@me"}/${channel}/${remoteId}`;
+    const physical = new Set(owner.messageId === null ? [] : [owner.messageId]);
+    for (const id of JSON.parse(saved) as string[]) {
+      const source = this.input(id);
+      if (source?.target !== "main" || source.state !== "done" || source.generation !== owner.generation
+        || !source.messageId || !snowflake.test(source.messageId) || physical.has(source.messageId)
+        || routeKey(source.route) !== routeKey(output.route) || this.ownerSource(id)?.id !== id
+        || this.getMeta(`steering-owner:${id}`) !== owner.id) continue;
+      physical.add(source.messageId);
+      this.queueOutput({ id: `${output.id}:joined:${id}`, sourceId: id, route: source.route,
+        replyTo: { route: physicalRoute(source.route), messageId: source.messageId, requireExisting: true },
+        text: `이 후속 메시지와 함께 처리한 [HEAD 통합 답변](<${url}>)` });
+    }
+    // Commit the canonical send receipt and its dependent notices together.
+    this.db.query("DELETE FROM metadata WHERE key = ?").run(key);
   }
 
   createLane(lane: Lane & { model: LaneModel; modelReason: string }, sourceId: string): Lane {

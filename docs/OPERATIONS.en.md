@@ -1270,6 +1270,9 @@ do not constitute receipts for platform login or actual model calls. Check the G
 listed by the CLI to distinguish the actual errors and states for each stage. The Gateway's local
 endpoint is `<stateDir>/run/gateway.sock`; the actual adapter and supervisor logs are in
 `<stateDir>/logs/gateway.log`. Do not confuse the native head log with the transport log.
+For a Discord owner message ignored by the parent-channel allowlist, look for
+`Discord owner input ignored: channel not allowlisted`. The rate-limited entry
+has only the guild, destination and parent IDs. Nothing is posted in that channel.
 A ready Gateway persists incoming events before ACK even when the head is absent. Unresolved
 admissions or replies keep their pending order and appear in `gateway.unresolvedEvents` and as
 `head.ready: false`.

@@ -1851,6 +1851,41 @@ describe("durable coordination store", () => {
     expect(store.outputs().map(output => output.id)).toEqual(["status"]);
   });
 
+  test.each(["sent", "failed", "uncertain"] as const)("only a confirmed Discord shared answer creates source-bound links (%s)", (receipt) => {
+    const { store, path } = fixture();
+    const destination = route({ guildId: "3", channelId: "4", threadId: "5" });
+    const add = (id: string, messageId: string, overrides: Partial<Route> = {}, generation = 0) => {
+      store.receive({ ...inbound(id, { ...destination, ...overrides }), messageId }, "main", {
+        [`user-source:${id}`]: "true", [`steering-owner:${id}`]: "opening",
+      });
+      expect(store.submit(id, `native-${id}`, generation)).toBe(true);
+      if (id !== "opening") store.settle(id, "done");
+    };
+    add("opening", "101");
+    add("joined", "102");
+    add("edit", "102");
+    add("same-message", "101");
+    add("different-topic", "103", { topicId: "other" });
+    add("different-account", "104", { accountId: "other" });
+    add("old-generation", "105", {}, 1);
+    expect(store.settle("opening", "done", { id: "opening:answer", text: "canonical answer",
+      discordHeadFollowups: ["joined", "edit", "same-message", "different-topic", "different-account", "old-generation"],
+    })).toBe(true);
+    store.close();
+
+    const reopened = open(path);
+    expect(reopened.outputs()).toMatchObject([{ id: "opening:answer", replyTo: { route: destination, messageId: "101" } }]);
+    expect(reopened.claimOutput("opening:answer")).toBe(true);
+    const remote = receipt === "sent" ? "701" : undefined;
+    reopened.finishOutput("opening:answer", receipt, remote);
+    reopened.finishOutput("opening:answer", receipt, remote);
+    expect(reopened.outputs()).toEqual(receipt === "sent" ? [
+      expect.objectContaining({ id: "opening:answer:joined:joined", sourceId: "joined", route: destination,
+        replyTo: { route: destination, messageId: "102", requireExisting: true },
+        text: expect.stringContaining("https://discord.com/channels/3/5/701") }),
+    ] : []);
+  });
+
   test("cancellation is terminal and does not allow delayed completion to send an answer", () => {
     const { store } = fixture();
     admitLane(store);

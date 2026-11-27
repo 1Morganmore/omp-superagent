@@ -304,7 +304,7 @@ export interface OutputRecord {
   sourceId: string;
   route: Route;
   /** Durable original owner message, only in the same physical conversation. */
-  replyTo?: MessageReference;
+  replyTo?: MessageReference & { readonly requireExisting?: true };
   /** Discord status message replaced in place; fixed when the output is claimed. */
   readonly editOf?: MessageReference;
   /** Initial Discord status message; overflow falls back to one attachment instead of multi-message split. */
@@ -318,6 +318,8 @@ export interface OutputRecord {
 }
 
 export type SettlementOutput = Pick<OutputRecord, "id" | "text" | "picker"> & {
+  /** Physically distinct Discord HEAD steers proved to precede this shared answer. */
+  readonly discordHeadFollowups?: readonly string[];
   /** Controller-only lane failure routing, never derived from output text. */
   readonly laneFailure?: "quota" | "recover";
   /** Controller-verified clean native settlement of a solo scope-review admission. */
