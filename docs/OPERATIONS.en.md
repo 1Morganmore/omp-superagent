@@ -444,13 +444,13 @@ with 0.1.11, owners verify their own exits in-process in Rust.
 ### First Installation
 
 ```sh
-bun add --global --trust omp-superagent@0.1.12
+bun add --global --trust omp-superagent@0.1.13
 omp-sa --help
 ```
 
 `--trust` allows package installation scripts, including preparation of the managed
 omp-superkit. Add the output of `bun pm bin --global` to PATH. If Bun is on PATH, you can
-also use `npm install --global omp-superagent@0.1.12`. Create the configuration in your
+also use `npm install --global omp-superagent@0.1.13`. Create the configuration in your
 own working directory, not the installation directory, with
 `omp-sa setup --config ./config.local.json`. Installation alone does not activate the bot.
 

@@ -28,7 +28,8 @@ nativeTest("the same agent directory cannot wake hibernated HEAD into a differen
     const original = await fixture.ready(fixture.launchGateway(agentDir, dataHome));
     await waitForDormantHead(fixture, original);
     await fixture.crashGateway(original.gatewayPid);
-    const priorDirectory = await readdir(join(dataHome, "omp", "sessions"), { recursive: true });
+    const sessions = join(dataHome, "omp", "sessions");
+    const priorDirectory = (await readdir(sessions, { recursive: true })).sort();
     assert(priorDirectory.some(name => name.includes(original.head.sessionId)), "Original stock profile lacks the prepared journal link");
 
     const foreignGateway = fixture.launchGateway(agentDir, alternateHome);
@@ -44,7 +45,7 @@ nativeTest("the same agent directory cannot wake hibernated HEAD into a differen
     }, "wake refusal before foreign discovery publication");
     assert.equal((await fixtureHostLaunches(fixture.root)).length, 1);
     assert.equal(existsSync(join(alternateHome, "omp", "sessions")), false);
-    assert.deepEqual(await readdir(join(dataHome, "omp", "sessions"), { recursive: true }), priorDirectory);
+    assert.deepEqual((await readdir(sessions, { recursive: true })).sort(), priorDirectory);
 
     await fixture.crashGateway(foreignGateway);
     const resumed = await fixture.ready(fixture.launchGateway(agentDir, dataHome));
