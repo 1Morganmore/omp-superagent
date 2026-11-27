@@ -57,10 +57,13 @@ async function laneFixture(options: {
     const currentSession = behavior === "new_session" && connections.length > 1 ? "other" : sessionId;
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
-    socket.on("error", error => {
+    const onPeerDisconnect = (error: Error) => {
       if (!("code" in error) || (error.code !== "ECONNRESET" && error.code !== "EPIPE")) throw error;
-    });
+    };
+    socket.on("error", onPeerDisconnect);
     const lines = createInterface({ input: socket });
+    // readline re-emits socket errors when the probe rejects a chunk before the remaining writes drain.
+    lines.on("error", onPeerDisconnect);
     const send = (frame: object) => socket.write(JSON.stringify(frame) + "\n");
     send({ type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2],
       ...(worker ? { workerIdentity: state } : {}) });
@@ -194,6 +197,7 @@ test.each([
 
     expect(captured.exitCode).toBe(1);
     expect(captured.stdout.length).toBe(0);
+    if (behavior === "changed_chunk") expect(captured.stderr.toString().trim()).toBe("Host chunk sequence mismatch");
     expect(lane.connections).toEqual([[...commands]]);
   } finally {
     await lane.close();
