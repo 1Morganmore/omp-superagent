@@ -387,13 +387,13 @@ bun --no-env-file "$NEW_CLI" doctor --config "$CONFIG" &&
 ### 처음 설치
 
 ```sh
-bun add --global --trust omp-superagent@0.1.14
+bun add --global --trust omp-superagent@0.1.15
 omp-sa --help
 ```
 
 `--trust`는 관리형 omp-superkit 준비 등 패키지 설치 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
-`npm install --global omp-superagent@0.1.14`도 사용할 수 있다.
+`npm install --global omp-superagent@0.1.15`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
 `omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
 

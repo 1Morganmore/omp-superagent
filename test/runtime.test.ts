@@ -7069,22 +7069,45 @@ describe("controlled Gateway AND HEAD restart", () => {
     expect(JSON.parse(store.getMeta("head:restart:operator-raced-restart")!).state).toBe("refused");
   });
 
-  test("a settled active HEAD goal retains its original source for restart from another conversation", async () => {
+  test.each(["settled", "checkpoint-aborted", "previously-cancelled", "wrong-checkpoint-request"] as const)(
+    "active HEAD goal restart preserves the original route and requires exact source evidence (%s)", async scenario => {
     const instance = restartFixture();
     const { runtime, main, store, messenger, config } = instance;
-    const original = headMessage("settled-goal-owner", route("goal-route-A"));
-    const control = message("settled-goal-restart", route("restart-route-B"), "/restart");
+    const original = headMessage("checkpoint-goal-owner", route("goal-route-A"));
+    const control = message("checkpoint-goal-restart", route("restart-route-B"), "/restart");
+    const goalId = "checkpoint-native-goal";
+    main.journalLeaf = true;
     await runtime.start();
     await admit(runtime, original);
-    main.state.goal = { enabled: true, mode: "active", goal: { id: "settled-native-goal", status: "active" } };
+    main.state.goal = { enabled: true, mode: "active", goal: { id: goalId, status: "active" } };
     main.emit({ type: "goal_updated", state: main.state.goal });
-    main.complete("First yield without finishing the existing native goal");
-    await runtime.kick();
-    expect(store.input(original.id)?.state).toBe("done");
+    const abortOriginal = () => {
+      main.state.isSettled = true;
+      main.state.isStreaming = false;
+      main.emit({ type: "prompt_result", id: main.prompts[0]?.id, status: "aborted", agentInvoked: true, sessionSettled: true });
+      main.emit({ type: "session_settled" });
+    };
+    if (scenario === "settled") {
+      main.complete("First yield without finishing the existing native goal");
+      await runtime.kick();
+    } else if (scenario === "previously-cancelled") {
+      abortOriginal();
+      await messenger.whenSent(1);
+      expect(store.input(original.id)?.state).toBe("cancelled");
+    } else {
+      main.beforeAbort = abortOriginal;
+    }
     await admit(runtime, control);
+    const originalState = scenario === "settled" ? "done" : "cancelled";
+    expect(store.input(original.id)?.state).toBe(originalState);
     const restart = JSON.parse(store.getMeta(`head:restart:${control.id}`)!);
-    expect(restart.checkpoint).toMatchObject({ goalActive: true, goalId: "settled-native-goal", goalSourceId: original.id });
+    expect(restart.checkpoint).toMatchObject({ goalActive: true, goalId });
+    expect(restart.checkpoint.goalSourceId).toBe(scenario === "previously-cancelled" ? undefined : original.id);
     restart.ownerPid = 2_000_000_001;
+    for (const resident of restart.checkpoint.residents) if (resident.id === "main") {
+      resident.pid = restart.ownerPid;
+      if (scenario === "wrong-checkpoint-request") resident.requestIds = ["unrelated-native-request"];
+    }
     store.setMeta(`head:restart:${control.id}`, JSON.stringify(restart));
     store.setMeta("head:restart-fence", JSON.stringify(restart));
     const receipt: GatewayRestartRecord = { requestId: restart.requestId, inputId: control.id, ackOutputId: restart.ackOutputId,
@@ -7099,6 +7122,13 @@ describe("controlled Gateway AND HEAD restart", () => {
     };
     await runtime.kick();
     const resumeId = `restart-resume:${restart.requestId}:main`;
+    if (scenario === "previously-cancelled" || scenario === "wrong-checkpoint-request") {
+      expect(store.input(resumeId)).toBeNull();
+      expect(store.output(`${control.id}:restart-goal-held`)).toMatchObject({ route: control.route });
+      expect(main.state.goal?.goal?.status).toBe("paused");
+      expect(main.prompts).toHaveLength(1);
+      return;
+    }
     expect(store.input(resumeId)).toMatchObject({ route: original.route, state: "submitted" });
     const card = [...messenger.shown.values()].find(card => card.requestId === "resumed-original-card");
     expect(card?.route).toEqual(original.route);
@@ -7110,6 +7140,9 @@ describe("controlled Gateway AND HEAD restart", () => {
     main.emit({ type: "session_settled" });
     await runtime.kick();
     expect(store.output(`${resumeId}:answer`)).toMatchObject({ route: original.route, text: "Original goal finished" });
+    expect(store.input(original.id)?.state).toBe(originalState);
+    await admit(runtime, control);
+    expect(main.commands.filter(command => command.type === "goal" && command.op === "resume")).toHaveLength(1);
     expect(main.prompts).toHaveLength(1);
   });
 

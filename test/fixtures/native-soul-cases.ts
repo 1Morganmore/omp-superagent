@@ -36,10 +36,10 @@ export const soulCases = {
   mentorHead: { id: "413", route: parent, text: "Summarize what the isolated fixture now checks." },
   mentorLane: { id: "414", route: thread, text: "Summarize the independent result for this topic." },
   negated: { id: "415", route: parent, text: "From now on, reply like a mentor but avoid a casual register." },
-  manager: { id: "407", route: thread, text: "/head Delegate the next local check to our existing lane and report its result here." },
-  steer: { id: "408", route: thread, text: "Also include the current bound-topic detail in the result." },
-  child: { id: "409", route: parent, text: "/head Ask a bounded native child to inspect its own capabilities, then report back." },
-  super: { id: "410", route: parent, text: "/head /super-plan outline the isolated fixture verification." },
+  manager: { id: "416", route: thread, text: "/head Delegate the next local check to our existing lane and report its result here." },
+  steer: { id: "417", route: thread, text: "Also include the current bound-topic detail in the result." },
+  child: { id: "418", route: parent, text: "/head Ask a bounded native child to inspect its own capabilities, then report back." },
+  super: { id: "419", route: parent, text: "/head /super-plan outline the isolated fixture verification." },
 } as const satisfies Record<string, Pick<Inbound, "id" | "route" | "text">>;
 
 export type SoulProviderWitness = {

@@ -4485,7 +4485,9 @@ export class Superagent {
       this.assertPassiveModelReconciliation(id, intent);
       if (remoteOwnerAbsent && this.remoteOpenPending(lane)) this.store.setMeta(this.remoteOpenKey(lane), "reconciled");
       if (live && source && state?.goal?.goal?.status === "paused") {
-        await this.resumeNativeGoal(live, source, lane.route, `resume:${source.id}:${id}`, state.goal.goal.id);
+        await this.resumeNativeGoal(live, {
+          source, route: lane.route, inputId: `resume:${source.id}:${id}`, goalId: state.goal.goal.id,
+        });
       } else {
         this.blocked.delete(id);
         this.modelHolds.delete(id);
@@ -4500,7 +4502,13 @@ export class Superagent {
     } finally { this.laneMutations--; }
   }
 
-  private async resumeNativeGoal(live: Live, source: InputRecord, route: Route, inputId: string, goalId: string | undefined): Promise<void> {
+  private async resumeNativeGoal(live: Live, { source, route, inputId, goalId, restart }: {
+    readonly source: InputRecord;
+    readonly route: Route;
+    readonly inputId: string;
+    readonly goalId?: string;
+    readonly restart?: HeadRestart;
+  }): Promise<void> {
     this.assertRestartOpen();
     if (live.id !== "main" && this.store.getMeta(`lane-quota-hold:${live.id}`))
       throw new Error("Choose a lane model after quota exhaustion before resuming native work");
@@ -4516,8 +4524,10 @@ export class Superagent {
       const state = await this.state(live);
       this.assertRestartOpen();
       if (this.store.input(inputId)) return;
-      const original = this.store.input(source.id);
-      if (!original || original.state === "cancelled" || routeKey(original.route) !== routeKey(source.route)
+      const original = restart ? this.restartGoalSource(live, restart) : this.store.input(source.id);
+      if (!original || original.id !== source.id || routeKey(original.route) !== routeKey(source.route)
+        || (restart ? state.hostPid !== process.pid || this.store.hasInput("main", "submitted") || this.store.hasInput("main", "uncertain")
+          : original.state === "cancelled")
         || version !== live.nativeVersion || live.input || live.admitted.size || live.releasing || !state.sessionFile
         || !state.isSettled || state.isStreaming || state.isCompacting || state.queuedMessageCount
         || state.hasOwnedRunningWork || state.hasPendingAsyncWork || state.pendingUiRequests?.length
@@ -5130,6 +5140,7 @@ export class Superagent {
     if (before.hostPid !== restart.ownerPid || before.sessionId !== restart.sessionId || before.sessionFile !== restart.sessionFile)
       throw new Error("The original HEAD identity changed");
     if (!restart.checkpoint) {
+      const goalSource = this.headGoalSource(head, before.goal?.goal?.id);
       const residents: NonNullable<HeadRestart["checkpoint"]>["residents"] = [];
       for (const live of this.live.values()) {
         const actual = await this.state(live);
@@ -5147,7 +5158,7 @@ export class Superagent {
       }
       restart = { ...restart, checkpoint: {
         goalActive: before.goal?.enabled === true && before.goal.goal?.status === "active",
-        goalSourceId: this.headGoalSource(head, before.goal?.goal?.id)?.id, goalId: before.goal?.goal?.id,
+        goalSourceId: goalSource?.state === "cancelled" ? undefined : goalSource?.id, goalId: before.goal?.goal?.id,
         ...restartSelection(before), residents,
       } };
       this.assertRestartCurrent(restart);
@@ -5502,8 +5513,26 @@ export class Superagent {
     if (!saved) return null;
     const owner = record(JSON.parse(saved));
     const input = typeof owner.inputId === "string" ? this.store.input(owner.inputId) : null;
-    return input && input.target === "main" && input.generation === owner.generation && input.requestId === owner.requestId
+    return input && input.target === "main" && input.requestId && input.generation === owner.generation && input.requestId === owner.requestId
       && owner.sessionFile === this.headSessionFile() ? input : null;
+  }
+
+  private restartGoalSource(live: Live, restart: HeadRestart): InputRecord | null {
+    const checkpoint = restart.checkpoint;
+    if (!checkpoint?.goalActive || !checkpoint.goalSourceId || restart.sessionId !== live.sessionId
+      || this.store.getMeta("gateway:operator-stop") !== (restart.stopBoundary ?? null)) return null;
+    const source = this.headGoalSource(live, checkpoint.goalId);
+    const control = this.store.input(restart.inputId);
+    if (!source || source.id !== checkpoint.goalSourceId || isRetiredScopeInput(source.id) || !control
+      || !authorizeRoute(this.config, source.route) || !authorizeRoute(this.config, control.route)
+      || groupRoom(this.config, source.route) || groupRoom(this.config, control.route)) return null;
+    if (source.state === "done") return source;
+    if (source.state !== "cancelled" || !source.requestId) return null;
+    // Checkpoint abort can cancel the predecessor's prompt receipt, not the
+    // paused goal. Only that exact admission can supply restart resume authority.
+    const head = checkpoint.residents.find(resident => resident.id === "main");
+    return head?.pid === restart.ownerPid && head.sessionId === restart.sessionId && head.generation === source.generation
+      && head.inputId === source.id && head.requestIds.includes(source.requestId) && head.entryId ? source : null;
   }
 
   private async reconcileRestart(): Promise<void> {
@@ -5573,14 +5602,12 @@ export class Superagent {
         this.store.settle(restart.inputId, "done");
         this.restartResult(restart, "Gateway AND HEAD were replaced and the replacement HEAD is initialized and ready. The same native session, transcript and original conversation route were restored; no model turn was used for /restart.");
         this.saveRestart({ ...restart, state: "ready" }, false);
-        const goalSource = restart.checkpoint?.goalSourceId ? this.headGoalSource(live, restart.checkpoint.goalId) : null;
-        const restartSource = this.store.input(restart.inputId);
-        const source = goalSource && restartSource
-          && !groupRoom(this.config, goalSource.route) && !groupRoom(this.config, restartSource.route) ? goalSource : null;
-        if (restart.checkpoint?.goalActive && source && actual.goal?.goal?.status === "paused"
-          && actual.goal.goal.id === restart.checkpoint.goalId && source.id === restart.checkpoint.goalSourceId
-          && !this.store.inputs("main").some(input => input.state === "submitted" || input.state === "uncertain")) {
-          await this.resumeNativeGoal(live, source, source.route, `restart-resume:${restart.requestId}:main`, actual.goal.goal.id);
+        const source = this.restartGoalSource(live, restart);
+        if (source && actual.goal?.goal?.status === "paused" && actual.goal.goal.id === restart.checkpoint?.goalId
+          && !this.store.hasInput("main", "submitted") && !this.store.hasInput("main", "uncertain")) {
+          await this.resumeNativeGoal(live, {
+            source, route: source.route, inputId: `restart-resume:${restart.requestId}:main`, goalId: actual.goal.goal.id, restart,
+          });
         } else if (restart.checkpoint?.goalActive && !source) {
           const original = this.store.input(restart.inputId);
           if (!original) throw new Error("Restart result source is unavailable");
