@@ -390,6 +390,21 @@ See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for com
   quotes. They apply only to original owner messages in physical Discord work
   threads, not edits, quoted text or attachments. DM and other adapters retain
   their existing topic behavior.
+- `/new` and controller-handled natural split directives create the native
+  Discord thread under the source conversation's parent. Only HEAD's explicit
+  `lane_start` destination can use another `allowedChannelIds` channel as the
+  parent, and only when `discord.allowCrossChannelThreads` is enabled and the
+  operator names it. A source in a guild parent channel may request that
+  placement too; a request in an unbound Discord thread stays in that thread.
+  The destination must be in the same bot account, owner and guild; restricted
+  `groupRooms` do not qualify. The destination channel's permitted thread
+  creation is still required, and a refusal or uncertain receipt is not retried
+  under the source parent or another channel. The one existing durable placement
+  notice in the source conversation then names both the destination channel and
+  the new thread. The lane's progress and final reports use that thread only and
+  are not duplicated in the source conversation; HEAD's own acknowledgement or
+  review remains a separate HEAD output. No ordinary, DM, quoted or
+  existing-thread route is redirected by the setting.
 - `/head <request>` explicitly addresses the shared coordination model (Slack:
   `!head` or `/superagent-head`). Manager handoffs keep HEAD's review path.
   When HEAD explicitly uses `lane_message` to continue an existing physical
@@ -536,7 +551,11 @@ there is no provider fallback or mutation of local quota counters.
 Thread capability comes from the authenticated adapter. Permission or network
 failure is not permission to fall back to another destination. Preserve the
 original binding when creating a sibling topic and journal creation intent before
-the remote effect. Discord `thread_inspect` reads actual thread and parent policy;
+the remote effect. An opted-in cross-channel parent is journaled as the requested
+destination, and only the exact thread the adapter recorded for that parent
+reconciles an uncertain creation; a source-parent thread or another thread in
+the destination channel is not evidence of that attempt. Discord
+`thread_inspect` reads actual thread and parent policy;
 `lane_thread_update` uses the original user source, checks the route and
 permissions, then reads back title, tags or archived state. Exact tag IDs and
 required/moderated tag policy apply. Archiving a thread does not pause its lane,

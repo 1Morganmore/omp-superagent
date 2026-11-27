@@ -3089,6 +3089,33 @@ export class Superagent {
       && left.authorityId === right.authorityId && left.guildId === right.guildId && left.channelId === right.channelId;
   }
 
+  /**
+   * Structural shape of an opted-in cross-channel parent: an explicit native
+   * Discord guild parent in the same bot account, owner and guild as the source,
+   * but a different channel. The policy opt-in is checked separately so a later
+   * config change can never make an interrupted creation replayable.
+   */
+  private crossChannelParent(source: Route, parent: Route): boolean {
+    return source.platform === "discord" && parent.platform === "discord"
+      && source.guildId !== null && parent.guildId === source.guildId
+      && parent.accountId === source.accountId && parent.authorityId === source.authorityId
+      && parent.threadId === null && parent.topicId === undefined
+      && !this.sameConversation(source, parent);
+  }
+
+  /**
+   * Repair only the exact thread the adapter journaled as its native result for
+   * the journaled cross-channel parent. A thread in the source parent, or any
+   * other thread in the destination channel, is not evidence of this attempt.
+   */
+  private journaledCrossChannelThread(original: InputRecord, parent: Route | null, destination: Route): boolean {
+    if (!parent || !this.crossChannelParent(original.route, parent)) return false;
+    const saved = this.store.getMeta(`handoff-route-result:${original.id}`);
+    if (!saved) return false;
+    const result = JSON.parse(saved) as Route;
+    return result.threadId !== null && this.sameConversation(parent, result) && routeKey(result) === routeKey(destination);
+  }
+
   private rememberThread(route: Route): void {
     const identity = this.rememberRoute(route);
     // These platforms use the actual starter's identity as a history boundary.
@@ -3704,6 +3731,10 @@ export class Superagent {
     const intent = JSON.stringify({ destination: input.destination ?? null,
       ...(input.appliedTags === undefined ? {} : { appliedTags: input.appliedTags }) });
     const previousIntent = this.store.getMeta(intentKey);
+    // Durable intent written before the first remote effect; read it back so a
+    // retried request cannot restate what the interrupted attempt asked for.
+    const journaledIntent = previousIntent === null ? null : JSON.parse(previousIntent) as { destination: Route | null };
+    const journaledParent: Route | null = journaledIntent?.destination ?? null;
     const requestedParent = input.destination && !input.destination.threadId && !input.destination.topicId ? input.destination : null;
     const logicalTopicId = this.isDm(original.route)
       ? (!requestedParent && original.route.topicId) || newLogicalTopicId(original.id)
@@ -3715,16 +3746,24 @@ export class Superagent {
       }
     }
     if (requestedParent && !this.sameConversation(original.route, requestedParent)) {
-      throw new Error("A new sibling topic must use the source conversation's authorized parent");
+      // The destination was authorized above (same owner, allowed guild and
+      // channel). Only the opt-in owner policy widens the source parent.
+      if (this.config.discord?.allowCrossChannelThreads !== true || !this.crossChannelParent(original.route, requestedParent))
+        throw new Error("A new sibling topic must use the source conversation's authorized parent");
     }
     const savedDestination = this.store.getMeta(destinationKey);
+    const crossChannelIntent = journaledParent !== null && this.crossChannelParent(original.route, journaledParent);
+    // A cross-channel attempt never repairs against a source-parent thread; only
+    // the exact journaled native result can prove which thread it created.
     const reconciling = savedDestination === "uncertain" && input.destination?.threadId
-      && this.sameConversation(original.route, input.destination);
+      && (crossChannelIntent
+        ? this.journaledCrossChannelThread(original, journaledParent, input.destination)
+        : this.sameConversation(original.route, input.destination));
     // A read-only capability rejection has created nothing. Let the head select
     // valid tags after inspection, but never change a submitted creation.
-    const correctingTags = previousIntent !== null && !this.store.getMeta(destinationKey)
+    const correctingTags = journaledIntent !== null && !this.store.getMeta(destinationKey)
       && !this.store.input(`handoff:${original.id}:lane`)
-      && isDeepStrictEqual(JSON.parse(previousIntent).destination, input.destination ?? null);
+      && isDeepStrictEqual(journaledIntent.destination, input.destination ?? null);
     if (previousIntent && previousIntent !== intent && !reconciling && !correctingTags)
       throw new Error("Lane handoff destination intent conflict");
     const knownDestination: Route | undefined = savedDestination && savedDestination !== "uncertain"
@@ -3880,7 +3919,13 @@ export class Superagent {
       }
       this.rememberThread(lane.route);
       const topicLabel = lane.route.platform === "telegram" ? "작업 주제" : "작업 스레드";
-      const thread = lane.route.platform === "discord" && lane.route.threadId ? `<#${lane.route.threadId}>` : lane.title;
+      // One placement notice. A same-channel native thread keeps its exact prior
+      // text; a cross-channel lane also names the destination channel so the
+      // owner can reach it from the source conversation.
+      const thread = lane.route.platform === "discord" && lane.route.threadId
+        ? this.sameConversation(original.route, lane.route) ? `<#${lane.route.threadId}>`
+          : `<#${lane.route.channelId}> <#${lane.route.threadId}>`
+        : lane.title;
       this.store.queueOutput({
         id: `${original.id}:topic-bound`, sourceId: original.id, route: original.route,
         text: `${topicLabel}: ${thread}`,

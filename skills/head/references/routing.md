@@ -129,11 +129,26 @@ controls Host capacity.
   contract and name one owner and verification boundary. Checkout separation is not
   permission to merge, delete a checkout, or touch another lane's uncommitted work.
 - Keep the original route by default. For work from an unbound Discord thread,
-  place any new lane in that exact thread, not its parent or a sibling.
+  place any new lane in that exact thread, not its parent or a sibling. A source
+  in a guild parent channel can also explicitly request alternate placement.
   For an explicitly requested split from a Discord thread, use the exact
   authorized parent `destination` with `threadId:null` and no `topicId` to
-  create a sibling, never a channel or nested thread. Only use an existing
-  destination when its exact platform/account/authority/guild/channel/thread/topic
+  create a sibling thread, never a bare channel destination or nested thread.
+  That parent is normally the source thread's own parent. Only an explicit
+  `lane_start` destination from HEAD widens it, and only when
+  `discord.allowCrossChannelThreads` is enabled and the operator explicitly
+  names another allowed channel in the same Discord bot account, owner and
+  guild; then that channel is the parent and the new thread still carries its
+  own lane. `/new` and controller-handled plain split directives continue to use
+  the source parent. Restricted `groupRooms` are never eligible, the
+  bot still needs thread permissions in the destination channel, and failure
+  does not fall back to the source parent or another channel. The existing
+  single placement notice then names both the destination channel and thread;
+  the lane's progress and final reports use the new thread only and are not
+  duplicated in the source conversation, while HEAD's own acknowledgement or
+  review stays a separate HEAD output. Ordinary and DM input never route there
+  implicitly.
+  Only use an existing destination when its exact platform/account/authority/guild/channel/thread/topic
   identity is observed and authorized. DMs without native support use honest
   logical topics. Never fabricate a thread ID, interaction source message, or Slack
   timestamp. Reconcile ambiguous creation before any new thread attempt.

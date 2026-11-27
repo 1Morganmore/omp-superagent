@@ -1122,6 +1122,7 @@ completed. Do not add a separate preset block to this configuration file.
 | `discord` | Optional block. If present, `tokenEnv`, `ownerId`, `allowedGuildIds`, and `allowedChannelIds` are all required. |
 | `discord.requireAddressing` | Optional boolean, default `false`. With `true`, in parent channels of allowed servers and threads not created by this bot, only ordinary messages from the owner with an actual mention of this bot or a reply to a message it sent are accepted. |
 | `discord.editProgressInPlace` | Optional boolean, default `false`. With `true`, intermediate progress updates for a Discord request edit one `⏳` status message in place instead of posting new messages. |
+| `discord.allowCrossChannelThreads` | Optional boolean, default `false`. With `true`, when HEAD hands off through `lane_start` and explicitly names another allowed channel in the same Discord bot account, owner, and guild as the destination, that channel may parent the new work thread. `/new`, plain split directives, and the source conversation's default parent are unchanged, and ordinary or DM input is never assigned to another channel implicitly. |
 | `telegram` | Optional block. If present, `tokenEnv`, `ownerId`, and `allowedChatIds` are all required. Keep the minus sign on group chat IDs. |
 | `slack` | Optional block. If present, `botTokenEnv`, `appTokenEnv`, `ownerId`, `teamId`, and `allowedChannelIds` are all required. |
 | `groupRooms` | Optional list. Enables the group modes below only for the specified rooms and users. Even the operator has only ordinary group permissions in those rooms. Defaults to an empty list. |
@@ -1380,6 +1381,20 @@ asks you to specify the task with `/new` in the same thread and does not create 
 Edited messages, quotes, and attachments do not count as instructions to create a thread.
 The plain-text split instruction does not apply in Discord DMs or on other platforms. The Gateway
 does not use an LLM for classification or execute lanes.
+A new Discord thread uses the source conversation's parent by default. `/new` and the plain split
+directives above keep that parent. Only when HEAD hands off through `lane_start` and explicitly
+names another allowed channel in the same Discord server as the destination, and
+`discord.allowCrossChannelThreads` is `true`, may that channel parent the new work thread. A
+request from a guild parent channel may request this placement; a request in an unbound thread
+stays in that thread. The destination must be an `allowedChannelIds` channel in the same bot
+account, owner, and guild; rooms restricted by `groupRooms` are never eligible. The bot must
+actually hold permission to create the thread in that channel, and a refusal or unverifiable
+capability reports failure rather than substituting the source parent or another channel. After
+creation, the source conversation receives only the existing single placement notice, naming both
+the channel and the thread. The lane's progress and final reports use the new thread only and are
+not duplicated in the source conversation; HEAD's own acknowledgement or review remains a
+separate HEAD output. The setting only widens where an explicitly named new thread is created; it
+does not change routing for ordinary messages, DMs, quotes, or existing threads.
 
 | Platform | Automatic topic creation |
 | --- | --- |
