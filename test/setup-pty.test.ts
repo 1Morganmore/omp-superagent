@@ -3,10 +3,10 @@ import { YAML, type Subprocess } from "bun";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 import { nativeTestCommand } from "./fixtures/native-command";
 import { operatorExample } from "./fixtures/operator";
+import { setupNativePaths } from "./fixtures/setup-paths";
 
 // Opt in because this exercises the installed real native CLI, Python, and Unix PTYs.
 const ptyTest = process.env.OMP_SUPERAGENT_SETUP_PTY_TEST === "1" ? test : test.skip;
@@ -311,28 +311,7 @@ Bun.spawn = function (...args) {
   await fs.mkdir(nativeBin);
   await fs.symlink(nativeCommand[0]!, path.join(nativeBin, "omp"));
   env.PATH = [nativeBin, env.PATH].join(path.delimiter);
-  // Resolve isolated fixture paths through native APIs in a fresh process; do
-  // not import native dirs/dotenv into this runner's real HOME or cache them.
-  const settingsModule = import.meta.resolve("@oh-my-pi/pi-coding-agent/config/settings");
-  const dirsModule = Bun.resolveSync("@oh-my-pi/pi-utils/dirs", path.dirname(fileURLToPath(settingsModule)));
-  const resolver = Bun.spawn([process.execPath, "--no-env-file", "-e", `
-    import { join } from "node:path";
-    import { getAgentDir, getAgentDbPath, getProjectAgentDir, getMemoriesDir, MAIN_CONFIG_FILENAMES } from ${JSON.stringify(dirsModule)};
-    const agentDir = getAgentDir();
-    console.log(JSON.stringify({
-      nativeConfig: join(agentDir, MAIN_CONFIG_FILENAMES[0]),
-      nativeFallbackConfig: join(agentDir, MAIN_CONFIG_FILENAMES[1]),
-      nativeDb: getAgentDbPath(agentDir),
-      nativeProjectConfig: join(getProjectAgentDir(process.cwd()), MAIN_CONFIG_FILENAMES[0]),
-      nativeMemories: getMemoriesDir(agentDir),
-    }));
-  `], { cwd: root, env: { ...env, BUN_OPTIONS: "" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [resolvedPaths, resolveError, resolveCode] = await Promise.all([
-    new Response(resolver.stdout).text(), new Response(resolver.stderr).text(), resolver.exited,
-  ]);
-  expect(resolveError).toBe("");
-  expect(resolveCode).toBe(0);
-  const nativePaths = JSON.parse(resolvedPaths) as Pick<Fixture, "nativeConfig" | "nativeFallbackConfig" | "nativeDb" | "nativeProjectConfig" | "nativeMemories">;
+  const nativePaths = await setupNativePaths(root, env);
   const nativeOriginal = native === null ? "" : `\n${JSON.stringify(native, null, "\t")}\n\n`;
   await fs.mkdir(path.dirname(nativePaths.nativeConfig), { recursive: true });
   if (native !== null) await fs.writeFile(nativePaths.nativeConfig, nativeOriginal, { mode: 0o600 });
@@ -433,9 +412,10 @@ Bun.spawn = function (...args) {
       expect(await Bun.file(path.join(root, "config.local.json")).exists()).toBe(false);
       expect((await fs.readdir(root)).some(name => name.startsWith(".setup-"))).toBe(false);
       async function noSockets(directory: string): Promise<void> {
+        // Recurse only through real directories: Bun's recursive readdir can follow symlinks.
         for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
           const target = path.join(directory, entry.name);
-          expect((await fs.lstat(target)).isSocket()).toBe(false);
+          expect(entry.isSocket(), target).toBe(false);
           if (entry.isDirectory()) await noSockets(target);
         }
       }
@@ -617,12 +597,13 @@ ptyTest("actual traced setup wrapper prepares all messengers privately; explicit
     expect(proof.result.credentials).toEqual(Object.fromEntries(defaultNames.map(name => [name, true])));
     expect(await fs.readFile(context.config, "utf8")).toBe(bytes);
     expect(await fs.readFile(`${context.config}.env`, "utf8")).toBe(credentialBytes);
+    const audit = await context.audit();
     for (const [name, value] of Object.entries(secrets)) {
       expect(proof.observed.hashes[name]).toBe(hash(name === "DISCORD_BOT_TOKEN" ? explicit : value));
       expect(terminal.transcript()).not.toContain(value);
       expect(bytes).not.toContain(value);
       expect(proof.stdout).not.toContain(value);
-      for (const row of await context.audit()) expect(row.argv.join("\n")).not.toContain(value);
+      for (const row of audit) expect(row.argv.join("\n")).not.toContain(value);
     }
     expect(proof.stdout).not.toContain(explicit);
     expect(await Bun.file(marker).exists()).toBe(false);

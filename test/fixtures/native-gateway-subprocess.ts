@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stopHostFixtures } from "./host-fixture-processes";
+import { isolatedNativeEnvironment, within } from "./native-subprocess";
 
 type NativeGatewayProof = {
   readonly name: "Gateway" | "ULW";
@@ -9,14 +10,6 @@ type NativeGatewayProof = {
   readonly assertStdout?: (stdout: string) => void;
   readonly assertHostCount: (count: number, root: string) => void;
 };
-
-async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
-  // External-process failure bounds, not synchronization sleeps.
-  const expired = Promise.withResolvers<never>();
-  const timer = setTimeout(() => expired.reject(new Error(label)), ms);
-  try { return await Promise.race([work, expired.promise]); }
-  finally { clearTimeout(timer); }
-}
 
 async function stopFixture(child: Bun.Subprocess, name: NativeGatewayProof["name"]): Promise<void> {
   if (child.exitCode !== null) { await child.exited; return; }
@@ -43,12 +36,8 @@ export async function runNativeGatewayProof({
       cwd: root,
       env: {
         OMP_TEST_HOST_FIXTURE_ROOT: root,
-        PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home,
-        PI_CODING_AGENT_DIR: join(root, "agent"), PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1",
-        XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
-        XDG_CACHE_HOME: join(root, "cache"), XDG_STATE_HOME: join(root, "state"),
-        CODEX_HOME: join(root, "codex"), CLAUDE_CONFIG_DIR: join(root, "claude"), COPILOT_HOME: join(root, "copilot"),
-        TMPDIR: root, TMP: root, TEMP: root, OMP_NATIVE_GATEWAY_ROOT: root,
+        ...isolatedNativeEnvironment(root),
+        OMP_NATIVE_GATEWAY_ROOT: root,
         ...(process.env.OMP_TEST_COMMAND === undefined ? {} : { OMP_TEST_COMMAND: process.env.OMP_TEST_COMMAND }),
         ...(process.env.OMP_TEST_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.OMP_TEST_NATIVES_DIR } : {}),
         ...overrides,

@@ -1,11 +1,11 @@
 use serde_json::{Value, json};
 
-use crate::{adapter::EffectError, store::answer_digest};
+use crate::{adapter::EffectError, native_dialog::Answer, store::answer_digest};
 
 use super::{
     Core,
     approval::{AnswerBinding, Pending, card_key},
-    dialog::{Answer, Dialog},
+    dialog::Dialog,
     model::Route,
 };
 
@@ -39,7 +39,7 @@ impl AnswerResponse {
                         && answers
                             .iter()
                             .zip(questions)
-                            .all(|(answer, question)| answer.matches(question)) => {}
+                            .all(|(answer, question)| question.matches_answer(answer)) => {}
                 _ => return Err(invalid()),
             }
         }

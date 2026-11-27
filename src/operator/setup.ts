@@ -3,7 +3,6 @@ import {
   openSync, readFileSync, realpathSync, unlinkSync, writeSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isatty } from "node:tty";
 import { setImmediate as yieldToSignals } from "node:timers/promises";
 import { credentialEnvNames, hostPaths, parseConfig, type Config } from "../config/config";
@@ -15,7 +14,7 @@ import {
 import { applyConsentedMnemopi, canEnableGlobalMemory, inspectManagedMemory, memoryBlockReason } from "../omp/managed-memory";
 import { inspectNativeJudge } from "./setup-judge";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const root = resolve(import.meta.dir, "../..");
 
 class SetupCancelled extends Error {
   constructor(saved = false) {
@@ -167,7 +166,6 @@ export async function setup(configPath: string): Promise<void> {
   const path = resolve(configPath);
   const terminal = new Terminal();
   let configTemporary: string | undefined;
-  let createdConfig = false;
   try {
     const previousConfig = currentConfig(path);
     const previousCredentials = readCredentialFile(path);
@@ -183,10 +181,11 @@ export async function setup(configPath: string): Promise<void> {
       ({ config, text } = await newConfig(terminal, path));
     }
     hostPaths(config, "main");
-    await inspectInstalledOmp(config.command, credentialEnvNames(config));
+    const credentialNames = credentialEnvNames(config);
+    await inspectInstalledOmp(config.command, credentialNames);
     const values = Object.assign(Object.create(null) as Record<string, string>, previousCredentials?.values);
     let replacing = false;
-    for (const name of credentialEnvNames(config)) {
+    for (const name of credentialNames) {
       const old = Object.hasOwn(values, name) ? values[name] : undefined;
       const explicit = process.env[name];
       const configured = !!(explicit || old);
@@ -225,7 +224,7 @@ export async function setup(configPath: string): Promise<void> {
       : "Write configuration/credentials?");
     // Snapshot the same environment-over-file precedence used by start before
     // native settings imports can populate unrelated dotenv values.
-    const profileCredentials = Object.fromEntries(credentialEnvNames(config).map(name => [name, process.env[name] || values[name]!]));
+    const profileCredentials = Object.fromEntries(credentialNames.map(name => [name, process.env[name] || values[name]!]));
     // Deliver pending cancellation before entering the synchronous commit section.
     await yieldToSignals();
     terminal.check();
@@ -233,17 +232,13 @@ export async function setup(configPath: string): Promise<void> {
     unchanged(path, previousConfig);
     assertCredentialsUnchanged(path, previousCredentials);
     terminal.check();
-    if (configTemporary) {
-      linkSync(configTemporary, path); // Exclusive creation: never overwrite another config.
-      createdConfig = true;
-    }
+    if (configTemporary) linkSync(configTemporary, path); // Exclusive creation: never overwrite another config.
     try { writeCredentials(path, values, previousCredentials); }
     catch (error) {
-      if (createdConfig && configTemporary) {
+      if (configTemporary) {
         const staged = lstatSync(configTemporary);
         const current = lstatSync(path);
         if (staged.dev === current.dev && staged.ino === current.ino) unlinkSync(path);
-        createdConfig = false;
       }
       throw error;
     }
@@ -260,7 +255,7 @@ export async function setup(configPath: string): Promise<void> {
       console.log(`Setup saved but is incomplete. ${memoryBlockReason(memory)} No service was started by setup.`);
       process.exitCode = 1;
     }
-    if (createdConfig) {
+    if (configTemporary) {
       const judge = await inspectNativeJudge(config.headCwd);
       if (judge.status === "unknown") {
         console.log("Setup saved, but native OMP judge configuration could not be verified; judge configuration is unknown, not confirmed missing. Native model settings were not changed by this check.");

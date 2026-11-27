@@ -170,27 +170,28 @@ export class WorkerLedger {
     }).immediate();
   }
 
-  transition(current: WorkerReceipt, next: WorkerReceipt): boolean {
+  #replaceCurrent(current: WorkerReceipt, replacement: () => WorkerReceipt): boolean {
     return this.#db.transaction(() => {
       const actual = this.get(current.laneId);
       if (actual?.attempt !== current.attempt || actual.phase !== current.phase) return false;
-      this.#write(next);
+      this.#write(replacement());
       return true;
     }).immediate();
   }
 
+  transition(current: WorkerReceipt, next: WorkerReceipt): boolean {
+    return this.#replaceCurrent(current, () => next);
+  }
+
   retire(current: WorkerReceipt, exit?: { readonly sessionId: string; readonly clean: boolean; readonly cleanup: () => void }): boolean {
-    return this.#db.transaction(() => {
-      const actual = this.get(current.laneId);
-      if (actual?.attempt !== current.attempt || actual.phase !== current.phase) return false;
+    return this.#replaceCurrent(current, () => {
       exit?.cleanup();
       releaseCheckout(current);
       const { laneId, generation, repoId, revision, subdir, repoRoot, gitDir, attempt, launcherPid, launchDigest, memory } = current;
       const sessionId = exit?.sessionId ?? current.sessionId;
-      this.#write({ laneId, generation, repoId, revision, subdir, repoRoot, gitDir, attempt, launcherPid, launchDigest,
+      return { laneId, generation, repoId, revision, subdir, repoRoot, gitDir, attempt, launcherPid, launchDigest,
         phase: "released", sessionId, ...(sessionId !== null && memory ? { memory } : {}),
-        ...(exit?.clean && { exitVerified: true }) });
-      return true;
-    }).immediate();
+        ...(exit?.clean && { exitVerified: true }) };
+    });
   }
 }

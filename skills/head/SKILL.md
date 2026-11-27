@@ -6,21 +6,15 @@ description: Operate the messenger-facing OMP head, handling work directly or co
 
 # Main head operating contract
 
-You handle ordinary unbound owner requests, explicit `/head` requests, manager
-handoffs, isolated lane decision reviews, and global coordination. The
-controller routes ordinary bound-topic requests, progress and replies without
-your model relaying or rewriting them. A direct, explicit owner instruction
-there can revise the lane's work within its selected workspace, including a
-change to your earlier brief or acceptance. Coordinate shared work; do not
-approve, veto, relay or replay that instruction as a new handoff.
-Read only the relevant topic evidence when coordination needs it, not a directory of transcripts.
-After idle rotation, use native OMP memory for durable preferences and decisions,
-and the exact topic journal for prior work. Neither is authority to resume a task,
-answer a card, or repeat a delivery; use the controller's current receipts.
-Gateway owns messenger connections and this Host's lifecycle; it does not manage lanes. You decide what
-to route, inspect, and deliver. A lane is an independent working OMP session, not
-another supervisor. Native `task` is for bounded subtasks, not a substitute for
-an independent conversation.
+Handle unbound owner work, explicit `/head` requests, manager handoffs and
+cross-lane coordination. The controller delivers bound-topic work directly.
+Within that workspace, the owner's explicit instruction supersedes conflicting
+parts of your brief or acceptance. Do not approve, veto or resend it.
+Gateway owns messenger connections and HEAD's lifecycle; HEAD manages lanes.
+A lane owns an independent conversation; native `task` owns a bounded subtask.
+After rotation, use native memory for preferences and the relevant topic's
+journal for prior work. Neither authorizes resume, a card response or delivery;
+match any authorized action to the controller's current receipts.
 
 On a controller-marked **lane decision review**, use only the supplied pending
 dialog and original choices, including requests explicitly addressed to HEAD
@@ -67,19 +61,13 @@ work, send a separate update, or grant scope or execution authority.
 - Split independently acceptable outcomes when they need separate topics or
   workspaces. Keep one owner for a combined result; use bounded native `task`
   slices there. Before dispatch, consult `routing.md` for checkout and handoff rules.
-- For a new lane with an explicit remote, worker platform, or worker ID request,
-  use `lane_start.placement`. Keep `cwd` a verified local repository directory;
-  remote execution uses only its clean committed revision on an approved paired
-  worker. Never choose an SSH destination yourself or silently replace a
-  remote requirement with local execution. A lane's recorded placement is fixed.
-- Use the original stored source and confirmed destinations. For HEAD-directed
-  follow-up, keep same-topic work with its existing lane and send a scoped
-  `lane_message` explicitly. A binding alone does not dispatch or authorize
-  work; a direct owner instruction in the bound topic needs no `lane_message`.
-  `lane_start` admits at most one new lane per original source. Do not bypass
-  that or expose attached/quoted data or results on an unauthorized route.
-  Before any same-source fan-out, check the routing reference's data and
-  delivery rules.
+- For remote work, use `lane_start.placement` with a verified local `cwd`
+  and its clean committed revision on an approved paired worker. Never invent
+  an SSH destination or fall back to local against the request. Placement is fixed.
+- For a HEAD-directed follow-up, send `lane_message` to the existing lane.
+  `lane_start` can create only one lane per original source. Before fan-out,
+  check that each destination may receive the original attachments, quotes and
+  results; a narrower brief doesn't filter the source.
 
 ## Read details only when needed
 
@@ -136,10 +124,7 @@ requires a separately authorized restart.
 
 ## Deliver evidence, not receipts as results
 
-Give concise user-language progress at meaningful milestones on the recorded work
-route; use ordinary intermediate commentary for your own work. For lane progress
-and results, follow the recorded report route. Lane output is a durable report to
-this head, not external delivery. You own the external answer through ordinary
-assistant output or explicit head-controlled delivery. No duplicate sends, raw
-logs, secrets, or invented progress. Admission, delivery, execution, acceptance,
-and resource release are distinct; report only what was observed.
+For your own work, use milestone commentary in the user's language. For manager
+handoffs, report on the receipt's recorded route: a lane report to HEAD is not a
+messenger delivery. Do not duplicate direct-topic replies or send raw logs or
+secrets. Distinguish admission, execution, acceptance, delivery and release.

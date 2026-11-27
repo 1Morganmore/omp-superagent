@@ -28,6 +28,11 @@ function retryableReconnect(error: unknown): boolean {
   return retryableHandshake(error) || (error instanceof DeliveryError && error.certainty === "uncertain");
 }
 
+function stableEffectId(parts: readonly string[]): string {
+  const hash = createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+}
+
 /** Transport-only head adapter. Detaching never logs out the actual accounts. */
 class GatewayMessenger implements GatewayHeadMessenger {
   readonly managesStartupHistory = true;
@@ -192,28 +197,25 @@ class GatewayMessenger implements GatewayHeadMessenger {
     }
   }
 
-  private effect<T>(operation: string, args: unknown[]): Promise<T> {
-    return this.call<T>("/effect", { id: crypto.randomUUID(), operation, args });
+  private effect<T>(operation: string, args: unknown[], id: string = crypto.randomUUID()): Promise<T> {
+    return this.call<T>("/effect", { id, operation, args });
   }
   sendGroup(reply: GroupReply): Promise<string> {
-    const hash = createHash("sha256").update(JSON.stringify(["group-reply", reply.sourceId, reply.outcome])).digest("hex");
-    const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
-    return this.call<string>("/effect", { id, operation: "sendGroup", args: [reply] });
+    return this.effect("sendGroup", [reply], stableEffectId(["group-reply", reply.sourceId, reply.outcome]));
   }
   requestRestart(request: GatewayRestartRequest): Promise<GatewayRestartRecord> { return this.call("/restart", request); }
   send(output: OutputRecord): Promise<string> {
     const { resultAttachment } = output;
     if (!resultAttachment) return this.effect("send", [output]);
     // Stable across client reattachment; the Gateway journals the one attempt.
-    const hash = createHash("sha256").update(JSON.stringify(["result-attachment", output.id])).digest("hex");
-    const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+    const id = stableEffectId(["result-attachment", output.id]);
     // Transfer only a receipt; the old persisted payload is read by the Gateway
     // itself so its original attempt fingerprint can still be reconciled.
     const { payload } = resultAttachment;
-    return this.call<string>("/effect", { id, operation: "send", args: [{
+    return this.effect("send", [{
       id: output.id, route: output.route, text: output.text, replyTo: output.replyTo,
       resultAttachment: "data" in payload ? { name: payload.name, legacy: true } : payload,
-    }] });
+    }], id);
   }
   assertRoute(route: Route, purpose?: "history" | "bound-work"): Promise<void> {
     return this.call(purpose === "history" || purpose === "bound-work" ? "/history/route" : "/route", { route }, AbortSignal.timeout(1000));

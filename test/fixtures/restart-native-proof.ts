@@ -17,6 +17,7 @@ import { nativeDisabledProviders } from "./native-extension";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { nativeTestArgv } from "./native-command";
 import { offlineMnemopi } from "./native-memory";
+import { within } from "./native-subprocess";
 import { nativeJournalDispatches } from "./native-tool-transport";
 
 interface Event {
@@ -80,13 +81,6 @@ const interrupted = new AbortController();
 const terminate = () => { interrupted.abort(new Error("Owned native restart proof interrupted")); };
 process.on("SIGTERM", terminate);
 process.on("SIGINT", terminate);
-async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
-  // Failure bounds for real OS/RPC processes, not synchronization delays.
-  const expired = Promise.withResolvers<never>();
-  const timer = setTimeout(() => expired.reject(new Error(label)), ms);
-  try { return await Promise.race([work, expired.promise]); }
-  finally { clearTimeout(timer); }
-}
 async function until(predicate: () => boolean | Promise<boolean>, label: string, cleanup = false): Promise<void> {
   const deadline = Date.now() + (cleanup ? 15_000 : 60_000);
   while (!await predicate()) {

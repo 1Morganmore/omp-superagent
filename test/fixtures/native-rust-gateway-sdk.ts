@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hostPaths, loadConfig, parseConfig } from "../../src/config/config";
-import { nativeRequestEnvelope } from "./native-request-envelope";
+import { requestIds } from "./native-request-envelope";
 import { offlineMnemopi } from "./native-memory";
 
 async function sdkMain(): Promise<void> {
@@ -79,13 +79,7 @@ async function sdkMain(): Promise<void> {
       const paths = hostPaths(await loadConfig(configPath), "main");
       const { parseSessionEntries } = await import("@oh-my-pi/pi-coding-agent");
       const entries = parseSessionEntries(await readFile(paths.sessionFile, "utf8"));
-      const requests = entries.flatMap(entry => {
-        if (entry.type !== "message" || entry.message.role !== "user") return [];
-        const content = entry.message.content;
-        const text = typeof content === "string" ? content : content.filter(part => part.type === "text").map(part => part.text).join("");
-        const id = nativeRequestEnvelope(text)?.requestId;
-        return id ? [id] : [];
-      });
+      const requests = requestIds(entries);
       const shutdowns = entries.flatMap(entry => {
         if (entry.type !== "custom" || entry.customType !== "omp-superagent-native-test") return [];
         const data: unknown = entry.data;

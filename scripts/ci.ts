@@ -31,7 +31,7 @@ const commands = [
   ["cargo", "test", "--locked", "--manifest-path", "host-owner/Cargo.toml"],
   // Cargo's default test targets build the Gateway examples used by the Bun fixtures.
   ["cargo", "test", "--locked", "--manifest-path", "gateway/Cargo.toml"],
-  [...bun, "test", "--parallel=2", "test"],
+  [...bun, "run", "test:suite"],
 ];
 for (const command of commands) {
   const child = Bun.spawn(command, {

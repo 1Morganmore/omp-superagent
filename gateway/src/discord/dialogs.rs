@@ -1,19 +1,15 @@
-use std::collections::HashSet;
-
-use serde::{Deserialize, Deserializer, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::Value;
+
+use crate::native_dialog::{
+    Marker, distinct, markable_count, present, valid_choices, valid_select,
+};
 
 use super::model::utf16;
 use super::rest::FILE_LIMIT;
 
 pub(super) const PAGE: usize = 25;
 pub(super) const MENU_TEXT: usize = 100;
-
-fn present<'de, D: Deserializer<'de>, T: DeserializeOwned>(
-    deserializer: D,
-) -> Result<Option<T>, D::Error> {
-    T::deserialize(deserializer).map(Some)
-}
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "method", rename_all = "lowercase")]
@@ -32,13 +28,6 @@ pub(super) struct Input {
     pub placeholder: Option<String>,
     #[serde(default, deserialize_with = "present")]
     pub prefill: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(super) enum Marker {
-    Radio,
-    Checkbox,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -64,10 +53,11 @@ pub(super) struct Select {
 
 impl Select {
     pub fn markable(&self) -> usize {
-        self.markable_count.unwrap_or(match &self.selection_marker {
-            Some(_) => self.options.len(),
-            None => 0,
-        })
+        markable_count(
+            self.markable_count,
+            self.selection_marker.as_ref(),
+            self.options.len(),
+        )
     }
 
     pub fn detail(&self, index: usize) -> Option<&str> {
@@ -154,51 +144,31 @@ impl Dialog {
                 }
             }
             Self::Select(select) => {
-                if select.options.is_empty()
-                    || select.options.iter().any(String::is_empty)
-                    || select.options.iter().collect::<HashSet<_>>().len() != select.options.len()
-                    || select.markable() > select.options.len()
-                    || select.checked_indices.as_ref().is_some_and(|indices| {
-                        indices.iter().any(|&index| index >= select.markable())
-                            || indices.iter().collect::<HashSet<_>>().len() != indices.len()
-                    })
-                    || select
-                        .initial_index
-                        .is_some_and(|index| index >= select.options.len())
-                {
+                if !valid_select(
+                    &select.options,
+                    select.markable(),
+                    select.checked_indices.as_deref().unwrap_or_default(),
+                    select.initial_index,
+                ) {
                     return Err(
                         "Invalid native select options or marker state; use the local OMP interface.",
                     );
                 }
             }
             Self::Ask { questions } => {
-                if questions.is_empty()
-                    || questions
-                        .iter()
-                        .map(|q| &q.id)
-                        .collect::<HashSet<_>>()
-                        .len()
-                        != questions.len()
-                {
+                if questions.is_empty() || !distinct(questions.iter().map(|q| &q.id)) {
                     return Err(
                         "Invalid native ask question identity; use the local OMP interface.",
                     );
                 }
                 for question in questions {
                     if question.options.len() > PAGE
-                        || question
-                            .recommended
-                            .is_some_and(|index| index >= question.options.len())
-                        || question
-                            .options
-                            .iter()
-                            .map(|option| &option.label)
-                            .collect::<HashSet<_>>()
-                            .len()
-                            != question.options.len()
+                        || !valid_choices(
+                            question.options.iter().map(|option| option.label.as_str()),
+                            question.recommended,
+                        )
                         || question.options.iter().any(|option| {
-                            option.label.is_empty()
-                                || utf16(&option.label) > MENU_TEXT
+                            utf16(&option.label) > MENU_TEXT
                                 || option
                                     .description
                                     .as_ref()

@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { parseSessionEntries, type FileEntry, type SessionHeader } from "@oh-my-pi/pi-coding-agent";
+import { parseSessionEntries, type SessionHeader } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type Config, hostPaths, privateDirectory } from "../../src/config/config";
 import { physicalRouteKey, type Approval, type Inbound, type Lane, type LanePresetSnapshot, type Messenger, type OutputRecord,
@@ -17,9 +17,10 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { nativeDisabledProviders } from "./native-extension";
 import { modelAbortMarker, modelCompactAbortInstructions, modelCompactInstructions, modelCompactMarker, modelCompactSummary,
   modelFixtureModels, modelFixtureProvider, modelHeadJobFixture, modelJudgeMarker, modelRolesMarker } from "./model-selection-extension";
-import { nativeRequestEnvelope } from "./native-request-envelope";
+import { requestIds } from "./native-request-envelope";
 import { nativeTestCommand } from "./native-command";
 import { offlineMnemopi } from "./native-memory";
+import { within } from "./native-subprocess";
 
 const selectionProviderFixture = path.resolve(import.meta.dir, "model-selection-extension.ts");
 const networkGuardFixture = path.resolve(import.meta.dir, "native-extension.ts");
@@ -62,14 +63,6 @@ export class RecordingMessenger implements Messenger {
   async stop(): Promise<void> { this.handlers = undefined; }
 }
 
-// All timers are external-process deadlines, never guessed delays.
-async function within<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  const timeout = Promise.withResolvers<never>();
-  const timer = setTimeout(() => timeout.reject(new Error(message)), ms);
-  try { return await Promise.race([promise, timeout.promise]); }
-  finally { clearTimeout(timer); }
-}
-
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
   const deadline = Date.now() + 40_000;
   // Native RPC completion and durable SQLite settlement are separate events.
@@ -81,16 +74,6 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
     setImmediate(drain.resolve);
     await drain.promise;
   }
-}
-
-function requestIds(entries: readonly FileEntry[]): string[] {
-  return entries.flatMap(entry => {
-    if (entry.type !== "message" || entry.message.role !== "user") return [];
-    const content = entry.message.content;
-    const text = typeof content === "string" ? content : content.filter(part => part.type === "text").map(part => part.text).join("");
-    const id = nativeRequestEnvelope(text)?.requestId;
-    return id ? [id] : [];
-  });
 }
 
 function alive(pid: number): boolean {

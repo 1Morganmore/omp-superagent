@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::adapter::{EffectError, approval_token};
+use crate::native_dialog::Answer;
 
-use self::dialog::{Answer, Dialog, Response};
+use self::dialog::{Dialog, Response};
 use super::Inner;
 use super::wire::{Route, Ts};
 

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../src/config/config";
 import { MESSENGER_COMMANDS } from "../src/messaging/messenger-commands";
 import { registerSlackCommands } from "../src/messaging/slack-command-registration";
 import { loopbackOperator } from "./fixtures/operator";
+import { testResources } from "./fixtures/test-resources";
 
 const teamId = "T123456";
 const appId = "A123456";
@@ -18,8 +18,7 @@ const otherEnv = "SLACK_COMMAND_TEST_UNRELATED";
 const botToken = "private-slack-bot-credential";
 const manifestToken = "private-slack-configuration-credential";
 const privateUrl = "https://hooks.slack.com/commands/private/response?secret=never-print";
-const directories: string[] = [];
-const environment = new Map<string, string | undefined>();
+const { directory: tempDirectory, setEnvironment: setEnv, restore } = testResources("superagent-slack-commands-");
 type Row = Record<string, unknown>;
 const expectedCommands = MESSENGER_COMMANDS.map(command => ({
   command: `/superagent-${command.name}`,
@@ -28,15 +27,8 @@ const expectedCommands = MESSENGER_COMMANDS.map(command => ({
   should_escape: false,
 }));
 
-function setEnv(name: string, value?: string) {
-  if (!environment.has(name)) environment.set(name, process.env[name]);
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
-
 function config(): Config {
-  const directory = mkdtempSync(join(tmpdir(), "superagent-slack-commands-"));
-  directories.push(directory);
+  const directory = tempDirectory();
   setEnv(botEnv, botToken);
   setEnv(manifestEnv, manifestToken);
   setEnv(appEnv);
@@ -157,14 +149,7 @@ async function errorText(action: Promise<unknown>): Promise<string> {
   throw new Error("Expected the operation to reject");
 }
 
-afterEach(() => {
-  for (const [name, value] of environment) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  environment.clear();
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
+afterEach(restore);
 
 describe("explicit Slack command registration", () => {
   test("dry-run authenticates the bot, derives the app authoritatively, exports only, and redacts reports", async () => {

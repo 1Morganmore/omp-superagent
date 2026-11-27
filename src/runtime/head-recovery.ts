@@ -198,10 +198,11 @@ export function headRecoveryEvidence(entries: unknown[], owner: Pick<HeadRecover
   const matches = (entry: Record<string, unknown>, type: string) => entry.type === "custom" && entry.customType === type
     && object(entry.data).sessionId === owner.sessionId && object(entry.data).sessionFile === owner.sessionFile;
   const receipts = slice.filter(entry => matches(entry, "rpc_prompt_result"));
-  const receiptsForRequest = receipts.filter(entry => object(object(entry.data).frame).id === owner.requestId);
-  if (receiptsForRequest.length !== 1 || receipts.length !== 1) return null;
-  const receipt = receiptsForRequest[0]!;
-  const frame = object(object(receipt.data).frame);
+  if (receipts.length !== 1) return null;
+  const [receipt] = receipts;
+  const receiptData = object(receipt.data);
+  const frame = object(receiptData.frame);
+  if (frame.id !== owner.requestId) return null;
   const starts = slice.filter(entry => matches(entry, "rpc_agent_start"));
   const latestStart = starts.at(-1);
   const latestStartIndex = latestStart ? slice.indexOf(latestStart) : -1;
@@ -215,12 +216,12 @@ export function headRecoveryEvidence(entries: unknown[], owner: Pick<HeadRecover
   const latestAssistant = assistants.at(-1);
   const latestRunStatus = object(latestAssistant?.message).stopReason;
   let outcome: "done" | "cancelled" | undefined;
-  const receiptData = object(receipt.data);
   const startData = object(latestStart?.data);
+  const receiptIndex = slice.indexOf(receipt);
   const receiptAfterStart = typeof receiptData.runOrdinal === "number" && typeof startData.runOrdinal === "number"
     && receiptData.hostPid === startData.hostPid
     ? receiptData.runOrdinal >= startData.runOrdinal
-    : slice.indexOf(receipt) > latestStartIndex;
+    : receiptIndex > latestStartIndex;
   if (frame.status === "aborted" && (!latestStart || receiptAfterStart)) outcome = "cancelled";
   if (frame.status === "completed") {
     if (frame.agentInvoked === false && !latestStart) outcome = "done";
@@ -229,7 +230,6 @@ export function headRecoveryEvidence(entries: unknown[], owner: Pick<HeadRecover
   }
   const error = object(frame.error);
   const failedAt = typeof receipt.timestamp === "string" ? Date.parse(receipt.timestamp) : NaN;
-  const receiptIndex = slice.indexOf(receipt);
   const sameRun = typeof receiptData.hostPid === "number" && Number.isSafeInteger(receiptData.hostPid)
     && receiptData.hostPid > 0 && typeof receiptData.instanceKey === "string" && receiptData.instanceKey !== ""
     && typeof receiptData.runOrdinal === "number" && Number.isSafeInteger(receiptData.runOrdinal) && receiptData.runOrdinal > 0

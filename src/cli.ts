@@ -154,13 +154,28 @@ Alternative: Discord voice with separately billed OpenAI Live API (no Codex logi
   Full guide: ${join(import.meta.dir, "../docs/discord-voice.md")}
 `;
 
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
+}
+
 function laneRows(stateDir: string): Lane[] {
   const path = join(stateDir, "coordination.sqlite");
   if (!existsSync(path)) return [];
-  const db = new Database(path, { readonly: true });
-  try {
-    return readLaneRows(db);
-  } finally { db.close(); }
+  using db = new Database(path, { readonly: true });
+  return readLaneRows(db);
+}
+
+function commandFlags(args: string[], usage: string, toggle: string, valueFlags: string[]) {
+  const values = new Map<string, string>();
+  let enabled = false;
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (flag === toggle && !enabled) { enabled = true; continue; }
+    const value = args[++i];
+    if (!valueFlags.includes(flag) || values.has(flag) || !value || value.startsWith("-")) throw new Error(usage);
+    values.set(flag, value);
+  }
+  return { enabled, values };
 }
 
 async function workerCommand(args: string[]): Promise<void> {
@@ -174,26 +189,15 @@ async function workerCommand(args: string[]): Promise<void> {
       const usage = "Usage: omp-sa worker add user@host[:port] [--config FILE] [--default [--local-repo PATH]]";
       const [destination, ...flags] = operands;
       if (!destination || destination.startsWith("-")) throw new Error(usage);
-      let configPath: string | undefined;
-      let localRepo: string | undefined;
-      let preferred = false;
-      for (let index = 0; index < flags.length; index++) {
-        const flag = flags[index];
-        if (flag === "--default" && !preferred) { preferred = true; continue; }
-        const value = flags[index + 1];
-        if (!value || value.startsWith("-")) throw new Error(usage);
-        if (flag === "--config" && !configPath) configPath = value;
-        else if (flag === "--local-repo" && !localRepo) localRepo = value;
-        else throw new Error(usage);
-        index++;
-      }
+      const { enabled: preferred, values } = commandFlags(flags, usage, "--default", ["--config", "--local-repo"]);
+      const localRepo = values.get("--local-repo");
       if (localRepo && !preferred) throw new Error(usage);
-      const config = await loadConfig(configPath ?? "config.local.json");
+      const config = await loadConfig(values.get("--config") ?? "config.local.json");
       const { addWorker } = await import("./worker/worker-registration");
       const { workerDescribe } = await import("./worker/worker-wire");
       const result = await addWorker({ destination, stateDir: config.stateDir,
         ...(preferred ? { defaultRepositoryRoot: localRepo ?? config.headCwd } : {}) }, workerDescribe);
-      console.log(JSON.stringify(result, null, 2));
+      printJson(result);
       if (result.status === "pending" && result.verificationError) process.exitCode = 1;
       return;
     }
@@ -211,10 +215,10 @@ async function workerCommand(args: string[]): Promise<void> {
       const { workerInventory, workerDoctor } = await import("./worker/worker-doctor");
       if (destination) {
         const report = await workerDoctor(stateDir, destination);
-        console.log(JSON.stringify(report, null, 2));
+        printJson(report);
         if (report.status === "blocked") process.exitCode = 1;
       } else {
-        console.log(JSON.stringify(workerInventory(stateDir), null, 2));
+        printJson(workerInventory(stateDir));
       }
       return;
     }
@@ -239,7 +243,7 @@ async function workerCommand(args: string[]): Promise<void> {
       activeManagedUlw();
       const { executable } = await inspectInstalledOmp(["omp"]);
       const { workerId, stateDir, repos, capacity } = await enrollWorker({ home: homedir(), headKey: publicKey, repositories, executable });
-      console.log(JSON.stringify({ status: "initialized", workerId, stateDir, repos, capacity }, null, 2));
+      printJson({ status: "initialized", workerId, stateDir, repos, capacity });
       return;
     }
     case "serve": {
@@ -263,39 +267,37 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const [command] = args;
   if (!["setup", "start", "install", "uninstall", "status", "group", "stop", "doctor", "discord-commands", "telegram-commands", "slack-commands"].includes(command!)) throw new Error(`Unknown command: ${command}`);
   const configAt = args.indexOf("--config");
-  if (configAt < 0 || !args[configAt + 1]) throw new Error("--config FILE is required");
-  if (command === "stop" && !((configAt === 1 && args.length === 3) ||
-      (configAt === 2 && args.length === 4 && !args[1]?.startsWith("-"))))
+  const configFile = args[configAt + 1];
+  if (configAt < 0 || !configFile) throw new Error("--config FILE is required");
+  const optionalTargetArgs = (configAt === 1 && args.length === 3) ||
+    (configAt === 2 && args.length === 4 && !args[1]?.startsWith("-"));
+  if (command === "stop" && !optionalTargetArgs)
     throw new Error("Usage: omp-sa stop [main|LANE_ID] --config FILE");
   if (command === "install" || command === "uninstall") {
-    if (args.length !== 3 || configAt !== 1 || args[2]!.startsWith("-"))
+    if (args.length !== 3 || configAt !== 1 || configFile.startsWith("-"))
       throw new Error(`Usage: ${command} --config FILE`);
-    const config = await loadConfig(args[2]!);
+    const config = await loadConfig(configFile);
     const { installAutostart, uninstallAutostart } = await import("./operator/autostart");
-    console.log(JSON.stringify(await (command === "install" ? installAutostart(config) : uninstallAutostart(config)), null, 2));
+    printJson(await (command === "install" ? installAutostart(config) : uninstallAutostart(config)));
     return;
   }
   if (command === "setup") {
     const { setup } = await import("./operator/setup");
-    await setup(args[configAt + 1]!);
+    await setup(configFile);
     return;
   }
   if (command === "discord-commands" || command === "telegram-commands" || command === "slack-commands") {
-    const extra = command === "telegram-commands" ? " [--language CODE]"
-      : command === "slack-commands" ? " --manifest-token-env NAME" : "";
-    const usage = `Usage: ${command} --config FILE${extra} [--apply]`;
-    const valueFlags = new Set(["--config", ...(command === "telegram-commands" ? ["--language"]
-      : command === "slack-commands" ? ["--manifest-token-env"] : [])]);
-    const values = new Map<string, string>();
-    let apply = false;
-    for (let index = 1; index < args.length; index++) {
-      const flag = args[index]!;
-      if (flag === "--apply" && !apply) { apply = true; continue; }
-      const value = args[index + 1];
-      if (!valueFlags.has(flag) || values.has(flag) || !value || value.startsWith("-")) throw new Error(usage);
-      values.set(flag, value);
-      index++;
+    const valueFlags = ["--config"];
+    let extra = "";
+    if (command === "telegram-commands") {
+      valueFlags.push("--language");
+      extra = " [--language CODE]";
+    } else if (command === "slack-commands") {
+      valueFlags.push("--manifest-token-env");
+      extra = " --manifest-token-env NAME";
     }
+    const usage = `Usage: ${command} --config FILE${extra} [--apply]`;
+    const { enabled: apply, values } = commandFlags(args.slice(1), usage, "--apply", valueFlags);
     const configPath = values.get("--config");
     const manifestTokenEnv = values.get("--manifest-token-env");
     if (!configPath || command === "slack-commands" && !manifestTokenEnv) throw new Error(usage);
@@ -311,17 +313,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const { registerSlackCommands } = await import("./messaging/slack-command-registration");
       report = await registerSlackCommands(config, { apply, manifestTokenEnv: manifestTokenEnv! });
     }
-    console.log(JSON.stringify(report, null, 2));
+    printJson(report);
     if (report && typeof report === "object" && "status" in report && report.status === "blocked") process.exitCode = 1;
     return;
   }
-  const config = await loadConfig(args[configAt + 1]!);
+  const config = await loadConfig(configFile);
   if (command === "group") {
-    if (!((configAt === 1 && args.length === 3) || (configAt === 2 && args.length === 4 && !args[1]?.startsWith("-")))) {
-      throw new Error("Usage: group [REQUEST_ID] --config FILE");
-    }
+    if (!optionalTargetArgs) throw new Error("Usage: group [REQUEST_ID] --config FILE");
     const { groupRequests } = await import("./group/group-access");
-    console.log(JSON.stringify(groupRequests(config.stateDir, configAt === 2 ? args[1] : undefined), null, 2));
+    printJson(groupRequests(config.stateDir, configAt === 2 ? args[1] : undefined));
     return;
   }
   const target = args[1] && !args[1]!.startsWith("-") ? args[1]! : "main";
@@ -331,7 +331,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     loadCredentials(config);
     const omp = await inspectInstalledOmp(config.command, credentialEnvNames(config));
     const memory = await inspectManagedMemory(config);
-    console.log(JSON.stringify({
+    printJson({
       config: config.path, command: config.command, headCwd: config.headCwd,
       omp, hostOwnerExecutable: await requireHostOwner(), gatewayExecutable: await requireGateway(), nativeTuiAttach: false,
       maxHosts: config.maxHosts, maxSubagents: config.maxSubagents,
@@ -340,7 +340,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       memory,
       ...(memory.status === "enabled" ? {} : { memoryBlock: memoryBlockReason(memory) }),
       messengersActivated: false,
-    }, null, 2));
+    });
     if (memory.status !== "enabled") process.exitCode = 1;
     return;
   }
@@ -349,7 +349,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const { autostartStatus } = await import("./operator/autostart");
     const { listWorkers } = await import("./worker/worker-registration");
     const { lanePlacement } = await import("./lane/lane-rows");
-    console.log(JSON.stringify({
+    printJson({
       gateway: await gatewayStatus(config),
       autostart: await autostartStatus(config),
       main: { socketPath: hostPaths(config, "main").socketPath },
@@ -362,7 +362,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         placement: lanePlacement(l),
       })),
       note: "Gateway/head readiness is live when reachable. Lane records are not a completion guarantee; workers are last verified, not live probes.",
-    }, null, 2));
+    });
     return;
   }
   if (command === "stop") {
@@ -389,9 +389,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const { gatewayPaths } = await import("./gateway/gateway-protocol");
   const { launchGateway } = await import("./gateway/gateway-native");
   const status = await launchGateway(config);
-  console.log(JSON.stringify({ ...status, gatewaySocketPath: gatewayPaths(config).socketPath,
-    gatewayLogPath: gatewayPaths(config).logPath,
-    note: "Gateway owns messenger transports. Explicit start may return while initialization is checking/running or blocked. head.ready requires verified native high/middle/low presets; head.initialization reports setup/recovery state separately from approval-reconciled intake readiness. Ordinary input remains durably queued until initialization completes." }, null, 2));
+  const paths = gatewayPaths(config);
+  printJson({ ...status, gatewaySocketPath: paths.socketPath, gatewayLogPath: paths.logPath,
+    note: "Gateway owns messenger transports. Explicit start may return while initialization is checking/running or blocked. head.ready requires verified native high/middle/low presets; head.initialization reports setup/recovery state separately from approval-reconciled intake readiness. Ordinary input remains durably queued until initialization completes." });
 }
 
 if (import.meta.main) {

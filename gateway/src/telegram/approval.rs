@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::adapter::{EffectError, approval_token};
+use crate::native_dialog::Answer;
 
 use super::{
     Core,
     api::ApiError,
-    dialog::{Answer, Dialog},
+    dialog::Dialog,
     effects::topic_payload,
     ingress::Message,
     model::{Identity, Route, hash},

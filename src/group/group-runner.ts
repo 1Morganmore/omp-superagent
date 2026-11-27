@@ -102,8 +102,9 @@ async function isolatedModel(state: string, selector: string): Promise<string> {
     const selected = models.map(record).filter(row => row.id === model);
     if (selected.length !== 1) throw new RestrictedRunError("Restricted model ID must match exactly one model");
     const { name, reasoning, contextWindow, maxTokens, cost } = selected[0];
+    const prices = record(cost);
     const rates = Object.fromEntries(["input", "output", "cacheRead", "cacheWrite"].map(key => {
-      const rate = record(cost)[key];
+      const rate = prices[key];
       if (typeof rate !== "number" || !Number.isFinite(rate) || rate < 0) throw new RestrictedRunError("Missing restricted model price");
       return [key, rate];
     }));
@@ -212,8 +213,8 @@ function settledResult(output: Buffer, input: Input): { readonly text?: string }
     if (`${message.provider}/${message.model}` !== input.model || terminalCount !== 0 || !Array.isArray(message.content))
       return undefined;
     stopped = message.stopReason === "stop";
-    const blocks = message.content.map(record);
     if (input.mode === "chat") {
+      const blocks = message.content.map(record);
       if (!stopped || blocks.some(block => block.type !== "text" && block.type !== "thinking")) return undefined;
       reply = blocks.flatMap(block => block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n").trim();
     }

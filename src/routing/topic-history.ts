@@ -204,7 +204,7 @@ function* excerptWindows(text: string): Iterable<string> {
   }
 }
 
-function visibleLine(text: string, limit: number): string {
+function visibleLine(text: string, limit?: number): string {
   return ownerRoutingProse(text).slice(0, limit).replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim();
 }
 
@@ -235,7 +235,7 @@ export function pastTopicQuery(text: string): string | null {
 
 function routingRequest(text: string) {
   if (text.length > MAX_QUERY) return null;
-  const subject = ownerRoutingProse(text).replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim();
+  const subject = visibleLine(text);
   // Past-topic aliases treat "fix" as a bug descriptor. In ordinary text an
   // action alone should not make one otherwise ambiguous term a direct match.
   const terms = new Set(wordTokens(subject.replace(/\b(?:fix(?:es|ed|ing)?|debug(?:s|ged|ging)?)\b/giu, " "))

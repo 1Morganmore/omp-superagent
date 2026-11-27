@@ -387,13 +387,13 @@ bun --no-env-file "$NEW_CLI" doctor --config "$CONFIG" &&
 ### 처음 설치
 
 ```sh
-bun add --global --trust omp-superagent@0.1.13
+bun add --global --trust omp-superagent@0.1.14
 omp-sa --help
 ```
 
 `--trust`는 관리형 omp-superkit 준비 등 패키지 설치 스크립트를 허용한다.
 `bun pm bin --global`의 출력 경로를 PATH에 포함한다. Bun이 PATH에 있으면
-`npm install --global omp-superagent@0.1.13`도 사용할 수 있다.
+`npm install --global omp-superagent@0.1.14`도 사용할 수 있다.
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
 `omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
 
@@ -1922,7 +1922,9 @@ OMP_SUPERAGENT_WORKER_SSH_TEST=1 bun test test/native-worker-ssh.test.ts
 ```
 
 일반 회귀는 `bun run check`와 `bun run test`로 실행한다. 테스트 스크립트는 네이티브 바이너리를
-빌드한 뒤 격리된 워커 두 개로 테스트 파일을 실행한다. 순서 의존성을 확인할 때는 같은 범위를 `bun test test`로 직렬 실행할 수 있다.
+빌드한 뒤 격리된 워커 두 개로 테스트 파일을 실행한다. 로컬과 CI 모두 루프백 operator를 Cargo로
+한 번 빌드해 출력된 실행 파일 경로를 워커에 전달한다. 개별 `bun test`는 필요할 때 직접 빌드한다.
+순서 의존성을 확인할 때는 같은 범위를 `bun test test`로 직렬 실행할 수 있다.
 기본 테스트는 opt-in native/PTY 시나리오를 제외한다. `.upstream`까지 탐색하는 인수 없는
 `bun test`로 대체하지 않는다. OMP와 관리형 omp-superkit이 준비된 checkout의 `bun run test:ci`는
 타입 검사, Rust Host owner·Gateway 테스트, 로컬 project/native/PTY·omp-superkit 통합 회귀를 실행한다. `scripts/ci.ts`는 활성
@@ -1930,7 +1932,7 @@ OMP_SUPERAGENT_WORKER_SSH_TEST=1 bun test test/native-worker-ssh.test.ts
 standalone CLI를 찾는다. Bun이 앞에 넣은 `node_modules/.bin`은 건너뛰며 SDK CLI나 과거 binary로 대체하지 않는다.
 선택한 OMP 버전·실행 경로를 출력하고 공개 RPC·프로세스 관측 기능을 메타데이터로 확인한다.
 `test:ci` 자체는 OMP를 다운로드·빌드·업데이트하지 않는다. Python 3이 필요하며 launchd 검증은 macOS에서만 실행한다.
-`test:ci`는 설치된 CLI가 추출한 네이티브 바이너리만 실행별 임시 캐시에 공유한다. 각 fixture의 HOME·설정·인증은 계속 격리한다.
+`test:ci`는 설치된 CLI가 추출한 네이티브 바이너리를 실행별 임시 캐시에 공유한다. 각 fixture의 HOME·설정·인증은 계속 격리한다.
 `OMP_TEST_NATIVES_DIR`에 신뢰하는 절대 경로를 직접 지정하면 임시 캐시 대신 사용하며, 이 경로는 실행 후 삭제하지 않는다.
 
 PR, `main`, 수동 실행과 `v*` 릴리즈 태그의 GitHub Actions는 Ubuntu 24.04와 macOS 15 ARM64에서
@@ -1943,6 +1945,10 @@ SHA-256과 `omp --version`을 확인한다.
 실행해도 PATH의 기존 OMP를 교체하지 않는다. 다운로드에는 인터넷·curl·shasum이 필요하다.
 OMP 18은 CI에서 실행하지 않는다. 필요할 때만 `bash scripts/test-omp.sh v18.22.2` 또는 이전
 비동기 작업 API를 쓰는 `v18.20.3`을 지정해 같은 검사를 수동으로 실행한다.
+
+CI는 Rust 의존성만 캐시하며 프로젝트 바이너리나 테스트 결과는 재사용하지 않는다. 성공한
+`main` 푸시만 캐시를 저장한다. 소스 테스트와 패키지 빌드의 캐시는 분리하고, 태그의 패키지는
+캐시를 복원하지 않고 빌드한다. 캐시가 있어도 프로젝트 컴파일·테스트·링크·설치 검증은 그대로 수행한다.
 
 **OMP upstream compatibility**는 매주 월요일 04:17 UTC 또는 Actions에서 수동으로 실행한다.
 upstream의 최신 정식 릴리스 태그를 한 번 조회한 뒤 Ubuntu·macOS ARM64에서 그 태그로 같은 검사를 수행한다.

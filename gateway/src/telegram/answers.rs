@@ -1,10 +1,11 @@
 use crate::adapter::EffectError;
+use crate::native_dialog::Answer;
 
 use super::{
     Core,
     answer_commit::{AnswerEvent, AnswerResponse, ClosedAnswer, answer_key},
     approval::{Pending, Progress, card_key},
-    dialog::{Answer, Dialog},
+    dialog::Dialog,
     effects::message_id,
     ingress::{Callback, Inbound, Message},
     model::Identity,
@@ -106,7 +107,7 @@ fn step(pending: &Pending, action: Action) -> Step {
                 selected_options: progress.selected.clone(),
                 custom_input: progress.custom_input.clone(),
             };
-            if pending.approval.decision.is_some() && !answer.matches(question) {
+            if pending.approval.decision.is_some() && !question.matches_answer(&answer) {
                 return Step::MissingChoice;
             }
             let mut next = progress.clone();

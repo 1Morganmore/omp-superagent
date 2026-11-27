@@ -70,7 +70,7 @@ test.each(["SIGTERM", "SIGKILL"] as const)(
       import { invokeOperator } from ${JSON.stringify(fileURLToPath(new URL("../src/operator/operator.ts", import.meta.url)))};
       await invokeOperator(${JSON.stringify([example, String(address.port), "telegram-commands"])},
         { apply: true, ownerId: "42", allowedChatIds: ["-100"] }, ${JSON.stringify(credentials)});
-    `], { stdin: "ignore", stdout: "ignore", stderr: "inherit" });
+    `], { env: {}, stdin: "ignore", stdout: "ignore", stderr: "inherit" });
     try {
       await within(firstWrite.promise, "first native write");
       const operator = `${example} ${address.port} telegram-commands`;

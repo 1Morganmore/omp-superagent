@@ -5,18 +5,14 @@ use std::io;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::ser::{SerializeMap, SerializeSeq};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-/// Stock output limit, including the newline.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
-/// Stock v2 limit on the logical JSON, before base64 encoding.
-pub const MAX_REASSEMBLED_BYTES: usize = 64 * 1024 * 1024;
-const CHUNK_BYTES: usize = 256 * 1024;
-const MAX_CHUNKS: usize = MAX_REASSEMBLED_BYTES / CHUNK_BYTES;
-const MAX_CHUNK_BASE64: usize = CHUNK_BYTES.div_ceil(3) * 4;
+use crate::rpc_chunk::{CHUNK_BYTES, Chunk, valid_encoded_length};
+pub(crate) use crate::rpc_chunk::{MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES};
+
 const MAX_COMMAND_BYTES: usize = 16 * 1024 * 1024;
 
 fn extend_buffer(buffer: &mut Vec<u8>, bytes: &[u8], limit: usize) {
@@ -34,16 +30,6 @@ struct Pending {
     byte_length: usize,
     next_index: usize,
     bytes: Vec<u8>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Chunk {
-    chunk_id: String,
-    index: usize,
-    count: usize,
-    byte_length: usize,
-    data: String,
 }
 
 /// One decoder per input stream. A framing failure makes that stream unusable.
@@ -86,14 +72,7 @@ impl Decoder {
             "RPC chunk exceeded the transport limit"
         );
         let chunk: Chunk = serde_json::from_value(frame).context("Invalid RPC chunk metadata")?;
-        ensure!(
-            (1..=128).contains(&chunk.chunk_id.encode_utf16().count())
-                && (2..=MAX_CHUNKS).contains(&chunk.count)
-                && chunk.index < chunk.count
-                && (MAX_FRAME_BYTES..=MAX_REASSEMBLED_BYTES).contains(&chunk.byte_length)
-                && chunk.byte_length <= chunk.count * CHUNK_BYTES,
-            "Invalid RPC chunk metadata"
-        );
+        ensure!(chunk.valid_metadata(), "Invalid RPC chunk metadata");
         let pending = match &mut self.pending {
             Some(pending) => {
                 ensure!(
@@ -117,7 +96,7 @@ impl Decoder {
             }
         };
         ensure!(
-            !chunk.data.is_empty() && chunk.data.len() <= MAX_CHUNK_BASE64,
+            valid_encoded_length(&chunk.data),
             "Invalid RPC chunk payload size"
         );
         let bytes = STANDARD

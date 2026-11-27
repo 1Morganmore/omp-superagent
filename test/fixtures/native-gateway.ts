@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { parseSessionEntries, type FileEntry } from "@oh-my-pi/pi-coding-agent";
+import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
 import { type Config, hostPaths, privateDirectory } from "../../src/config/config";
 import type { Approval, Inbound, Lane, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../../src/contracts";
 import { decisionId } from "../../src/lane/decisions";
@@ -17,9 +17,10 @@ import { runNativeUlwProof } from "./native-super-proof";
 import { runNativeSoulProof } from "./native-soul-proof";
 import { soulSteerRelease } from "./native-soul-cases";
 import { runNativeRecoveryProof } from "./native-recovery-proof";
-import { nativeRequestEnvelope } from "./native-request-envelope";
+import { nativeRequestEnvelope, requestIds } from "./native-request-envelope";
 import { nativeTestCommand } from "./native-command";
 import { offlineMnemopi } from "./native-memory";
+import { within } from "./native-subprocess";
 import { nativeJournalDispatches } from "./native-tool-transport";
 
 type Handlers = Parameters<Messenger["start"]>[0];
@@ -70,15 +71,6 @@ async function until(predicate: () => boolean | Promise<boolean>, label: string)
   }
 }
 
-async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
-  // These deadlines bound real native RPC/process failure, never guessed waits
-  // for an assertion. A separate OMP process cannot share fake test timers.
-  const expired = Promise.withResolvers<never>();
-  const timer = setTimeout(() => expired.reject(new Error(label)), ms);
-  try { return await Promise.race([work, expired.promise]); }
-  finally { clearTimeout(timer); }
-}
-
 async function processExited(pid: number): Promise<void> {
   const deadline = Date.now() + 3_000;
   while (true) {
@@ -92,16 +84,6 @@ async function processExited(pid: number): Promise<void> {
     setImmediate(drain.resolve);
     await drain.promise;
   }
-}
-
-function requestIds(entries: readonly FileEntry[]): string[] {
-  return entries.flatMap(entry => {
-    if (entry.type !== "message" || entry.message.role !== "user") return [];
-    const content = entry.message.content;
-    const text = typeof content === "string" ? content : content.filter(part => part.type === "text").map(part => part.text).join("");
-    const id = nativeRequestEnvelope(text)?.requestId;
-    return id ? [id] : [];
-  });
 }
 
 const root = process.env.OMP_NATIVE_GATEWAY_ROOT;

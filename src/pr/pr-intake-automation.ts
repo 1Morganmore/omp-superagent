@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox/type";
 import type { StorePort } from "../contracts";
-import { PrReadError, parseWire, sha40 as sha } from "./pr-github-schema";
+import { hasExactJsonPropertyCount, PrReadError, parseWire, sha40 as sha } from "./pr-github-schema";
 import { inspectIntakeComment, publishIntakeComment } from "./pr-intake-comment";
 import { applyIntakeFix, parseIntakeFix, reconcileIntakeFix } from "./pr-intake-fix";
 import { inspectIntakeMerge, mergeIntakePull } from "./pr-intake-github";
@@ -98,12 +98,16 @@ function unresolved(receipt: Receipt | undefined): receipt is Extract<Receipt, {
   return receipt?.state === "pending" || receipt?.state === "unknown";
 }
 
+export function hasUnresolvedIntakeWrites(state: Pick<Ledger, "comments" | "fix" | "merge">): boolean {
+  return state.comments.some(unresolved) || unresolved(state.fix) || unresolved(state.merge);
+}
+
 export function prIntakeManualHold(
   store: Pick<StorePort, "getMeta">, scope: Scope, action: "pr-review" | "pr-fix" | "pr-merge", head?: string,
 ): string | null {
   const state = readPrIntakeAutomation(store, scope);
   if (!state) return null;
-  if (state.comments.some(unresolved) || unresolved(state.fix) || unresolved(state.merge))
+  if (hasUnresolvedIntakeWrites(state))
     return "An automatic GitHub write is unresolved for this PR. Reconcile it read-only before any new review or write.";
   if (state.merge?.state === "confirmed") return `GitHub already confirmed merge ${state.merge.id}.`;
   if (state.fix?.state === "confirmed" && state.fix.head === head)
@@ -126,9 +130,7 @@ function parseVerdict(answer: string) {
       const summary = snippets.reduce((text, snippet) => snippet ? text.replaceAll(snippet, "[source omitted]") : text, value.summary);
       return { verdict: "fix" as const, summary, proposal };
     }
-    const keys = [...answer.matchAll(/"(?:[^"\\]|\\[\s\S])*"/g)]
-      .filter(token => /^\s*:/.test(answer.slice(token.index + token[0].length)));
-    return keys.length === 2 && Object.keys(value).length === 2 ? { ...value, verdict: value.verdict } : null;
+    return hasExactJsonPropertyCount(answer, 2) && Object.keys(value).length === 2 ? { ...value, verdict: value.verdict } : null;
   } catch (error) {
     if (error instanceof PrReadError) return null;
     throw error;
@@ -256,14 +258,15 @@ export async function advancePrIntakeAutomation(r: ReviewRound, d: PrIntakeAutom
       case "confirmed":
         if (kind === "fix" && !attempted) throw new PrIntakeAutomationError("Fix confirmation lacks its durable send fence.");
         saveEffect(kind, { ...entry, state: "confirmed", id: result.id });
-        return { ...result, attempted };
+        break;
       case "unknown":
         saveEffect(kind, { ...entry, state: "unknown" });
-        return { ...result, attempted };
+        break;
       case "blocked":
         if (attempted) saveEffect(kind, { ...entry, state: "refused", reason: result.reason });
-        return { ...result, attempted };
+        break;
     }
+    return { ...result, attempted };
   };
   try {
     if (!savedComment) {

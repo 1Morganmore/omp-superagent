@@ -38,8 +38,12 @@ export function parsePrRef(value: string): PrRef {
   return { owner: owner.toLowerCase(), repo: repo.toLowerCase(), number };
 }
 
+function checkedPrRef(ref: PrRef): PrRef {
+  return parsePrRef(`${ref.owner}/${ref.repo}#${ref.number}`);
+}
+
 export function prKey(ref: PrRef): string {
-  const parsed = parsePrRef(`${ref.owner}/${ref.repo}#${ref.number}`);
+  const parsed = checkedPrRef(ref);
   return `${parsed.owner}/${parsed.repo}#${parsed.number}`;
 }
 
@@ -85,7 +89,7 @@ function checkAttempt(run: Static<typeof checkPageSchema>["check_runs"][number])
 export async function readPrSnapshot(
   ref: PrRef, options: { readonly previousHead?: string; readonly signal: AbortSignal },
 ): Promise<PrSnapshot> {
-  const parsed = parsePrRef(prKey(ref));
+  const parsed = checkedPrRef(ref);
   const root = `repos/${parsed.owner}/${parsed.repo}`;
   const endpoint = `${root}/pulls/${parsed.number}`;
   const { signal } = options;

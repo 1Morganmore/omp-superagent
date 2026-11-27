@@ -24,14 +24,18 @@ function sameFile(first: Stats, second: Stats): boolean {
   return first.dev === second.dev && first.ino === second.ino;
 }
 
+function eligibleFile(info: Stats): boolean {
+  return info.isFile() && info.nlink === 1 && info.size <= maxBytes;
+}
+
 function existingText(path: string): { readonly text: string; readonly mode: number } {
   const expected = lstatSync(path);
-  if (!expected.isFile() || expected.nlink !== 1 || expected.size > maxBytes || realpathSync.native(path) !== path)
+  if (!eligibleFile(expected) || realpathSync.native(path) !== path)
     throw new RestrictedPathError("Not an eligible regular text file");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const actual = fstatSync(fd);
-    if (!sameFile(expected, actual) || !actual.isFile() || actual.nlink !== 1 || actual.size > maxBytes)
+    if (!sameFile(expected, actual) || !eligibleFile(actual))
       throw new RestrictedPathError("File changed or is not an eligible regular file");
     const buffer = Buffer.alloc(maxBytes + 1);
     let size = 0;
@@ -111,7 +115,7 @@ export default function groupWorktree(pi: ExtensionAPI): void {
             if (!isVisibleSegment(entry.name)) continue;
             const info = lstatSync(join(directory, entry.name));
             if (info.isDirectory()) names.push(`${entry.name}/`);
-            else if (info.isFile() && info.nlink === 1 && info.size <= maxBytes) names.push(entry.name);
+            else if (eligibleFile(info)) names.push(entry.name);
           }
         } finally { handle.closeSync(); }
         return names.sort().join("\n");

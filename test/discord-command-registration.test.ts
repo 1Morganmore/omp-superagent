@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Routes } from "discord.js";
 import { homepage, version } from "../package.json";
@@ -9,6 +8,7 @@ import type { Config } from "../src/config/config";
 import { registerDiscordCommands } from "../src/messaging/discord-command-registration";
 import { DISCORD_COMMANDS } from "./fixtures/discord-commands";
 import { loopbackOperator } from "./fixtures/operator";
+import { testResources } from "./fixtures/test-resources";
 
 const applicationId = "100000000000000001";
 const guildId = "200000000000000002";
@@ -17,18 +17,10 @@ const otherTokenName = "DISCORD_REGISTRATION_OTHER_TOKEN";
 const token = "private-discord-registration-token-never-print";
 const globalPath = Routes.applicationCommands(applicationId);
 const guildPath = Routes.applicationGuildCommands(applicationId, guildId);
-const directories: string[] = [];
-const environment = new Map<string, string | undefined>();
-
-function setEnvironment(name: string, value?: string) {
-  if (!environment.has(name)) environment.set(name, process.env[name]);
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
+const { directory: tempDirectory, setEnvironment, restore } = testResources("superagent-discord-commands-");
 
 function fixture(allowedGuildIds: string[] = []): Config {
-  const directory = mkdtempSync(join(tmpdir(), "superagent-discord-commands-"));
-  directories.push(directory);
+  const directory = tempDirectory();
   setEnvironment(tokenName, token);
   return {
     path: join(directory, "config.json"), stateDir: join(directory, "state"), headCwd: directory,
@@ -103,14 +95,7 @@ function transport(steps: Step[]) {
   };
 }
 
-afterEach(() => {
-  for (const [name, value] of environment) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  environment.clear();
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
+afterEach(restore);
 
 describe("explicit Discord global command registration", () => {
   test.each(["discord-commands", "telegram-commands", "slack-commands"])("CLI rejects invalid %s arguments before loading credentials", async command => {

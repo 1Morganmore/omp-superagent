@@ -88,31 +88,33 @@ function state(store: Metadata): Purposes {
   return parsed;
 }
 
-export function discordPurposeNotes(store: Metadata, route: Route): readonly DiscordPurposeNote[] {
-  const notes = state(store).notes;
+function notesForRoute(notes: Purposes["notes"], route: Route): readonly DiscordPurposeNote[] {
   const parent = { ...physicalRoute(route), threadId: null };
   const keys = [...new Set([physicalRouteKey(parent), physicalRouteKey(route)])];
   return keys.flatMap(key => notes[key] ? [notes[key]] : []);
+}
+
+export function discordPurposeNotes(store: Metadata, route: Route): readonly DiscordPurposeNote[] {
+  return notesForRoute(state(store).notes, route);
 }
 
 /** One synchronous metadata write atomically preserves the note and its source-bound receipt. */
 export function changeDiscordPurpose(store: Metadata, request: DiscordPurposeRequest): readonly DiscordPurposeNote[] {
   if (request.action === "list") return discordPurposeNotes(store, request.route);
   const previous = state(store);
-  const receiptKey = JSON.stringify([request.sourceId, physicalRouteKey(request.route)]);
+  const key = physicalRouteKey(request.route);
+  const receiptKey = JSON.stringify([request.sourceId, key]);
   const saved = previous.receipts[receiptKey];
   if (saved) {
     if (!isDeepStrictEqual(saved.request, request)) throw new DeliveryError("Discord purpose source identity conflict", "rejected");
     return saved.result;
   }
   const notes = { ...previous.notes };
-  const key = physicalRouteKey(request.route);
   switch (request.action) {
     case "set": notes[key] = { route: physicalRoute(request.route), purpose: request.purpose }; break;
     case "clear": delete notes[key]; break;
   }
-  const parent = { ...physicalRoute(request.route), threadId: null };
-  const result = [...new Set([physicalRouteKey(parent), key])].flatMap(id => notes[id] ? [notes[id]] : []);
+  const result = notesForRoute(notes, request.route);
   store.setMeta(PURPOSES, JSON.stringify({ notes, receipts: { ...previous.receipts, [receiptKey]: { request, result } } }));
   return result;
 }

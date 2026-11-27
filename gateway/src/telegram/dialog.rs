@@ -1,17 +1,10 @@
-use std::collections::HashSet;
-
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
+use crate::native_dialog::{
+    Answer, Marker, distinct, markable_count, present, valid_choices, valid_select,
+};
 use crate::store::js_trim;
-
-fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
 
 #[derive(Deserialize)]
 pub(super) struct Question {
@@ -35,38 +28,24 @@ pub(super) struct Choice {
     pub preview: Option<String>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Answer {
-    pub id: String,
-    pub selected_options: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub custom_input: Option<String>,
-}
-
-impl Answer {
-    pub fn matches(&self, question: &Question) -> bool {
-        let has_custom = self
+impl Question {
+    pub(super) fn matches_answer(&self, answer: &Answer) -> bool {
+        let has_custom = answer
             .custom_input
             .as_deref()
             .is_some_and(|value| !js_trim(value).is_empty());
-        self.id == question.id
-            && distinct(self.selected_options.iter().map(String::as_str))
-            && self
+        self.id == answer.id
+            && distinct(answer.selected_options.iter().map(String::as_str))
+            && answer
                 .selected_options
                 .iter()
-                .all(|label| question.options.iter().any(|choice| &choice.label == label))
-            && (question.multi
-                || (self.selected_options.len(), has_custom) == (1, false)
-                || (self.selected_options.len(), has_custom) == (0, true))
+                .all(|label| self.options.iter().any(|choice| &choice.label == label))
+            && (self.multi
+                || matches!(
+                    (answer.selected_options.len(), has_custom),
+                    (1, false) | (0, true)
+                ))
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(super) enum Marker {
-    Checkbox,
-    Radio,
 }
 
 #[derive(Deserialize)]
@@ -92,27 +71,11 @@ pub(super) struct Detail {
 
 impl Selection {
     pub fn markable_count(&self) -> usize {
-        self.markable_count.unwrap_or_else(|| {
-            if self.selection_marker.is_some() {
-                self.options.len()
-            } else {
-                0
-            }
-        })
-    }
-
-    fn valid(&self) -> bool {
-        let count = self.markable_count();
-        let checked = self.checked_indices.as_deref().unwrap_or_default();
-        !self.options.is_empty()
-            && self.options.iter().all(|option| !option.is_empty())
-            && distinct(self.options.iter().map(String::as_str))
-            && count <= self.options.len()
-            && checked.iter().all(|index| *index < count)
-            && distinct(checked.iter().copied())
-            && self
-                .initial_index
-                .is_none_or(|index| index < self.options.len())
+        markable_count(
+            self.markable_count,
+            self.selection_marker.as_ref(),
+            self.options.len(),
+        )
     }
 }
 
@@ -142,28 +105,24 @@ impl Dialog {
         }
         let dialog = Self::deserialize(request).ok()?;
         let supported = match &dialog {
-            Self::Select(details) => details.valid(),
+            Self::Select(select) => valid_select(
+                &select.options,
+                select.markable_count(),
+                select.checked_indices.as_deref().unwrap_or_default(),
+                select.initial_index,
+            ),
             Self::Ask { questions } => {
                 !questions.is_empty()
                     && distinct(questions.iter().map(|question| question.id.as_str()))
                     && questions.iter().all(|question| {
-                        question
-                            .options
-                            .iter()
-                            .all(|choice| !choice.label.is_empty())
-                            && distinct(question.options.iter().map(|choice| choice.label.as_str()))
-                            && question
-                                .recommended
-                                .is_none_or(|index| index < question.options.len())
+                        valid_choices(
+                            question.options.iter().map(|choice| choice.label.as_str()),
+                            question.recommended,
+                        )
                     })
             }
             Self::Confirm { .. } | Self::Input(_) | Self::Editor(_) => true,
         };
         supported.then_some(dialog)
     }
-}
-
-fn distinct<T: Eq + std::hash::Hash>(items: impl Iterator<Item = T>) -> bool {
-    let mut seen = HashSet::new();
-    items.into_iter().all(|value| seen.insert(value))
 }

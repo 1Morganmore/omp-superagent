@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox/type";
-import { parseWire, PrReadError, sha40 as oid } from "./pr-github-schema";
+import { hasExactJsonPropertyCount, parseWire, PrReadError, sha40 as oid } from "./pr-github-schema";
 import { openIntakeGitHubSession, queryIntakeGitHub, type IntakeRepositoryIdentity } from "./pr-intake-github";
 import {
   intakeEvidenceDeadlineMs, IntakeMaterialError, readIntakeDiff, readIntakePullIdentity, serializeIntakeDiff,
@@ -87,10 +87,7 @@ export function parseIntakeFix(text: string): IntakeFixProposal | null {
   if (Buffer.byteLength(text) > 64 * 1024) return null;
   try {
     const { path, old, replacement, summary } = parseWire(verdict, text);
-    // JSON.parse alone silently accepts an object that states two different verdicts.
-    const keys = [...text.matchAll(/"(?:[^"\\]|\\[\s\S])*"/g)]
-      .filter(token => /^\s*:/.test(text.slice(token.index + token[0].length)));
-    if (keys.length !== Object.keys(verdict.properties).length) return null;
+    if (!hasExactJsonPropertyCount(text, Object.keys(verdict.properties).length)) return null;
     const proposal = { path, old, replacement };
     return summary.trim() && safeProposal(proposal) ? proposal : null;
   } catch (error) {

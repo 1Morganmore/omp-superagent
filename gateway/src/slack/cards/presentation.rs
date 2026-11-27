@@ -3,10 +3,11 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 
 use crate::adapter::EffectError;
+use crate::native_dialog::Marker;
 
 use super::super::media::{plain, sections};
 use super::super::wire::js_len;
-use super::dialog::{Dialog, Marker};
+use super::dialog::Dialog;
 use super::{Closure, Pending};
 
 pub(super) struct Card {

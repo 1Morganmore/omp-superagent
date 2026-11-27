@@ -40,6 +40,16 @@ jobs:
         run: |
           rustup default "$RUST_VERSION"
           cmake --version
+      - name: Reuse Rust test dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            host-owner
+            gateway
+          shared-key: source-test-${{ hashFiles('scripts/build-host-owner.ts', '.cargo/config.toml') }}
+          env-vars: ImageOS ImageVersion
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Test Rust and Bun with the SDK-matched OMP release
         env:
           OMP_SUPERAGENT_WORKER_SSH_TEST: "1"
@@ -83,6 +93,17 @@ jobs:
             sudo apt-get install -y --no-install-recommends musl-tools
           fi
           cmake --version
+      - name: Reuse native package dependencies outside release builds
+        if: github.ref_type != 'tag'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            host-owner -> target/package
+            gateway -> target/package
+          key: ${{ matrix.platform }}-${{ hashFiles('scripts/build-host-owner.ts', '.cargo/config.toml') }}
+          env-vars: ImageOS ImageVersion
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Build and stage both native binaries with notices
         shell: bash
         env:
@@ -118,6 +139,7 @@ jobs:
         with:
           name: native-${{ matrix.platform }}
           path: ${{ runner.temp }}/native-${{ matrix.platform }}.tar.gz
+          compression-level: 0
           if-no-files-found: error
 
   package:
@@ -146,6 +168,7 @@ jobs:
         with:
           name: distributions
           path: dist/*
+          compression-level: 0
           if-no-files-found: error
 
   verify-package:

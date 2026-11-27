@@ -449,13 +449,13 @@ with 0.1.11, owners verify their own exits in-process in Rust.
 ### First Installation
 
 ```sh
-bun add --global --trust omp-superagent@0.1.13
+bun add --global --trust omp-superagent@0.1.14
 omp-sa --help
 ```
 
 `--trust` allows package installation scripts, including preparation of the managed
 omp-superkit. Add the output of `bun pm bin --global` to PATH. If Bun is on PATH, you can
-also use `npm install --global omp-superagent@0.1.13`. Create the configuration in your
+also use `npm install --global omp-superagent@0.1.14`. Create the configuration in your
 own working directory, not the installation directory, with
 `omp-sa setup --config ./config.local.json`. Installation alone does not activate the bot.
 
@@ -2351,7 +2351,9 @@ OMP_SUPERAGENT_WORKER_SSH_TEST=1 bun test test/native-worker-ssh.test.ts
 ```
 
 Run the general regression checks with `bun run check` and `bun run test`. The test script
-builds the native binaries, then runs the test files with two isolated workers. To check for
+builds the native binaries, then runs the test files with two isolated workers. Both the
+local and CI suites build the loopback operator once through Cargo and pass its reported
+executable to those workers. A targeted `bun test` builds it on demand. To check for
 order dependencies, run the same set serially with `bun test test`. The default tests exclude
 opt-in native/PTY scenarios. Do not substitute a bare `bun test`, which also discovers tests
 in `.upstream`. In a checkout with OMP and managed omp-superkit ready, `bun run test:ci`
@@ -2362,7 +2364,7 @@ standalone CLI on `PATH`. It skips `node_modules/.bin`, which Bun puts at the fr
 not fall back to the SDK CLI or an older binary. It prints the selected OMP version and
 executable path and checks metadata for the public RPC and process observation capabilities.
 `test:ci` itself does not download, build, or update OMP. Python 3 is required, and launchd
-checks run only on macOS. `test:ci` shares only the native binaries extracted by the
+checks run only on macOS. `test:ci` shares the native binaries extracted by the
 installed CLI in a temporary per-run cache. Each fixture's HOME, settings, and authentication
 remain isolated. Setting `OMP_TEST_NATIVES_DIR` to a trusted absolute path uses that path
 instead of the temporary cache; it is not deleted after the run.
@@ -2378,6 +2380,11 @@ shared test runner. The same command run locally does not replace the existing O
 The download requires internet access, curl, and shasum. CI does not run OMP 18. When needed,
 run the same checks manually with `bash scripts/test-omp.sh v18.22.2`, or specify `v18.20.3`
 to test the older asynchronous task API.
+
+CI caches Rust dependencies, not the project's binaries or test results. Only a
+successful `main` push saves the cache. Source tests and package builds use separate
+targets; a tagged package build does not restore the dependency cache. All compilation,
+tests, linkage checks and package install checks still run on a cache hit.
 
 **OMP upstream compatibility** runs every Monday at 04:17 UTC or on manual dispatch in
 Actions. It looks up the latest official upstream release tag once, then runs the same

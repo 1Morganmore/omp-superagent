@@ -388,6 +388,11 @@ export interface HeadRecoveryEffect {
   state: string;
 }
 
+/** A known failure is terminal; an unrecognized state is not evidence of settlement. */
+export function headRecoveryEffectsSettled(effects: readonly HeadRecoveryEffect[]): boolean {
+  return effects.every(({ state }) => state === "sent" || state === "complete" || state === "failed");
+}
+
 /** Ordered HEAD receipts for owner inputs still waiting for topic routing. */
 export interface DeferredRoutingPort {
   enqueue(input: Inbound): void;

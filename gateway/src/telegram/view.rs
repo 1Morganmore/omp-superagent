@@ -2,16 +2,18 @@ mod wire;
 
 use std::fmt::Write as _;
 
+use crate::native_dialog::Marker;
+
 use super::{
     approval::Progress,
-    dialog::{Dialog, Marker, Question},
+    dialog::{Dialog, Question},
     effects::TEXT_LIMIT,
 };
 
 pub(super) const UNSUPPORTED: &str = "Request cancelled: this dialog cannot safely be represented in Telegram. Use the local OMP interface.";
 
-pub(super) use wire::{Keyboard, View};
 use wire::{Button, truncate};
+pub(super) use wire::{Keyboard, View};
 
 pub(super) struct Renderer<'a> {
     pub token: &'a str,

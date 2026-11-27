@@ -1,24 +1,9 @@
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
-// Stock physical JSONL and v2 logical framing limits, as emitted by the
-// installed native pipe owner. Lifecycle commands are always plain JSONL.
-const FRAME_LIMIT: usize = 1024 * 1024;
-const LOGICAL_LIMIT: usize = 64 * 1024 * 1024;
-const CHUNK_LIMIT: usize = 256 * 1024;
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Chunk {
-    chunk_id: String,
-    count: usize,
-    index: usize,
-    byte_length: usize,
-    data: String,
-}
+use crate::rpc_chunk::{CHUNK_BYTES, Chunk, MAX_FRAME_BYTES, valid_encoded_length};
 
 pub(super) async fn frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Value> {
     let mut line = Vec::new();
@@ -28,11 +13,7 @@ pub(super) async fn frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Va
     }
     let first: Chunk = serde_json::from_value(first)?;
     ensure!(
-        first.index == 0
-            && (1..=128).contains(&first.chunk_id.encode_utf16().count())
-            && (2..=LOGICAL_LIMIT / CHUNK_LIMIT).contains(&first.count)
-            && (FRAME_LIMIT..=LOGICAL_LIMIT).contains(&first.byte_length)
-            && first.byte_length <= first.count * CHUNK_LIMIT,
+        first.index == 0 && first.valid_metadata(),
         "Invalid owned adapter chunk metadata"
     );
     let mut logical = Vec::new();
@@ -65,14 +46,14 @@ pub(super) async fn frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Va
 
 async fn physical(reader: &mut (impl AsyncBufRead + Unpin), line: &mut Vec<u8>) -> Result<Value> {
     line.clear();
-    let limit = u64::try_from(FRAME_LIMIT)? + 1;
+    let limit = u64::try_from(MAX_FRAME_BYTES)? + 1;
     let count = reader.take(limit).read_until(b'\n', line).await?;
     ensure!(
         count > 0,
         "Owned adapter disconnected; request outcome may be unknown"
     );
     ensure!(
-        count <= FRAME_LIMIT && line.last() == Some(&b'\n'),
+        count <= MAX_FRAME_BYTES && line.last() == Some(&b'\n'),
         "Owned adapter frame exceeds size bound"
     );
     let frame: Value = serde_json::from_slice(line)?;
@@ -82,13 +63,13 @@ async fn physical(reader: &mut (impl AsyncBufRead + Unpin), line: &mut Vec<u8>) 
 
 fn append(logical: &mut Vec<u8>, chunk: &Chunk) -> Result<()> {
     ensure!(
-        !chunk.data.is_empty() && chunk.data.len() <= CHUNK_LIMIT.div_ceil(3) * 4,
+        valid_encoded_length(&chunk.data),
         "Owned adapter chunk exceeds its encoded bound"
     );
     let bytes = STANDARD.decode(&chunk.data)?;
     let total = logical.len().saturating_add(bytes.len());
     ensure!(
-        bytes.len() <= CHUNK_LIMIT && total <= chunk.byte_length,
+        bytes.len() <= CHUNK_BYTES && total <= chunk.byte_length,
         "Owned adapter chunk exceeds its decoded bound"
     );
     logical.extend_from_slice(&bytes);

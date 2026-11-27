@@ -15,7 +15,7 @@ import { buildServiceTierByFamily } from "@oh-my-pi/pi-coding-agent/config/servi
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseSessionEntries, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, type FastModeState, type Frame, type ServiceUnit } from "./omp/host-protocol";
+import { HostChannel, LANE_MODEL_PROMOTION_RECEIPT, PR_REVIEW_GITHUB_ENV, PR_REVIEW_SYSTEM_PROMPT, indexServiceCompletions, serviceGenerationKey, terminalService, type FastModeState, type Frame, type ServiceUnit } from "./omp/host-protocol";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -37,7 +37,6 @@ import { canBeginWorkerFact, isWorkerFactRoot, type WorkerFactCarrier } from "./
 import { bindWorkerMemorySource } from "./worker/worker-memory-source";
 import { WORKER_MEMORY_ENV, WORKER_MEMORY_PROFILE_ENV } from "./worker/worker-memory-storage";
 
-const terminalService = (state: ServiceUnit["state"]) => state === "exited" || state === "failed";
 const serviceGeneration = ({ owner, id, generation, startedAt, restartCount }: ServiceUnit) =>
   ({ owner, id, generation, startedAt, restartCount });
 const serviceName = (value: unknown) => typeof value === "string" ? value.trim() || undefined : undefined;

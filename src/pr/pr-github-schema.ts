@@ -87,6 +87,15 @@ export function parseWire<T extends TSchema>(schema: T, output: string): Static<
   return value;
 }
 
+/** Count key tokens in already parsed JSON, including duplicate keys hidden by JSON.parse. */
+export function hasExactJsonPropertyCount(source: string, expected: number): boolean {
+  let count = 0;
+  for (const token of source.matchAll(/"(?:[^"\\]|\\[\s\S])*"/g)) {
+    if (/^\s*:/.test(source.slice(token.index + token[0].length))) count++;
+  }
+  return count === expected;
+}
+
 export function pages<T extends TSchema>(schema: T) {
   return Type.Array(schema, { minItems: 1 });
 }

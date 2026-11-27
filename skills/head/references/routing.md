@@ -31,17 +31,9 @@ belongs, and what it would need from the other tracks. Then decide:
 | Independent slices of one integrated result that share context, ownership, or delivery | One lane with native `task` for useful bounded work; one owner integrates and verifies the result. |
 | Tracks depend on another result, share an unsettled interface, approval, or overlapping writes | Start any truly independent track. Sequence the dependent/conflicting step, or keep one integration owner for the shared outcome. Don't create a parallel lane merely to wait. |
 
-For example, “repair repo A's build and investigate repo B's outage” can merit
-separate lanes: either outcome can finish without the other, and separate context
-and follow-ups help. “Implement the API, update its client, and verify it” usually
-needs one integration owner; once the contract is settled, disjoint work can run
-as bounded subtasks. Similarly, independent research is a native task if its only
-purpose is to inform one patch, but a lane can fit if the research is a separate
-long-lived deliverable with its own follow-up. Split only when context/lifecycle
-isolation is worth the extra topic and handoff overhead. Don't use task count,
-duration, or complexity as a proxy for lane count. Handle informational questions
-directly unless their scope calls for otherwise; one actionable track normally
-gets one work topic, not a lane per step.
+An API, its client change and verification usually need one integration owner,
+not three lanes. Split by independent outcomes and follow-up needs, not by step
+count, duration or complexity.
 
 **Decide before checking admission; do not confuse a runtime limit with the right
 boundary.** One real `sourceId` can create at most one new lane with `lane_start`;

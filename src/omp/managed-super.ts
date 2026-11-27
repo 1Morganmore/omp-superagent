@@ -608,20 +608,26 @@ export async function updateManagedUlw(options: ManagedUlwOptions = {}): Promise
           preparedRepository = provenance.repository;
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const provenance: ActiveRevision = { revision: upstreamRevision, repository: manifest.repository, branch, preparedAt: new Date().toISOString() };
-        if (!preparedRepository) {
-          stage = await mkdtemp(join(root, ".stage-"));
-          const source = join(stage, "source");
-          const distribution = join(stage, "distribution");
-          const packagePath = join(distribution, "package");
-          await mkdir(packagePath, { recursive: true, mode: 0o700 });
+        stage = await mkdtemp(join(root, ".stage-"));
+        const source = join(stage, preparedRepository ? "ancestry" : "source");
+        const distribution = join(stage, "distribution");
+        const packagePath = join(preparedRepository ? revisionRoot : distribution, "package");
+        if (!preparedRepository) await mkdir(packagePath, { recursive: true, mode: 0o700 });
+        // A previously prepared revision may have been active before a remote
+        // rewind. Do not bypass ancestry merely because its files already exist.
+        if (!preparedRepository || active) {
           await git(["clone", "--no-checkout", "--no-local", manifest.repository, source]);
           await git(["fetch", "origin", upstreamRevision], source);
+        }
+        if (!preparedRepository) {
           await git(["checkout", "--detach", upstreamRevision], source);
           if (await git(["rev-parse", "HEAD"], source) !== upstreamRevision) throw new Error("ULW checkout revision changed while staging");
-          if (active) {
-            try { await git(["merge-base", "--is-ancestor", active.revision, upstreamRevision], source); }
-            catch { throw new Error("ULW upstream update is not a provable fast-forward; explicit operator reconciliation required"); }
-          }
+        }
+        if (active) {
+          try { await git(["merge-base", "--is-ancestor", active.revision, upstreamRevision], source); }
+          catch { throw new Error("ULW upstream update is not a provable fast-forward; explicit operator reconciliation required"); }
+        }
+        if (!preparedRepository) {
           await git(["submodule", "update", "--init", "--recursive", "--depth=1"], source);
           await checkLinks(source);
           // Export tracked runtime/resources, not .git, dev node_modules, or the
@@ -643,24 +649,13 @@ export async function updateManagedUlw(options: ManagedUlwOptions = {}): Promise
           }
           validateManagedUlwPackage(packagePath);
           await checkLinks(packagePath);
-          await probe(packagePath, stage, manifest);
+        }
+        await probe(packagePath, stage, manifest);
+        if (!preparedRepository) {
           await writeFile(join(distribution, "provenance.json"), JSON.stringify(provenance, null, 2) + "\n", { mode: 0o444 });
           await immutableTree(packagePath);
           await mkdir(join(root, "revisions"), { recursive: true, mode: 0o700 });
           await rename(distribution, revisionRoot);
-        }
-        if (preparedRepository) {
-          // A previously prepared revision may have been active before a remote
-          // rewind. Do not bypass ancestry merely because its files already exist.
-          stage = await mkdtemp(join(root, ".stage-"));
-          if (active) {
-            const source = join(stage, "ancestry");
-            await git(["clone", "--no-checkout", "--no-local", manifest.repository, source]);
-            await git(["fetch", "origin", upstreamRevision], source);
-            try { await git(["merge-base", "--is-ancestor", active.revision, upstreamRevision], source); }
-            catch { throw new Error("ULW upstream update is not a provable fast-forward; explicit operator reconciliation required"); }
-          }
-          await probe(join(revisionRoot, "package"), stage, manifest);
         }
         nextActive = { ...provenance, repository: preparedRepository ?? provenance.repository };
       }

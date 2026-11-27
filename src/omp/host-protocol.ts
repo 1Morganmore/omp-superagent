@@ -71,7 +71,7 @@ export const serviceGenerationKey = (value: Frame | ServiceUnit) =>
 const hasValidGeneration = (daemon: Frame | ServiceUnit) =>
   !("generation" in daemon) || typeof daemon.generation === "string" && daemon.generation.length > 0;
 const isFrame = (value: unknown): value is Frame => value !== null && typeof value === "object";
-const isTerminal = (state: unknown): state is "exited" | "failed" => state === "exited" || state === "failed";
+export const terminalService = (state: unknown): state is "exited" | "failed" => state === "exited" || state === "failed";
 
 function launchCompletions(value: unknown): readonly unknown[] | undefined {
   if (!isFrame(value) || value.type !== "custom_message" || value.customType !== "launch-completion") return;
@@ -99,7 +99,7 @@ export function indexServiceCompletions(entries: readonly unknown[]) {
     for (const observed of daemons) {
       // The historical generation lookup could not cross an unreadable row.
       if (observed === null || observed === undefined) generationEvidenceBlocked = true;
-      if (!isFrame(observed) || !isTerminal(observed.state)) continue;
+      if (!isFrame(observed) || !terminalService(observed.state)) continue;
       const key = serviceExitKey(observed);
       if (key === undefined) continue;
       exact[observed.state].add(key);
@@ -109,7 +109,7 @@ export function indexServiceCompletions(entries: readonly unknown[]) {
   return {
     hasGeneration: (key: string) => byGeneration.has(key),
     hasCompletion: (daemon: Frame | ServiceUnit) => {
-      if (!isTerminal(daemon.state) || !hasValidGeneration(daemon)) return false;
+      if (!terminalService(daemon.state) || !hasValidGeneration(daemon)) return false;
       const key = serviceExitKey(daemon);
       return key !== undefined && exact[daemon.state].has(key);
     },

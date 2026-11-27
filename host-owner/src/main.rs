@@ -7,6 +7,7 @@ mod journal_format;
 mod journal_scan;
 mod owner;
 mod projection;
+mod rpc_chunk;
 mod transport;
 mod wire;
 mod worker_attach;

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 import { parseConfig } from "../src/config/config";
@@ -8,15 +7,9 @@ import {
   assertCredentialsUnchanged, loadCredentials, readCredentialFile, serializeCredentials,
   validateCredential, writeCredentials,
 } from "../src/config/credentials";
+import { testResources } from "./fixtures/test-resources";
 
-const directories: string[] = [];
-const environment = new Map<string, string | undefined>();
-
-function setupDirectory() {
-  const directory = mkdtempSync(join(tmpdir(), "superagent-setup-"));
-  directories.push(directory);
-  return directory;
-}
+const { directory: setupDirectory, setEnvironment, restore } = testResources("superagent-setup-");
 
 function fixture() {
   const directory = setupDirectory();
@@ -29,20 +22,7 @@ function fixture() {
   return { directory, path, raw, config: parseConfig(raw, path) };
 }
 
-function setEnvironment(name: string, value?: string) {
-  if (!environment.has(name)) environment.set(name, process.env[name]);
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
-
-afterEach(() => {
-  for (const [name, value] of environment) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  environment.clear();
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
+afterEach(restore);
 
 describe("private setup credentials", () => {
   test("round-trips shell-looking bytes without interpolation or injected assignments", () => {

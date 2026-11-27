@@ -1,9 +1,8 @@
-use std::collections::HashSet;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::adapter::EffectError;
+use crate::native_dialog::{Answer, Marker, distinct, markable_count, valid_choices, valid_select};
 
 use super::super::wire::js_len;
 
@@ -33,21 +32,12 @@ pub(super) struct Select {
 
 impl Select {
     pub(super) fn markable_count(&self) -> usize {
-        self.markable_count.unwrap_or_else(|| {
-            if self.selection_marker.is_some() {
-                self.options.len()
-            } else {
-                0
-            }
-        })
+        markable_count(
+            self.markable_count,
+            self.selection_marker.as_ref(),
+            self.options.len(),
+        )
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Marker {
-    Radio,
-    Checkbox,
 }
 
 #[derive(Deserialize)]
@@ -93,15 +83,6 @@ impl Response {
     pub(super) const CANCELLED: Self = Self::Cancelled { cancelled: true };
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Answer {
-    pub(super) id: String,
-    pub(super) selected_options: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) custom_input: Option<String>,
-}
-
 impl Dialog {
     pub(super) fn parse(request: &Value) -> Result<Self, EffectError> {
         let unsupported = || {
@@ -117,22 +98,19 @@ impl Dialog {
             Self::Confirm { .. } => true,
             Self::Select(select) => {
                 let count = select.options.len();
-                let markable = select.markable_count();
-                (1..=100).contains(&count)
-                    && select
-                        .options
-                        .iter()
-                        .all(|label| !label.is_empty() && js_len(label) <= 75)
-                    && distinct(select.options.iter())
+                count <= 100
+                    && select.options.iter().all(|label| js_len(label) <= 75)
+                    && valid_select(
+                        &select.options,
+                        select.markable_count(),
+                        &select.checked_indices,
+                        select.initial_index,
+                    )
                     && select
                         .option_details
                         .iter()
                         .take(count)
                         .all(|detail| native_label(detail.description.as_deref()))
-                    && markable <= count
-                    && select.checked_indices.iter().all(|&index| index < markable)
-                    && distinct(select.checked_indices.iter())
-                    && select.initial_index.is_none_or(|index| index < count)
             }
             Self::Input(editor) | Self::Editor(editor) => {
                 editor
@@ -150,14 +128,13 @@ impl Dialog {
                     && questions.iter().all(|question| {
                         question.options.len() <= 100
                             && question.options.iter().all(|choice| {
-                                !choice.label.is_empty()
-                                    && js_len(&choice.label) <= 75
+                                js_len(&choice.label) <= 75
                                     && native_label(choice.description.as_deref())
                             })
-                            && distinct(question.options.iter().map(|option| &option.label))
-                            && question
-                                .recommended
-                                .is_none_or(|index| index < question.options.len())
+                            && valid_choices(
+                                question.options.iter().map(|option| option.label.as_str()),
+                                question.recommended,
+                            )
                     })
             }
         };
@@ -167,11 +144,6 @@ impl Dialog {
             Err(unsupported())
         }
     }
-}
-
-fn distinct<T: Eq + std::hash::Hash>(values: impl Iterator<Item = T>) -> bool {
-    let mut seen = HashSet::new();
-    values.into_iter().all(|value| seen.insert(value))
 }
 
 fn native_label(value: Option<&str>) -> bool {

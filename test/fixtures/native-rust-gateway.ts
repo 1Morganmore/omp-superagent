@@ -8,6 +8,7 @@ import type { Inbound } from "../../src/contracts";
 import { gatewayCall } from "../../src/gateway/gateway-protocol";
 import type { GatewayStatus } from "../../src/gateway/gateway-wire";
 import { assertResidentFixtureOwner, stopHostFixtures, waitForFixtureProcessExit } from "./host-fixture-processes";
+import { isolatedNativeEnvironment, within } from "./native-subprocess";
 
 export type Head = { readonly pid: number; readonly ownerPid: number; readonly sessionId: string;
   readonly sessionFile: string; readonly dev: number; readonly ino: number };
@@ -21,13 +22,6 @@ type ModelObservation = {
   readonly thinkingLevel: { readonly present: boolean; readonly value?: string | null };
 };
 const packageRoot = resolve(import.meta.dir, "../..");
-
-async function within<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
-  const timeout = Promise.withResolvers<never>();
-  const handle = setTimeout(() => timeout.reject(new Error(label)), ms);
-  try { return await Promise.race([work, timeout.promise]); }
-  finally { clearTimeout(handle); }
-}
 
 export async function until<T>(check: () => T | undefined | Promise<T | undefined>, label: string): Promise<T> {
   const deadline = performance.now() + 55_000;
@@ -45,14 +39,8 @@ export function gatewayFixture(root: string, profile: "debug" | "release" = "deb
   const sessionFile = join(root, "sessions", "main", "session.jsonl");
   const gatewaySocket = join(runDir, "gateway.sock");
   const hostSocket = join(runDir, "main.sock");
-  const home = join(root, "home");
   const env = {
-    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home,
-    PI_CODING_AGENT_DIR: join(root, "agent"), PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1",
-    XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
-    XDG_CACHE_HOME: join(root, "cache"), XDG_STATE_HOME: join(root, "state"),
-    CODEX_HOME: join(root, "codex"), CLAUDE_CONFIG_DIR: join(root, "claude"), COPILOT_HOME: join(root, "copilot"),
-    TMPDIR: root, TMP: root, TEMP: root,
+    ...isolatedNativeEnvironment(root),
     OMP_TEST_HOST_FIXTURE_ROOT: root, OMP_NATIVE_GATEWAY_ROOT: root, OMP_NATIVE_GATEWAY_PRESETS: "valid",
     OMP_SUPERAGENT_ROOT: packageRoot, OMP_SUPERAGENT_BUN: process.execPath,
     OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH: join(import.meta.dir, "managed-super"),
@@ -207,6 +195,6 @@ export function gatewayFixture(root: string, profile: "debug" | "release" = "deb
     } finally { await stopHostFixtures(root, runDir); }
   }
 
-  return { root, home, config, sessionFile, run, sdk, cli, cliStatus, status, snapshot, observeModel, releaseBusy,
+  return { root, home: env.HOME, config, sessionFile, run, sdk, cli, cliStatus, status, snapshot, observeModel, releaseBusy,
     ready, start, launchGateway, crashGateway, initialExit, headExit, stop, stageInput, deliver, detached, cleanup };
 }

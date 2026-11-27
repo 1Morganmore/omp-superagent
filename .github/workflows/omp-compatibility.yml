@@ -43,6 +43,16 @@ jobs:
         run: |
           rustup default "$RUST_VERSION"
           cmake --version
+      - name: Reuse baseline Rust dependencies without publishing a cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            host-owner
+            gateway
+          shared-key: source-test-${{ hashFiles('scripts/build-host-owner.ts', '.cargo/config.toml') }}
+          env-vars: ImageOS ImageVersion
+          cache-bin: "false"
+          save-if: "false"
       - name: Install and test the upstream release without fallback
         env:
           OMP_TAG: ${{ needs.upstream.outputs.tag }}

@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
 import { physicalRoute, routeKey, type Inbound, type InputRecord, type Lane, type Route, type StorePort } from "../contracts";
 import { compareMessageIds } from "../routing/message-order";
-import type { CronJobs } from "../cron/cron-jobs";
+import type { CronJobs, CronPrJob } from "../cron/cron-jobs";
 import type { CronPrCandidate, CronPrIntake } from "../cron/cron-pr-intake";
-import type { CronPrJob } from "../cron/cron-jobs";
 import { hasIntakeReplyRoute, intakeThreadKey, intakeStatusKey, intakeWorkId, intakeWorkPrefix } from "./pr-intake-work";
+import { hasExactJsonPropertyCount } from "./pr-github-schema";
 import { inspectIntakeMerge, mergeIntakePull } from "./pr-intake-github";
 import { applyIntakeFix, intakeFixDigest, parseIntakeFix, reconcileIntakeFix } from "./pr-intake-fix";
 import { readIntakeMaterial, readIntakeMaterialTarget } from "./pr-intake-material";
 import { inspectIntakeComment, publishIntakeComment } from "./pr-intake-comment";
-import { advancePrIntakeAutomation, prIntakeManualHold, readPrIntakeAutomation } from "./pr-intake-automation";
+import { advancePrIntakeAutomation, hasUnresolvedIntakeWrites, prIntakeManualHold, readPrIntakeAutomation } from "./pr-intake-automation";
 import type { PrIntakeMode } from "./pr-intake-mode";
 
 export class PrControlError extends Error {}
@@ -51,7 +51,7 @@ function approved(text: string): boolean {
   try {
     const result: unknown = JSON.parse(text);
     return typeof result === "object" && result !== null && Object.keys(result).length === 2
-      && [...text.matchAll(/"(?:[^"\\]|\\[\s\S])*"/g)].filter(token => /^\s*:/.test(text.slice(token.index + token[0].length))).length === 2
+      && hasExactJsonPropertyCount(text, 2)
       && "verdict" in result && result.verdict === "approve" && "summary" in result
       && typeof result.summary === "string" && result.summary.trim().length > 0;
   } catch { return false; }
@@ -68,7 +68,7 @@ export class PrReviews {
 
   needsReconciliation(scope: Pick<ReviewRound, "repositoryId" | "number">): boolean {
     const state = readPrIntakeAutomation(this.store, scope);
-    return !!state && [...state.comments, state.fix, state.merge].some(entry => entry?.state === "unknown" || entry?.state === "pending");
+    return state !== null && hasUnresolvedIntakeWrites(state);
   }
 
   laneRound(laneId: string): ReviewRound | null {
@@ -209,7 +209,7 @@ export class PrReviews {
     // after the answer has been sent. It is not a later confirmation.
     const event = command.messageId ?? command.interactionId;
     if (!output?.remoteId || !event || compareMessageIds("discord", event, output.remoteId) !== 1) return null;
-    return digest(JSON.stringify([r.inputId, r.epoch, input?.requestId, input?.generation, output?.remoteId, answer]));
+    return digest(JSON.stringify([r.inputId, r.epoch, input?.requestId, input?.generation, output.remoteId, answer]));
   }
 
   private next(r: ReviewRound): string {
@@ -314,7 +314,7 @@ export class PrReviews {
         return "이전 GitHub 변경을 확인하지 못했습니다. GitHub PR과 커밋 이력을 직접 대조하세요. 이 등록에서는 모호한 쓰기를 다시 보내지 않습니다.";
       }
       if (effect?.state === "confirmed") {
-        if (action === "pr-status" || action !== "pr-review" || effect.action === "pr-merge" || head === previous.head)
+        if (action !== "pr-review" || effect.action === "pr-merge" || head === previous.head)
           return `GitHub 확인: ${effect.action} ${effect.sha}. ${effect.action === "pr-fix" ? `이 스레드에서 /cron pr-review ${jobId} ${number} ${effect.sha} 로 새 HEAD를 다시 검토하세요.` : "종료되었습니다."}`;
       }
       if (action === "pr-status") {

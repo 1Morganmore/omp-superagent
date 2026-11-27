@@ -7,7 +7,7 @@ import { hostPaths, type Config } from "../../src/config/config";
 import type { Inbound, Messenger, OutputRecord, Route } from "../../src/contracts";
 import type { GatewayService } from "../oracles/bun-gateway/gateway";
 import { HostConnection } from "../../src/omp/host";
-import { nativeRequestEnvelope } from "./native-request-envelope";
+import { requestIds } from "./native-request-envelope";
 
 interface Event {
   kind: string;
@@ -129,13 +129,7 @@ export async function runNativeRecoveryProof(options: {
   assert.equal(denied.length, 1, "The real native executor must record the recovery tool restriction");
   assert.equal(denied[0]!.isError, true);
   assert.match(JSON.stringify(denied[0]!.content), /recovery/i);
-  const originalRequests = journal.flatMap(entry => {
-    if (entry.type !== "message" || entry.message.role !== "user") return [];
-    const content = entry.message.content;
-    const text = typeof content === "string" ? content : content.filter(part => part.type === "text").map(part => part.text).join("");
-    const requestId = nativeRequestEnvelope(text)?.requestId;
-    return requestId ? [requestId] : [];
-  });
+  const originalRequests = requestIds(journal);
   assert.deepEqual(originalRequests, ["801", "802", "804", "805", "806"], "No lost original prompt is replayed");
   const effects = journal.flatMap(entry => entry.type === "message" && entry.message.role === "toolResult"
     && entry.message.toolCallId.startsWith("original-effect:") ? [entry.message] : []);

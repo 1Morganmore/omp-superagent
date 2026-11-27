@@ -1,6 +1,6 @@
 {
   "name": "omp-superagent",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "One messenger-connected OMP head with independent work sessions",
   "license": "MIT",
   "author": "dbc-hbin",
@@ -39,7 +39,8 @@
     "build:owner": "bun --no-env-file scripts/build-host-owner.ts --owner",
     "build:native": "bun --no-env-file scripts/build-host-owner.ts",
     "check": "tsc --noEmit",
-    "test": "bun run build:native && cargo build --locked --manifest-path gateway/Cargo.toml --example operator-loopback && bun test --parallel=2 test",
+    "test": "bun run build:native && bun run test:suite",
+    "test:suite": "operator=$(bun --no-env-file test/fixtures/operator.ts) && OMP_TEST_OPERATOR_LOOPBACK_BIN=\"$operator\" bun --no-env-file test --parallel=2 test",
     "test:ci": "bun run build:native && bun --no-env-file scripts/ci.ts",
     "test:baseline": "bash scripts/test-omp.sh",
     "release": "bun --no-env-file scripts/release.ts",

@@ -83,6 +83,11 @@ const workflowSelection = Type.Object({
   reason: Type.String({ minLength: 1 }),
 }, { additionalProperties: false });
 const workflowSchema = Type.Optional(workflowSelection);
+const laneModelSelection = {
+  model: Type.Optional(Type.Object({ provider: Type.String({ minLength: 1 }), id: Type.String({ minLength: 1 }) })),
+  preset: Type.Optional(Type.String({ minLength: 1 })),
+  modelReason: Type.String({ minLength: 1 }),
+} as const;
 const threadTagsSchema = Type.Array(Type.String({ pattern: "^[0-9]{1,20}$" }), { maxItems: 5, uniqueItems: true });
 const threadTitleSchema = Type.String({ minLength: 1, maxLength: 100, pattern: "\\S" });
 const threadChangeFields = {
@@ -355,9 +360,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({
       sourceId: Type.String(), title: Type.String(), cwd: Type.String(),
       kickoff: Type.String({ minLength: 1, description: "A concise message in the user's language stating the concrete approach. Delivered in the work topic before native lane execution; failed or uncertain delivery holds execution." }),
-      model: Type.Optional(Type.Object({ provider: Type.String({ minLength: 1 }), id: Type.String({ minLength: 1 }) })),
-      preset: Type.Optional(Type.String({ minLength: 1 })),
-      modelReason: Type.String({ minLength: 1 }),
+      ...laneModelSelection,
       brief: Type.Optional(Type.String()), acceptance: Type.Optional(Type.Array(Type.String())),
       workflow: workflowSchema,
       placement: Type.Optional(Type.Object({
@@ -479,9 +482,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
     description: "Explicitly change one idle lane's model or full native preset snapshot without changing global OMP settings, the head, or other lanes. Requires a received authorized sourceId, exactly one model/preset and modelReason. Refuses active work, approvals/services/goals or unresolved submissions. Uses durable intent and native readback; do not blindly repeat an uncertain change.",
     parameters: Type.Object({
       id: Type.String(), sourceId: Type.String(),
-      model: Type.Optional(Type.Object({ provider: Type.String({ minLength: 1 }), id: Type.String({ minLength: 1 }) })),
-      preset: Type.Optional(Type.String({ minLength: 1 })),
-      modelReason: Type.String({ minLength: 1 }),
+      ...laneModelSelection,
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) { return result(await requireRuntime(ctx).changeModel(params)); },
   });

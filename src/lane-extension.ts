@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import type { ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import { type LaneEvidence, type LaneReportEvent, parseLaneReportResult } from "./lane/lane-report";
+import { isLaneWaitTarget, type LaneEvidence, type LaneReportEvent, parseLaneReportResult } from "./lane/lane-report";
 import { registerResultAttach, RESULT_ATTACH_TOOL } from "./messaging/result-attachment";
 import { registerDecisionAsk } from "./lane/decision-tool";
 
@@ -51,11 +51,7 @@ function validInput(input: unknown): input is Static<typeof parameters> {
         : item.kind !== "tool" || !keys(item, ["kind", "toolCallId"]) || !text(item.toolCallId))))) return false;
   if (input.status !== "waiting" && (!Array.isArray(input.evidence) || input.evidence.length === 0)) return false;
   if (input.status === "progress") return !Object.hasOwn(input, "waiting");
-  const target = input.waiting;
-  return record(target) && text(target.target) && (target.kind === "dependency"
-    ? keys(target, ["kind", "target"])
-    : ["tool", "approval", "job"].includes(target.kind as string) &&
-      keys(target, ["kind", "id", "target"]) && text(target.id));
+  return isLaneWaitTarget(input.waiting);
 }
 
 function fileEvidence(path: string, cwd: string): LaneEvidence {

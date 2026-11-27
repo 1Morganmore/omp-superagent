@@ -10,7 +10,7 @@ import type { Approval, ApprovalResolution, DialogResponse, DiscordContext, Disc
 import { authorizeDiscordPurpose, discordPurposeRequest } from "../messaging/discord-context";
 import { isObservationRequest } from "./observation-request";
 import type { PresenceAction } from "../contracts";
-import { deferredRecoveryCandidate, HEAD_MODEL_CONTROL, isRetiredScopeInput, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, routingConversation, type HeadModelChange, type HeadPicker } from "../contracts";
+import { deferredRecoveryCandidate, HEAD_MODEL_CONTROL, headRecoveryEffectsSettled, isRetiredScopeInput, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, routingConversation, type HeadModelChange, type HeadPicker } from "../contracts";
 import { authorizeRoute, credentialEnvNames, DEFAULT_HEAD_IDLE_MS, type Config, hostPaths, privateDirectory } from "../config/config";
 import { DeliveryError } from "../messaging/delivery";
 import { GroupAccess } from "../group/group-access";
@@ -1044,7 +1044,7 @@ export class Superagent {
     if (decision.decision === "release") {
       if (attempt.blocked || !evidence?.outcome || evidence.fingerprint !== attempt.evidenceFingerprint
         || !isDeepStrictEqual([...new Set(decision.evidenceEntryIds)].sort(), [...attempt.evidenceEntryIds].sort())
-        || this.store.headRecoveryEffects(attempt.inputId).some(effect => !["sent", "complete", "failed"].includes(effect.state)))
+        || !headRecoveryEffectsSettled(this.store.headRecoveryEffects(attempt.inputId)))
         throw new Error("Release requires unchanged exact native evidence and unambiguous external effects");
       if (!this.recoveryPromptMatches(entries, attempt))
         throw new Error("Another native request crossed the recovery boundary");
@@ -1121,7 +1121,7 @@ export class Superagent {
           && !!evidence?.outcome && evidence.outcome === latest.outcome && evidence.fingerprint === latest.evidenceFingerprint
           && this.recoveryPromptMatches(entries, latest)
           && this.store.getMeta("head:stop-boundary") === latest.stopBoundary
-          && !this.store.headRecoveryEffects(latest.inputId).some(effect => !["sent", "complete", "failed"].includes(effect.state));
+          && headRecoveryEffectsSettled(this.store.headRecoveryEffects(latest.inputId));
         const settled: HeadRecoveryAttempt = { ...latest, state: "settled",
           decision: release ? latest.decision! : {
             attemptId: latest.attemptId, decision: "hold", evidenceEntryIds: latest.evidenceEntryIds,
@@ -1160,7 +1160,7 @@ export class Superagent {
         const quota = evidence.quotaFailure;
         quotaHold = true;
         if (!checkQuota || this.headUsageResetActive
-          || this.store.headRecoveryEffects(input.id).some(effect => !["sent", "complete", "failed"].includes(effect.state))) continue;
+          || !headRecoveryEffectsSettled(this.store.headRecoveryEffects(input.id))) continue;
         const stopBoundary = this.store.getMeta("head:stop-boundary");
         const signal = AbortSignal.any([this.stopSignal.signal, AbortSignal.timeout(15_000)]);
         // A failed or unavailable read is not a recovery signal. Native auth
@@ -1181,7 +1181,7 @@ export class Superagent {
           || this.store.getMeta(ownerKey) !== ownerRecord || !authorizeRoute(this.config, input.route)
           || held?.target !== "main" || held.state !== "uncertain" || held.requestId !== owner.requestId
           || held.generation !== owner.generation
-          || this.store.headRecoveryEffects(input.id).some(effect => !["sent", "complete", "failed"].includes(effect.state))) return;
+          || !headRecoveryEffectsSettled(this.store.headRecoveryEffects(input.id))) return;
         if (this.store.settle(input.id, "cancelled", { id: `${input.id}:quota-recovered`,
           text: "Codex 사용량 회복을 확인해 실패한 요청의 보류를 자동으로 해제했습니다. 원래 요청을 다시 실행하거나 완료로 처리하지 않았습니다." })) {
           this.nextHeadQuotaCheck = undefined;
@@ -1202,7 +1202,7 @@ export class Superagent {
       }
       if (!evidence || !evidence.outcome || !Number.isSafeInteger(state.hostPid) || state.hostPid! <= 0) continue;
       const effects = this.store.headRecoveryEffects(input.id);
-      if (effects.some(effect => !["sent", "complete", "failed"].includes(effect.state))) continue;
+      if (!headRecoveryEffectsSettled(effects)) continue;
       const attempt: HeadRecoveryAttempt = {
         attemptId: crypto.randomUUID(), inputId: input.id, requestId: input.requestId!, generation: input.generation!,
         sessionId: state.sessionId, sessionFile: state.sessionFile!, hostPid: state.hostPid!,
@@ -1247,7 +1247,7 @@ export class Superagent {
   private toolFreeHeadFailure(inputId: string, evidence: ReturnType<typeof headRecoveryEvidence>): boolean {
     return !!evidence?.toolFreeFailure
       && !evidence.quotaFailure
-      && !this.store.headRecoveryEffects(inputId).some(effect => !["sent", "complete", "failed"].includes(effect.state));
+      && headRecoveryEffectsSettled(this.store.headRecoveryEffects(inputId));
   }
 
   /**
@@ -8392,7 +8392,7 @@ export class Superagent {
         || this.store.input(input.id)?.state === "cancelled") return;
       toolFree = !!evidence?.settledToolFreeError && confirmed.hostPid === state.hostPid
         && this.recoveryIdle(confirmed, live.id) && !this.restartFence()
-        && !this.store.headRecoveryEffects(input.id).some(effect => !["sent", "complete", "failed"].includes(effect.state));
+        && headRecoveryEffectsSettled(this.store.headRecoveryEffects(input.id));
     }
     if (live.id === "main" && input && outcome === "error" && !result!.goalResume && admissions.length === 1) {
       let confirmed: RuntimeState | null = state;
@@ -8905,13 +8905,7 @@ export class Superagent {
       }
       return;
     }
-    const byRoute = new Map<string, OutputRecord[]>();
-    for (const output of this.filterFlushable(this.store.outputs())) {
-      const routeKeyValue = physicalRouteKey(output.route);
-      let batch = byRoute.get(routeKeyValue);
-      if (!batch) { batch = []; byRoute.set(routeKeyValue, batch); }
-      batch.push(output);
-    }
+    const byRoute = Map.groupBy(this.filterFlushable(this.store.outputs()), output => physicalRouteKey(output.route));
     for (const [routeKeyValue, batch] of byRoute) {
       if (!this.routeOutbounds.has(routeKeyValue)) this.background(this.startOutputRouteWorker(routeKeyValue, batch));
     }
@@ -9020,13 +9014,7 @@ export class Superagent {
       }
       return;
     }
-    const byRoute = new Map<string, OutputRecord[]>();
-    for (const output of pending) {
-      const routeKeyValue = physicalRouteKey(output.route);
-      let batch = byRoute.get(routeKeyValue);
-      if (!batch) { batch = []; byRoute.set(routeKeyValue, batch); }
-      batch.push(output);
-    }
+    const byRoute = Map.groupBy(pending, output => physicalRouteKey(output.route));
     const active = [...byRoute.entries()].map(([routeKeyValue, batch]) =>
       this.startOutputRouteWorker(routeKeyValue, batch));
     await Promise.all(active);

@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-  HEAD_MODEL_CONTROL, isRetiredScopeInput, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
+  HEAD_MODEL_CONTROL, headRecoveryEffectsSettled, isRetiredScopeInput, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
   type ActiveInputState, type KickoffHold, type OutputRecord, type Route, type SettlementOutput, type StorePort, type WorkflowActivation,
   type HeadModelChange, type HeadRecoveryAttempt, type HeadRecoveryEffect, type LaneFallbackReceipt, type LaneRecoveryScope,
 } from "../contracts.ts";
@@ -1308,16 +1308,15 @@ export class Store implements StorePort {
 
   headRecoveryEffects(inputId: string): HeadRecoveryEffect[] {
     const input = this.requireInput(inputId);
-    const related = [inputId, ...this.inputs().filter(candidate =>
-      this.getMeta(`handoff-source:${candidate.id}`) === inputId).map(candidate => candidate.id)];
-    return this.inputEffects(input, related, id => this.approval(id)?.target === "main");
-  }
-
-  private inputEffects(input: InputRecord, related: readonly string[], ownsApproval: (id: string) => boolean): HeadRecoveryEffect[] {
+    const related = new Set([inputId]);
+    for (const candidate of this.inputs()) {
+      if (this.getMeta(`handoff-source:${candidate.id}`) === inputId) related.add(candidate.id);
+    }
     const outputs = (this.db.query("SELECT id,source_id,state FROM outputs ORDER BY sequence").all() as
-      Array<{ id: string; source_id: string; state: string }>).filter(row => related.includes(row.source_id));
+      Array<{ id: string; source_id: string; state: string }>).filter(row => related.has(row.source_id));
     const effects: HeadRecoveryEffect[] = outputs.map(row => ({ id: row.id, kind: "output", state: row.state }));
     if (this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='gateway_effects'").get()) {
+      const outputIds = new Set(outputs.map(row => row.id));
       // Never select arguments/results into a model-visible snapshot. The SQL
       // projection reads only identity and delivery certainty, not credentials.
       const rows = this.db.query(`SELECT id,operation,state,
@@ -1330,10 +1329,10 @@ export class Store implements StorePort {
         Array<{ id: string; operation: string; state: string; source: string | null; target: string | null;
           message: string | null; certainty: string | null; ok: number | null }>;
       for (const row of rows) {
-        const relevant = related.includes(row.source ?? "") || outputs.some(output => output.id === row.target)
+        const relevant = related.has(row.source ?? "") || (row.target !== null && outputIds.has(row.target))
           || row.operation === "createThread" && input.messageId !== null && row.message === input.messageId
           || (row.operation === "showApproval" || row.operation === "dismissApproval")
-            && row.target !== null && ownsApproval(row.target);
+            && row.target !== null && this.approval(row.target)?.target === "main";
         if (relevant) effects.push({ id: row.id, kind: row.operation,
           state: row.state === "attempted" || row.certainty === "uncertain" || row.ok === null ? "uncertain"
             : row.ok === 0 ? "failed" : "sent" });
@@ -1367,8 +1366,7 @@ export class Store implements StorePort {
         || decided.attemptId !== expected.attemptId || decided.inputId !== expected.inputId
         || !decided.decision || !["decided", "settled"].includes(decided.state)) return false;
       if (decided.decision.decision === "release") {
-        if (!decided.outcome || this.headRecoveryEffects(input.id).some(effect =>
-          !["sent", "complete", "failed"].includes(effect.state))) return false;
+        if (!decided.outcome || !headRecoveryEffectsSettled(this.headRecoveryEffects(input.id))) return false;
         if (decided.state === "settled") this.settle(input.id, decided.outcome, { id: `${input.id}:recovery:${expected.attemptId}`,
           text: decided.outcome === "done"
             ? "원래 세션의 정확한 요청 접수 기록과 마지막 실행 근거로 native 처리 종료를 확인했습니다. 사용자 작업의 완료·수락 기준 충족을 주장하지 않으며 원래 작업을 다시 실행하지 않았습니다."

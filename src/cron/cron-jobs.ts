@@ -87,6 +87,10 @@ export interface CronUpdate {
   readonly cancelPending?: string;
 }
 
+function reject(text: string): CronUpdate {
+  return { text, state: "cancelled" };
+}
+
 function jobMetadata(state: CronState, changed: CronJob, remove = false) {
   const next = state.jobs.filter(job => job.id !== changed.id);
   if (!remove) next.push(changed);
@@ -379,7 +383,6 @@ export class CronJobs {
   }
 
   private addPrJob(input: InputRecord, tail: string, now: number): CronUpdate {
-    const reject = (text: string): CronUpdate => ({ text, state: "cancelled" });
     const source = this.prControlSource(input.id);
     if (!source || routeKey(source.route) !== routeKey(input.route)) {
       return reject("PR intake requires a new authenticated owner command in a Discord guild parent channel.");
@@ -434,7 +437,6 @@ export class CronJobs {
   }
 
   private setPrMode(input: InputRecord, argument: string): CronUpdate {
-    const reject = (text: string): CronUpdate => ({ text, state: "cancelled" });
     const source = this.prControlSource(input.id);
     if (source?.state !== "pending" || routeKey(source.route) !== routeKey(input.route)) {
       return reject("Changing PR intake mode requires a new authenticated owner command in its Discord guild parent channel.");
@@ -486,7 +488,6 @@ export class CronJobs {
 
   control(input: InputRecord, argument: string, now: number): CronUpdate {
     const [, action = "", tail = ""] = /^(\S+)(?:\s+([\s\S]*))?$/.exec(argument) ?? [];
-    const reject = (text: string): CronUpdate => ({ text, state: "cancelled" });
     if (!action || action === "help" && !tail) return { text: usage };
     const state = this.state();
     const scoped = state.jobs.flatMap(job => {

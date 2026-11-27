@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BotCommand, BotCommandScopeChat, BotCommandScopeChatMember } from "grammy/types";
 import type { Config } from "../src/config/config";
 import { MESSENGER_COMMANDS } from "../src/messaging/messenger-commands";
 import { registerTelegramCommands } from "../src/messaging/telegram-command-registration";
 import { loopbackOperator } from "./fixtures/operator";
+import { testResources } from "./fixtures/test-resources";
 
 const tokenName = "TELEGRAM_MENU_TEST_TOKEN";
 const discordTokenName = "TELEGRAM_MENU_OTHER_DISCORD";
@@ -15,18 +15,10 @@ const token = "900:PRIVATE_LOCAL_MENU_TEST_TOKEN";
 const ownerScope = { type: "chat", chat_id: "42" } as const satisfies BotCommandScopeChat;
 const groupScope = { type: "chat_member", chat_id: "-100", user_id: 42 } as const satisfies BotCommandScopeChatMember;
 const expectedCommands = () => MESSENGER_COMMANDS.map(command => ({ command: command.name, description: command.description }));
-const directories: string[] = [];
-const environment = new Map<string, string | undefined>();
-
-function setEnvironment(name: string, value?: string) {
-  if (!environment.has(name)) environment.set(name, process.env[name]);
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
+const { directory: tempDirectory, setEnvironment, restore } = testResources("superagent-telegram-commands-");
 
 function fixture(allowedChatIds = ["-100"]): Config {
-  const directory = mkdtempSync(join(tmpdir(), "superagent-telegram-commands-"));
-  directories.push(directory);
+  const directory = tempDirectory();
   setEnvironment(tokenName, token);
   return {
     path: join(directory, "config.json"), stateDir: join(directory, "state"), headCwd: directory,
@@ -83,14 +75,7 @@ class TelegramMenusHttp {
   });
 }
 
-afterEach(() => {
-  for (const [name, value] of environment) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  environment.clear();
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
+afterEach(restore);
 
 describe("explicit owner-scoped Telegram command menus", () => {
   test("dry-run inspects actual owner DM, groups, membership and menus without mutation", async () => {

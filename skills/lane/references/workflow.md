@@ -11,12 +11,8 @@ not sibling work or aggregate delivery. Identify the integration owner and any
 input/output dependency. Don't redo sibling work or proceed past an unverified
 producer handoff. Flag collisions and continue independent authorized work.
 
-Use the managed envelope to distinguish the owner's direct instruction in
-this bound topic from a manager handoff, a report or supplied context. An explicit
-direct owner revision to this lane's work takes precedence over a prior HEAD
-brief, including acceptance criteria, after native consumption. Apply only the
-parts the owner changed, within the selected workspace and this lane's work;
-coordinating overlapping edits does not require HEAD to grant scope.
+For a direct owner revision, apply the changed scope or acceptance when the lane
+consumes the instruction. Coordinate overlapping edits, not permission to proceed.
 
 Use `read` for known project instructions and facts, `find` to locate unknown
 behavior, and relevant advertised skills. Use a direct tool's advertised schema;
@@ -70,16 +66,11 @@ substitute or unobserved activation.
 
 ## Implement and verify
 
-- Read affected code and callers; make the smallest complete change within the
-  assignment. Use existing APIs, applicable skills and constraints. Preserve
-  unrelated work. A follow-up can steer an active turn at a safe boundary.
-  Neither a new turn nor a steer undoes observed effects, clears an uncertainty
-  hold, lifts pause or overrides tool permissions and approvals. Use `decision_ask`
-  for a choice needing review: present real options, brief consequences and a
-  recommendation; use a preview for longer context. Set `to: "head"` when HEAD
-  must coordinate an in-scope choice, even in a bound topic. Otherwise keep default
-  routing. Hold the affected action; don't submit a second card or infer approval
-  from a choice.
+- Read affected code and callers; make the smallest complete change. A steer is
+  fresh input, not rollback, resume, or approval. When a choice needs review,
+  use `decision_ask` with real options, consequences and a recommendation. Use
+  a preview for longer context. Set `to: "head"` only for in-scope coordination;
+  otherwise keep default routing. Hold only the affected action.
 - For independent bounded work, use the most specific advertised native `task`
   role and a self-contained English brief: target, allowed files, non-goals,
   relevant facts, observable acceptance, and what evidence to return. Keep edit
@@ -104,12 +95,8 @@ observed tool/approval/job ID or a precise dependency label. `resolved` needs th
 same target and actual evidence. Identical evidence/repeated waits don't reset
 clocks. A normal progress report doesn't clear a wait; native tool/approval
 completion clears only the matching wait, and job/dependency resolution uses a
-matching report. Finish the eval reporting cell before a long wait. Direct-topic
-observations do not notify HEAD; changed manager-handoff evidence and wait
-transitions are queued to HEAD. No receipt verifies acceptance or authorizes
-continuation. Ask via the tracked decision tool when HEAD must choose between
-in-scope ways to resolve a blocker, not merely because a direct owner instruction
-changed the original brief.
+matching report. Finish the eval reporting cell before a long wait. A reporting
+receipt neither verifies acceptance nor authorizes continuation.
 
 Put the outcome first in the language required by the managed delivery mode:
 what changed, acceptance evidence actually checked, remaining risk or held effects,

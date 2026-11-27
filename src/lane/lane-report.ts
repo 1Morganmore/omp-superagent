@@ -34,6 +34,13 @@ const text = (value: unknown): value is string => typeof value === "string" && v
 const keys = (value: Record<string, unknown>, names: string[]) =>
   Object.keys(value).every(key => names.includes(key));
 
+export function isLaneWaitTarget(value: unknown): value is LaneWaitTarget {
+  return record(value) && text(value.target) && (value.kind === "dependency"
+    ? keys(value, ["kind", "target"])
+    : ["tool", "approval", "job"].includes(value.kind as string) &&
+      keys(value, ["kind", "id", "target"]) && text(value.id));
+}
+
 /** Parse only the structured native result, never receipt text or a claimed event in content. */
 export function parseLaneReportResult(result: unknown): LaneReportEvent | null {
   try {
@@ -54,14 +61,7 @@ export function parseLaneReportResult(result: unknown): LaneReportEvent | null {
     if (report.status !== "waiting" && report.evidence.length === 0) return null;
     if (report.status === "progress") {
       if (Object.hasOwn(report, "waiting")) return null;
-    } else {
-      const waiting = report.waiting;
-      if (!record(waiting) || !text(waiting.target)) return null;
-      if (waiting.kind === "dependency") {
-        if (!keys(waiting, ["kind", "target"])) return null;
-      } else if (!["tool", "approval", "job"].includes(waiting.kind as string) ||
-          !text(waiting.id) || !keys(waiting, ["kind", "id", "target"])) return null;
-    }
+    } else if (!isLaneWaitTarget(report.waiting)) return null;
     return event as unknown as LaneReportEvent;
   } catch {
     // Malformed native details must not escape into the head's event loop.

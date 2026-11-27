@@ -86,9 +86,8 @@ function offerText(repository: string, candidate: CronPrCandidate): string {
 }
 
 export function describePrIntake(store: StorePort, job: CronPrJob, number: number | null): string {
-  const candidates = ledger(store, job.repository)?.candidates.filter(candidate => candidate.jobId === job.id) ?? [];
+  const newest = ledger(store, job.repository)?.candidates.filter(candidate => candidate.jobId === job.id).reverse() ?? [];
   const summary = job.lastRunId ? store.getMeta(outcomeKey(job.lastRunId)) : null;
-  const newest = [...candidates].reverse();
   const selected = number === null ? newest.slice(0, 10) : newest.filter(candidate => candidate.number === number);
   const open = !job.paused && !job.removed && job.stopBoundary === store.getMeta("head:stop-boundary");
   const lines = selected.map(candidate => {
