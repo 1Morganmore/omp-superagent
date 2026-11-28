@@ -36,7 +36,7 @@ import { discordThreadSplit, editsTopicPlacement, existingWorkspace, inferredWor
 import { findPastTopic, findRoutingTopics, joinedTopicProvenance, pastTopicQuery, readPastTopic, routingExcerpt, routingSubject, transportRoutingProse } from "../routing/topic-history";
 import { parseLaneReportResult } from "../lane/lane-report";
 import { isLaneWatchNotice, LaneWatcher, type LaneWatchCommand } from "../lane/lane-watch";
-import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "../contracts";
+import type { HeadRecoveryAttempt, HeadRecoveryDecision, LaneRecoveryScope } from "../contracts";
 import { headRecoveryEvidence, laneQuotaExhausted, settledLaneReceipt, type HeadQuotaFailure } from "./head-recovery";
 import { HEAD_QUOTA_CHECK_MS } from "./head-quota";
 import { isPrObservation, PrWatcher, type PrWatchCommand } from "../pr/pr-watch";
@@ -1612,7 +1612,7 @@ export class Superagent {
     this.assertRestartOpen();
     if (this.stopped) throw new Error("Controller is stopped");
     this.assertWorkSourceNotPrObservation(input.sourceId);
-    if (!operatorSource) this.assertLaneRecoveryTarget(input.sourceId, input.id);
+    const recovery = operatorSource ? null : this.assertLaneRecoveryTarget(input.sourceId, input.id);
     if (typeof input.modelReason !== "string" || !input.modelReason.trim()) throw new Error("A nonempty modelReason is required");
     if ((input.model !== undefined) === (input.preset !== undefined)
       || (input.model !== undefined && !isLaneModel(input.model))
@@ -1622,7 +1622,7 @@ export class Superagent {
     input = { ...input, ...(input.model ? { model: { provider: input.model.provider, id: input.model.id } } : {}) };
     const source = this.store.input(input.sourceId);
     if (!source) throw new Error("sourceId must name a received authorized request");
-    this.authorized(source.route);
+    this.authorizeLaneManagerSource(source, recovery);
     this.authorized(this.requireLane(input.id).route, "work");
     const request = JSON.stringify([input.model ? { provider: input.model.provider, id: input.model.id } : null, input.preset ?? null, input.modelReason]);
     const receipt = this.store.getMeta(`lane-model:${input.id}:receipt:${input.sourceId}`);
@@ -1783,10 +1783,10 @@ export class Superagent {
       if (live && (!state?.modelSettings || !isLaneModel(state.model))) throw new Error("Native lane lacks authoritative prior model/settings");
     } else {
       this.assertWorkSourceNotPrObservation(sourceId);
-      this.assertLaneRecoveryTarget(sourceId, id);
+      const recovery = this.assertLaneRecoveryTarget(sourceId, id);
       const source = this.store.input(sourceId);
       if (!source || source.state === "cancelled") throw new Error("sourceId must name a received authorized request");
-      this.authorized(source.route);
+      this.authorizeLaneManagerSource(source, recovery);
       if (currentQuotaHold) throw new Error("Quota exhaustion requires an explicit /model --lane choice from the owner in the bound topic");
     }
     this.assertModelChangeIdle(lane, live, state);
@@ -2364,12 +2364,12 @@ export class Superagent {
       throw new Error("Unauthorized messenger route");
   }
 
-  private isPlacementOnlyReport(input: InputRecord): boolean {
-    if (this.store.getMeta(`user-source:${input.id}`) === "true") return false;
+  private placementOnlyReportOwner(input: InputRecord): InputRecord | null {
+    if (this.store.getMeta(`user-source:${input.id}`) === "true") return null;
     const source = discordWorkThreadSource(this.config, this.store, input.route);
-    if (!source) return false;
+    if (!source) return null;
     const original = this.store.reportApprovalSource(input.id);
-    return original !== null && routeKey(physicalRoute(original.route)) === routeKey(source);
+    return original && routeKey(physicalRoute(original.route)) === routeKey(source) ? original : null;
   }
 
   private activity(input: InputRecord, active: boolean): void {
@@ -3479,16 +3479,24 @@ export class Superagent {
     return scope;
   }
 
-  private assertLaneRecoveryTarget(sourceId: string, target?: string): boolean {
+  private assertLaneRecoveryTarget(sourceId: string, target?: string): LaneRecoveryScope | null {
     const head = this.live.get("main");
     const reportId = this.activeLaneReviewId;
-    if (!reportId && !this.isLaneRecoveryReport(sourceId)) return false;
+    if (!reportId && !this.isLaneRecoveryReport(sourceId)) return null;
     const scope = reportId === sourceId ? this.laneRecoveryScope(reportId) : null;
     if (!head || !this.current(head) || head.input?.id !== sourceId || this.store.input(sourceId)?.state !== "submitted"
       || !scope || scope.lane.id !== target || scope.failed.state === "uncertain") {
       throw new Error("Lane recovery requires the active HEAD report ID and its original lane, settled admission and current owner authority");
     }
-    return true;
+    return scope;
+  }
+
+  private authorizeLaneManagerSource(input: InputRecord, recovery: LaneRecoveryScope | null): void {
+    // An active corrective report may be delivered to a placement-only thread,
+    // but only its pinned original conversation supplies manager authority.
+    const route = recovery && routeKey(input.route) === routeKey(recovery.lane.route)
+      && this.placementOnlyReportOwner(input)?.id === recovery.original.id ? recovery.original.route : input.route;
+    this.authorized(route);
   }
 
   private laneReviewDispatchAllowed(input: InputRecord): boolean {
@@ -3587,10 +3595,11 @@ export class Superagent {
     return false;
   }
 
-  private requireManagerSource(sourceId: string, destination?: Route, target?: string): void {
+  private requireManagerSource(sourceId: string, destination?: Route, target?: string): LaneRecoveryScope | null {
     if (isLaneWatchNotice(sourceId)) throw new Error("Lane watch notices cannot authorize lane work");
     this.assertWorkSourceNotPrObservation(sourceId);
-    if (this.assertLaneRecoveryTarget(sourceId, target)) return;
+    const recovery = this.assertLaneRecoveryTarget(sourceId, target);
+    if (recovery) return recovery;
     const original = this.store.ownerSource(sourceId);
     if (this.store.getMeta(`topic-owner:${original?.id ?? sourceId}`)) throw new Error("Topic-owned intake cannot authorize a manager handoff; use an explicit HEAD request");
     if (original) this.assertFirstDmHandoffSource(original, sourceId);
@@ -3599,6 +3608,7 @@ export class Superagent {
       throw new Error("Work from this Discord thread stays in the original thread unless the owner explicitly requests a split");
     }
     this.assertCronDelegationOpen(sourceId);
+    return null;
   }
 
   private assertWorkSourceNotPrObservation(sourceId: string): void {
@@ -3975,10 +3985,10 @@ export class Superagent {
   }
 
   async messageLane(id: string, text: string, sourceId: string, choice?: WorkflowChoice) {
-    this.requireManagerSource(sourceId, this.store.lane(id)?.route, id);
-    if (this.isLaneRecoveryReport(sourceId) && this.laneQueueHolds(id).uncertainInputIds.length)
+    const recovery = this.requireManagerSource(sourceId, this.store.lane(id)?.route, id);
+    if (recovery && this.laneQueueHolds(id).uncertainInputIds.length)
       throw new Error("Reconcile the uncertain original admission and its effects before submitting corrective work");
-    const handoffId = this.enqueueLaneMessage(id, text, sourceId, choice);
+    const handoffId = this.enqueueLaneMessage(id, text, sourceId, choice, recovery);
     await this.kick();
     const handoff = this.store.input(handoffId);
     if (!handoff) throw new Error("Durable lane follow-up is missing");
@@ -3988,7 +3998,7 @@ export class Superagent {
     };
   }
 
-  private enqueueLaneMessage(id: string, text: string, sourceId: string, choice?: WorkflowChoice): string {
+  private enqueueLaneMessage(id: string, text: string, sourceId: string, choice?: WorkflowChoice, recovery: LaneRecoveryScope | null = null): string {
     this.assertRestartOpen();
     const topicOwner = this.store.getMeta(`topic-owner:${sourceId}`);
     if (topicOwner && topicOwner !== id) throw new Error("Cannot move an admitted topic request to another lane");
@@ -3997,7 +4007,7 @@ export class Superagent {
     const original = this.store.input(sourceId);
     if (!original) throw new Error("sourceId must name a received authorized request");
     if (original.state === "cancelled") throw new Error("A cancelled request cannot delegate new work");
-    this.authorized(original.route);
+    this.authorizeLaneManagerSource(original, recovery);
     this.authorized(lane.route, "work");
     const scopedThread = !authorizeRoute(this.config, lane.route) && discordWorkThreadSource(this.config, this.store, lane.route);
     const scopedOwner = scopedThread && this.store.ownerSource(sourceId);
@@ -7318,7 +7328,7 @@ export class Superagent {
         for (const input of this.store.inputs(undefined, "pending")) {
           if (this.stopped) continue;
           try {
-            const work = input.target && input.target !== "main" || this.isPlacementOnlyReport(input);
+            const work = input.target && input.target !== "main" || this.placementOnlyReportOwner(input);
             this.authorized(input.route, work ? "work" : undefined);
           }
           catch {
@@ -7566,7 +7576,7 @@ export class Superagent {
     const sourceId = this.store.getMeta(`handoff-source:${input.id}`);
     const source = sourceId ? this.store.input(sourceId) : input;
     if (!source) throw new Error("Attachment source identity is unavailable");
-    this.authorized(source.route, this.isPlacementOnlyReport(input) ? "work" : undefined);
+    this.authorized(source.route, this.placementOnlyReportOwner(input) ? "work" : undefined);
     if (!input.attachments.length) return { descriptions, images };
     for (const attachment of input.attachments) {
       if (attachment.size !== null && (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_ATTACHMENT_BYTES)) throw new Error("Invalid attachment size");
