@@ -390,21 +390,18 @@ See the [operations guide](../OPERATIONS.en.md#4-commands-and-daily-use) for com
   quotes. They apply only to original owner messages in physical Discord work
   threads, not edits, quoted text or attachments. DM and other adapters retain
   their existing topic behavior.
-- `/new` and controller-handled natural split directives create the native
-  Discord thread under the source conversation's parent. Only HEAD's explicit
-  `lane_start` destination can use another `allowedChannelIds` channel as the
-  parent, and only when `discord.allowCrossChannelThreads` is enabled and the
-  operator names it. A source in a guild parent channel may request that
-  placement too; a request in an unbound Discord thread stays in that thread.
-  The destination must be in the same bot account, owner and guild; restricted
-  `groupRooms` do not qualify. The destination channel's permitted thread
-  creation is still required, and a refusal or uncertain receipt is not retried
-  under the source parent or another channel. The one existing durable placement
-  notice in the source conversation then names both the destination channel and
-  the new thread. The lane's progress and final reports use that thread only and
-  are not duplicated in the source conversation; HEAD's own acknowledgement or
-  review remains a separate HEAD output. No ordinary, DM, quoted or
-  existing-thread route is redirected by the setting.
+- `/new` and plain split directives keep the source parent. With operator opt-in,
+  HEAD may select a different native parent for an original authorized owner
+  request via `lane_start`. The default `"allowlist"` scope requires the
+  destination in `allowedChannelIds`; opt-in `"guild"` scope also permits an
+  eligible unlisted parent in the same allowed guild, bot account and owner.
+  Restricted `groupRooms` do not qualify. The Gateway verifies actual Discord
+  parent identity, capability and permissions before creation. It does not
+  add ACLs or fall back after refusal or uncertain creation. An unlisted
+  destination is authorized only for the exact confirmed native work thread.
+  The grant permits work delivery, not text or command intake or history
+  recovery; approvals remain on the original allowed route. The source receives
+  one placement notice; progress and final work reports use the work thread.
 - `/head <request>` explicitly addresses the shared coordination model (Slack:
   `!head` or `/superagent-head`). Manager handoffs keep HEAD's review path.
   When HEAD explicitly uses `lane_message` to continue an existing physical

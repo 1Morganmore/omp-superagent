@@ -134,20 +134,16 @@ controls Host capacity.
   For an explicitly requested split from a Discord thread, use the exact
   authorized parent `destination` with `threadId:null` and no `topicId` to
   create a sibling thread, never a bare channel destination or nested thread.
-  That parent is normally the source thread's own parent. Only an explicit
-  `lane_start` destination from HEAD widens it, and only when
-  `discord.allowCrossChannelThreads` is enabled and the operator explicitly
-  names another allowed channel in the same Discord bot account, owner and
-  guild; then that channel is the parent and the new thread still carries its
-  own lane. `/new` and controller-handled plain split directives continue to use
-  the source parent. Restricted `groupRooms` are never eligible, the
-  bot still needs thread permissions in the destination channel, and failure
-  does not fall back to the source parent or another channel. The existing
-  single placement notice then names both the destination channel and thread;
-  the lane's progress and final reports use the new thread only and are not
-  duplicated in the source conversation, while HEAD's own acknowledgement or
-  review stays a separate HEAD output. Ordinary and DM input never route there
-  implicitly.
+  That parent is normally the source thread's own parent. If the operator has
+  enabled `discord.allowCrossChannelThreads`, HEAD may choose an eligible
+  alternate parent explicitly in `lane_start` for an authorized owner request.
+  The `"allowlist"` scope requires an allowed channel; the additional opt-in
+  `"guild"` scope can use an unlisted parent in the same trusted guild,
+  authenticated bot account and owner. Never select a restricted `groupRooms`
+  channel, assume bot permissions, or fall back to another parent. `/new` and
+  ordinary split directives still use the source parent. An unlisted thread
+  receives work outputs, not messages to the agent; approvals and follow-up
+  instructions stay in the original allowed conversation.
   Only use an existing destination when its exact platform/account/authority/guild/channel/thread/topic
   identity is observed and authorized. DMs without native support use honest
   logical topics. Never fabricate a thread ID, interaction source message, or Slack

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import type { Approval, DialogResponse, Inbound, LaneModel, Messenger, OutputRecord, Route } from "../src/contracts";
+import type { Approval, DialogResponse, Inbound, LaneModel, Messenger, OutputRecord, Route, ThreadInfo } from "../src/contracts";
 import { physicalRoute, physicalRouteKey } from "../src/contracts";
 import { type Config, hostPaths } from "../src/config/config";
 import { Superagent, type RuntimeAdapters } from "../src/runtime/controller";
@@ -84,6 +84,8 @@ class TopicMessenger implements Messenger {
   readonly sent: OutputRecord[] = [];
   readonly creations: Array<{ route: Route; sourceMessageId?: string }> = [];
   readonly capabilities: Route[] = [];
+  readonly scopedPlacements: Array<{ operation: "inspect" | "probe" | "create"; route: Route; source: Route; tags?: readonly string[] }> = [];
+  readonly approvals: Approval[] = [];
   supported = true;
   capabilityError?: Error;
   creationError?: Error;
@@ -92,20 +94,27 @@ class TopicMessenger implements Messenger {
     if (destination.accountId !== (destination.platform === "slack" ? "TTEAM:UBOT" : "2"))
       throw new Error("Unrecognized fixture account");
   }
-  canCreateThread: Messenger["canCreateThread"] = async route => {
+  canCreateThread: Messenger["canCreateThread"] = async (route, tags, source) => {
     this.capabilities.push(route);
+    if (source) this.scopedPlacements.push({ operation: "probe", route, source, tags });
     if (this.capabilityError) throw this.capabilityError;
     return this.supported;
   };
   async start(): Promise<void> {}
   async send(output: OutputRecord): Promise<string> { this.sent.push(output); return output.id; }
-  async createThread(route: Route, _title: string, sourceMessageId?: string): Promise<Route> {
+  async inspectThread(route: Route, source?: Route): Promise<ThreadInfo> {
+    if (source) this.scopedPlacements.push({ operation: "inspect", route, source });
+    return { route, title: "Forum", archived: null, requiresTag: true,
+      availableTags: [{ id: "81", name: "Work", moderated: false }], appliedTags: [] };
+  }
+  async createThread(route: Route, _title: string, sourceMessageId?: string, tags?: readonly string[], source?: Route): Promise<Route> {
     this.creations.push({ route, sourceMessageId });
+    if (source) this.scopedPlacements.push({ operation: "create", route, source, tags });
     this.beforeCreate?.();
     if (this.creationError) throw this.creationError;
     return { ...physicalRoute(route), threadId: route.platform === "slack" ? sourceMessageId ?? "1750000001.000001" : "900" };
   }
-  async showApproval(_approval: Approval): Promise<string> { return "card"; }
+  async showApproval(approval: Approval): Promise<string> { this.approvals.push(approval); return "card"; }
   async dismissApproval(_approval: Approval): Promise<void> {}
   async fetchAfter(): Promise<Inbound[]> { return []; }
   async openAttachment(): Promise<never> { throw new Error("No attachment in this case"); }
@@ -829,6 +838,109 @@ describe("native topic binding", () => {
 describe("cross-channel native topic creation", () => {
   const enabled = { allowCrossChannelThreads: true, allowedChannelIds: ["4", "5"] };
   const destination = () => route(null, { channelId: "5" });
+
+  test("guild scope places work outside the allowlist without admitting the parent or thread", async () => {
+    const { runtime, store, messenger, hosts, main, select } = fixture(2, undefined, undefined, {
+      discord: { allowCrossChannelThreads: true, crossChannelThreadScope: "guild" },
+    });
+    const source = headInbound("1190", route(null));
+    await runtime.start();
+    await receive(runtime, source);
+    expect(await runtime.inspectThread(source.id, undefined, destination())).toMatchObject({ requiresTag: true,
+      availableTags: [expect.objectContaining({ id: "81" })] });
+    const input = { ...select(source.id, destination()), appliedTags: ["81"] };
+    const lane = await runtime.startLane(input);
+    await drain(runtime);
+    expect(messenger.scopedPlacements).toEqual([
+      { operation: "inspect", route: destination(), source: source.route },
+      { operation: "probe", route: destination(), source: source.route, tags: ["81"] },
+      { operation: "create", route: destination(), source: source.route, tags: ["81"] },
+    ]);
+    expect(store.output(`${source.id}:kickoff`)).toMatchObject({ route: lane.route, state: "sent" });
+    expect(store.output(`${source.id}:topic-bound`)).toMatchObject({ route: source.route, text: "작업 스레드: <#5> <#900>" });
+    expect((await runtime.startLane(input)).id).toBe(lane.id);
+    expect(messenger.creations).toEqual([{ route: destination(), sourceMessageId: undefined }]);
+    await expect(runtime.receive(inbound("1191", destination()))).rejects.toThrow("Unauthorized messenger route");
+    await expect(runtime.receive(inbound("1192", lane.route))).rejects.toThrow("Unauthorized messenger route");
+    expect(store.input("1191")).toBeNull();
+    expect(store.input("1192")).toBeNull();
+
+    const worker = hosts.get(lane.socketPath);
+    if (!worker) throw new Error("Expected work to run in the created thread lane");
+    expect(worker.prompts).toHaveLength(1);
+    const approval = { type: "extension_ui_request", id: "confirm-guild-work", method: "confirm", title: "Confirm work" };
+    worker.state.pendingUiRequests = [approval];
+    worker.emit(approval);
+    await drain(runtime);
+    expect(messenger.approvals).toEqual([expect.objectContaining({ target: lane.id, route: source.route })]);
+    worker.state.pendingUiRequests = [];
+    worker.emit({ type: "extension_ui_request", method: "cancel", targetId: approval.id });
+    worker.yield("Verified lane result");
+    worker.result(0);
+    worker.emit({ type: "session_settled" });
+    main.yield("Head acknowledgment");
+    main.result(0);
+    main.emit({ type: "session_settled" });
+    await drain(runtime);
+    const report = store.input(`report:handoff:${source.id}:lane`);
+    expect(report).toMatchObject({ target: "main", route: lane.route, state: "submitted" });
+    expect(main.prompts[1]?.command.message).toContain("Verified lane result");
+    main.yield("Verified result delivered");
+    main.result(1);
+    main.emit({ type: "session_settled" });
+    await drain(runtime);
+    expect(messenger.sent.filter(output => output.text === "Verified result delivered"))
+      .toEqual([expect.objectContaining({ route: lane.route })]);
+  });
+
+  test("unlisted guild scope refuses an ineligible thread and cannot be used while disabled", async () => {
+    const scoped = { crossChannelThreadScope: "guild" as const, allowedGuildIds: ["3", "33"] };
+    const disabled = fixture(1, undefined, undefined, { discord: scoped });
+    await disabled.runtime.start();
+    await receive(disabled.runtime, headInbound("1193", route(null)));
+    await expect(disabled.runtime.startLane(disabled.select("1193", destination()))).rejects.toThrow("Unauthorized messenger route");
+    expect(disabled.messenger.capabilities).toEqual([]);
+
+    const { runtime, store, messenger, select } = fixture(1, undefined, undefined, { discord: {
+      ...scoped, allowCrossChannelThreads: true,
+    } });
+    await runtime.start();
+    await receive(runtime, headInbound("1194", route(null)));
+    await expect(runtime.startLane(select("1194", route(null, { channelId: "5", guildId: "33" }))))
+      .rejects.toThrow("Unauthorized messenger route");
+    await expect(runtime.startLane(select("1194", route("77", { channelId: "5" }))))
+      .rejects.toThrow("Unauthorized messenger route");
+    messenger.supported = false;
+    await expect(runtime.startLane(select("1194", destination()))).rejects.toThrow("does not support creating");
+    expect(messenger.capabilities).toEqual([destination()]);
+    expect(messenger.creations).toEqual([]);
+    expect(store.lanes()).toEqual([]);
+  });
+
+  test("guild scope repairs only the exact confirmed thread without repeating creation", async () => {
+    const { runtime, store, messenger, select } = fixture(1, undefined, undefined, {
+      discord: { allowCrossChannelThreads: true, crossChannelThreadScope: "guild" },
+    });
+    await runtime.start();
+    const source = headInbound("1195", route(null));
+    await receive(runtime, source);
+    const parent = destination();
+    const created = { ...parent, threadId: "900" };
+    messenger.creationError = new Error("Creation outcome unavailable");
+    await expect(runtime.startLane(select(source.id, parent))).rejects.toThrow("outcome unavailable");
+    expect(store.getMeta(`handoff-route:${source.id}`)).toBe("uncertain");
+    messenger.creationError = undefined;
+    await expect(runtime.startLane(select(source.id, parent))).rejects.toThrow("interrupted");
+    await expect(runtime.startLane(select(source.id, created))).rejects.toThrow("Unauthorized messenger route");
+    // An acknowledged adapter result was persisted before lane binding.
+    store.setMeta(`handoff-route-result:${source.id}`, JSON.stringify(created));
+    await expect(runtime.startLane(select(source.id, { ...created, threadId: "901" })))
+      .rejects.toThrow("Unauthorized messenger route");
+    const lane = await runtime.startLane(select(source.id, created));
+    expect(lane.route).toEqual(created);
+    expect(messenger.creations).toHaveLength(1);
+    expect(store.output(`${source.id}:kickoff`)).toMatchObject({ route: created, state: "sent" });
+  });
 
   test("flag on creates one thread from an explicit guild parent with a dual-mention source pointer and destination kickoff", async () => {
     const { runtime, store, messenger, select } = fixture(1, undefined, undefined, { discord: enabled });

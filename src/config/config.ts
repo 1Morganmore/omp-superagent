@@ -12,6 +12,7 @@ export interface DiscordConfig {
   readonly requireAddressing?: boolean;
   readonly editProgressInPlace?: boolean;
   readonly allowCrossChannelThreads?: boolean;
+  readonly crossChannelThreadScope?: "allowlist" | "guild";
   voice?: DiscordVoiceConfig;
 }
 
@@ -248,6 +249,9 @@ export function parseConfig(value: unknown, path: string): Config {
   const allowCrossChannelThreads = discord?.allowCrossChannelThreads;
   if (allowCrossChannelThreads !== undefined && typeof allowCrossChannelThreads !== "boolean")
     throw new Error("discord.allowCrossChannelThreads must be a boolean");
+  const crossChannelThreadScope = discord?.crossChannelThreadScope;
+  if (crossChannelThreadScope !== undefined && crossChannelThreadScope !== "allowlist" && crossChannelThreadScope !== "guild")
+    throw new Error("discord.crossChannelThreadScope must be allowlist or guild");
   if (raw.remoteMemorySync !== undefined && typeof raw.remoteMemorySync !== "boolean")
     throw new Error("remoteMemorySync must be a boolean");
   const voice = discord?.voice === undefined ? undefined : record(discord.voice, "discord.voice");
@@ -303,6 +307,7 @@ export function parseConfig(value: unknown, path: string): Config {
       requireAddressing: requireAddressing ?? false,
       editProgressInPlace: editProgressInPlace ?? false,
       allowCrossChannelThreads: allowCrossChannelThreads ?? false,
+      crossChannelThreadScope: crossChannelThreadScope ?? "allowlist",
       ...(voiceConfig ? { voice: voiceConfig } : {}),
     } } : {}),
     ...(telegram ? { telegram: {

@@ -97,11 +97,22 @@ describe("operator execution limits", () => {
       });
       const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
       expect(code).toBe(0);
-      expect(JSON.parse(stdout)).toMatchObject({ config: { discord: { allowCrossChannelThreads: expected } } });
+      expect(JSON.parse(stdout)).toMatchObject({ config: { discord: {
+        allowCrossChannelThreads: expected, crossChannelThreadScope: "allowlist",
+      } } });
     });
   test.each(["true", 1, null])("rejects non-boolean Discord allowCrossChannelThreads %p", async allowCrossChannelThreads => {
     await expect(loadConfig(await config({ discord: { ...voiceDiscord, allowCrossChannelThreads } })))
       .rejects.toThrow("discord.allowCrossChannelThreads must be a boolean");
+  });
+  test("Discord guild thread scope is explicit and leaves ingress authorization unchanged", async () => {
+    const discord = { ...voiceDiscord, allowCrossChannelThreads: true, crossChannelThreadScope: "guild" };
+    const loaded = await loadConfig(await config({ discord }));
+    expect(loaded.discord).toMatchObject({ allowCrossChannelThreads: true, crossChannelThreadScope: "guild" });
+    expect(authorizeRoute(loaded, { platform: "discord", accountId: "9", authorityId: "1",
+      guildId: "2", channelId: "4", threadId: "42" })).toBe(false);
+    await expect(loadConfig(await config({ discord: { ...discord, crossChannelThreadScope: "all" } })))
+      .rejects.toThrow("discord.crossChannelThreadScope");
   });
   test.each(["implicit", "explicit"])("bounds API voice and isolates its provider credential with %s auth", async mode => {
     const voice = { ...paidVoice, ...(mode === "explicit" ? { auth: "api" as const } : {}) };
