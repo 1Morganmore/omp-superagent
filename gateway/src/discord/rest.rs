@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::time::{Instant, timeout_at};
+#[cfg(test)]
+use tokio_util::task::TaskTracker;
 
 use super::{Effect, EffectError, model::Interaction, snowflake};
 
@@ -25,6 +27,8 @@ pub(super) struct Rest {
     pub(super) api: String,
     token: String,
     authorization: HeaderValue,
+    #[cfg(test)]
+    detached: TaskTracker,
 }
 
 #[derive(Default, Deserialize)]
@@ -52,7 +56,27 @@ impl Rest {
             api: API.to_owned(),
             token,
             authorization,
+            #[cfg(test)]
+            detached: TaskTracker::new(),
         })
+    }
+
+    /// Runs a one-shot write whose latency or rejection must not change the
+    /// result the caller already confirmed.
+    pub(super) fn detach<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        #[cfg(test)]
+        let _ = self.detached.spawn(task);
+        #[cfg(not(test))]
+        let _ = tokio::spawn(task);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn settled(&self) {
+        self.detached.close();
+        self.detached.wait().await;
     }
 
     pub fn token(&self) -> &str {

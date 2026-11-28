@@ -318,8 +318,12 @@ impl State {
             self.route_for(&created)
         }
         .map_err(|_| broken("Created Discord thread had an unexpected destination"))?;
-        if actual.thread_id.as_deref().is_none_or(|id| !snowflake(id))
-            || actual.parent() != route.physical()
+        let Some(thread_id) = actual.thread_id.as_deref().filter(|id| snowflake(id)) else {
+            return Err(broken(
+                "Created Discord thread had an unexpected destination",
+            ));
+        };
+        if actual.parent() != route.physical()
             || origin.is_some() && !matches!(created.kind, 10 | 11)
         {
             return Err(broken(
@@ -327,6 +331,21 @@ impl State {
             ));
         }
         self.remember_channel(created).await;
+        // A created thread starts with only the bot as a member. Adding the
+        // owner keeps the new route usable without delaying the confirmed
+        // creation: the write is bounded by the REST timeout and never retried.
+        let request = self.rest.request(
+            Method::PUT,
+            &format!(
+                "channels/{thread_id}/thread-members/{}",
+                self.config.owner_id
+            ),
+        );
+        self.rest.detach(async move {
+            if Rest::empty(request).await.is_err() {
+                eprintln!("Discord thread owner membership could not be confirmed");
+            }
+        });
         Ok(json!(actual))
     }
 

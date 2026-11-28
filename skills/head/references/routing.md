@@ -147,7 +147,10 @@ controls Host capacity.
   Only use an existing destination when its exact platform/account/authority/guild/channel/thread/topic
   identity is observed and authorized. DMs without native support use honest
   logical topics. Never fabricate a thread ID, interaction source message, or Slack
-  timestamp. Reconcile ambiguous creation before any new thread attempt.
+  timestamp. Reconcile ambiguous creation before any new thread attempt. For a
+  bot-created thread, the gateway attempts to add the configured owner as a
+  member so the thread appears in that owner's Discord channel list; a failed
+  add does not prevent thread creation or routing.
 - For Discord forum/media creation, use `thread_inspect` and observed tag IDs in
   `lane_start.appliedTags`; respect required tags. For explicit changes to an
   existing managed Discord thread, use `lane_thread_update` with original source

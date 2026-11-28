@@ -7,7 +7,7 @@ use super::{
 async fn guild_work_thread_placement_preserves_ingress_and_exact_receipt_authority() {
     let temp = Temp::new();
     let store = Arc::new(Store::open(&temp.0).unwrap());
-    let (hub, ws, _, _, server, replies, _) = discord_fixture_with_store(
+    let (hub, ws, mut observed, _, server, replies, state) = discord_fixture_with_store(
         json!({"discord":{
             "allowCrossChannelThreads":true, "crossChannelThreadScope":"guild"
         }}),
@@ -27,8 +27,7 @@ async fn guild_work_thread_placement_preserves_ingress_and_exact_receipt_authori
         "/channels/89",
         json!({"id":"89","type":0,"guild_id":"77","name":"Work parent"}),
     );
-    set("/channels/89/threads", opened.clone());
-    set("/channels/91", opened);
+    set("/channels/91", opened.clone());
     set(
         "/channels/91/messages",
         json!({"id":"502","guild_id":"77","channel_id":"91","author":{"id":"71","bot":true}}),
@@ -87,7 +86,27 @@ async fn guild_work_thread_placement_preserves_ingress_and_exact_receipt_authori
     assert!(hub.effect("createThread", &create).await.is_err());
     let mut tagged = create;
     tagged[3] = json!(["601"]);
+    let mut wrong_parent = opened.clone();
+    wrong_parent["id"] = json!("93");
+    wrong_parent["parent_id"] = json!("88");
+    set("/channels/89/threads", wrong_parent);
+    assert_eq!(
+        hub.effect("createThread", &tagged)
+            .await
+            .unwrap_err()
+            .certainty,
+        "uncertain"
+    );
+    received(&mut observed, "/channels/89/threads").await;
+    set("/channels/89/threads", opened);
     assert_eq!(hub.effect("createThread", &tagged).await.unwrap(), thread);
+    received(&mut observed, "/channels/89/threads").await;
+    received(&mut observed, "/channels/91/thread-members/42").await;
+    settled(&state).await;
+    assert!(
+        observed.try_recv().is_err(),
+        "only the confirmed thread may get one owner membership write"
+    );
     let output = json!({"id":"guild-output","route":thread,"text":"Work finished"});
     assert!(
         hub.effect("send", std::slice::from_ref(&output))
