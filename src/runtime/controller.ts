@@ -8,7 +8,7 @@ import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { MemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { Approval, ApprovalResolution, DialogResponse, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, HistoryPlatform, Inbound, InputRecord, Lane, LaneModel, LaneModelChoice, LanePresetSnapshot, ResolvedLanePreset, ModelPreset, Messenger, OutputRecord, Route, StorePort, ThreadInfo, ThreadUpdate, WorkflowChoice } from "../contracts";
 import { authorizeDiscordPurpose, discordPurposeRequest } from "../messaging/discord-context";
-import { discordWorkThreadKey, discordWorkThreadSource, guildThreadParent } from "../messaging/discord-work-thread";
+import { discordWorkThreadKey, discordWorkThreadOwnerKey, discordWorkThreadSource, guildThreadParent } from "../messaging/discord-work-thread";
 import { isObservationRequest } from "./observation-request";
 import type { PresenceAction } from "../contracts";
 import { deferredRecoveryCandidate, HEAD_MODEL_CONTROL, headRecoveryEffectsSettled, isRetiredScopeInput, laneFallbackKey, laneModelPickerRestoreKey, physicalRoute, physicalRouteKey, resolvePickerOption, routeKey, routingConversation, type HeadModelChange, type HeadPicker } from "../contracts";
@@ -3884,7 +3884,7 @@ export class Superagent {
         handoff = { ...sourceFields, id: handoffId, route: destination };
         handoffMetadata = {
           [`handoff-source:${handoffId}`]: original.id,
-          ...(placementSource ? { [`report-approval-source:${original.id}`]: original.id } : {}),
+          ...(placementSource ? { [discordWorkThreadOwnerKey(handoffId)]: original.id } : {}),
           ...(destination.topicId && destination.guildId === null && routeKey(destination) !== routeKey(original.route)
             ? this.dmTimeline.topicMetadata(original, destination.topicId) : {}),
         };
@@ -4034,8 +4034,8 @@ export class Superagent {
       attachments: original.attachments,
     }, id, {
       [`handoff-source:${handoffId}`]: sourceId,
-      ...(reportInThread || scopedOwner ? { [`handoff-reply:${handoffId}`]: routeKey(lane.route) } : {}),
-      ...(scopedOwner ? { [`report-approval-source:${original.id}`]: scopedOwner.id } : {}),
+      ...(reportInThread ? { [`handoff-reply:${handoffId}`]: routeKey(lane.route) } : {}),
+      ...(scopedOwner ? { [discordWorkThreadOwnerKey(handoffId)]: scopedOwner.id } : {}),
     }, workflow);
     if (queued) this.background(this.syncLaneThreadTitle(lane));
     return handoffId;
@@ -4629,6 +4629,15 @@ export class Superagent {
           : this.pauseRevisions.get(live.id) !== pauseRevision || this.requireLane(live.id).workState !== priorWorkState))
         throw new Error("Native goal ownership or approval state changed before resume");
       this.authorized(route, live.id === "main" ? undefined : "work");
+      let scopedWorkOwnerId: string | undefined;
+      if (live.id !== "main" && !authorizeRoute(this.config, route)) {
+        const placement = discordWorkThreadSource(this.config, this.store, route);
+        const owner = this.store.ownerSource(original.id);
+        if (!placement || !owner || owner.state === "cancelled" || owner.state === "uncertain"
+          || routeKey(physicalRoute(owner.route)) !== routeKey(placement))
+          throw new Error("Goal resume in this placement-only thread requires its original authorized conversation");
+        scopedWorkOwnerId = owner.id;
+      }
       const requestId = `sg-${key(inputId)}-${live.generation}`;
       const { discordOriginalText: _discordOriginalText, ...sourceFields } = original;
       const input = this.store.submitGoalResume({
@@ -4636,6 +4645,7 @@ export class Superagent {
         text: "Resume the existing native goal within its entrusted objective.", attachments: [],
       }, live.id, original.id, {
         requestId, generation: live.generation, sessionId: live.sessionId, sessionFile: state.sessionFile, cursor, goalId,
+        scopedWorkOwnerId,
       }, priorWorkState);
       submitted = true;
       live.input = input;

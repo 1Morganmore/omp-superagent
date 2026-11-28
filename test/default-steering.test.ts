@@ -22,6 +22,7 @@ const headInbound = (id: string, destination = route(), task = `Request ${id}`):
 
 class TrackedHost implements RuntimeHost {
   readonly prompts: Array<{ id: string; command: Record<string, unknown> }> = [];
+  readonly goalOperations: unknown[] = [];
   readonly listeners = new Set<(frame: Record<string, unknown>) => void>();
   readonly exit = Promise.withResolvers<void>();
   disconnected = false;
@@ -50,7 +51,19 @@ class TrackedHost implements RuntimeHost {
     if (command.type === "get_available_models") return { success: true, data: { models: [model] } };
     if (command.type === "get_available_commands") return { success: true, data: { commands: [] } };
     if (command.type === "get_entries") return { success: true, data: { entries: [], leafId: null } };
-    if (command.type === "goal") { this.state.goal = null; return { success: true }; }
+    if (command.type === "goal") {
+      this.goalOperations.push(command.op);
+      const goal = this.state.goal?.goal;
+      if (goal && command.op === "pause") {
+        this.state.goal = { enabled: false, goal: { ...goal, status: "paused" } };
+      } else if (goal && command.op === "resume") {
+        this.state.goal = { enabled: true, goal: { ...goal, status: "active" } };
+        this.state.isSettled = false;
+        this.state.isStreaming = true;
+        this.emit({ type: "agent_start" });
+      } else this.state.goal = null;
+      return { success: true };
+    }
     if (command.type === "shutdown_host") return { success: true };
     if (command.type !== "prompt" || !id) throw new Error(`Unexpected request ${command.type}`);
     this.prompts.push({ id, command });
@@ -891,6 +904,74 @@ describe("cross-channel native topic creation", () => {
     await drain(runtime);
     expect(messenger.sent.filter(output => output.text === "Verified result delivered"))
       .toEqual([expect.objectContaining({ route: lane.route })]);
+
+    const continuation = headInbound("1196", source.route, "Continue the same work");
+    await receive(runtime, continuation);
+    const followUp = await runtime.messageLane(lane.id, "Continue the same work", continuation.id);
+    expect(worker.prompts).toHaveLength(2);
+    worker.emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse",
+      content: [{ type: "text", text: "Ongoing follow-up work" }] } });
+    main.yield("Continuation acknowledged");
+    main.result(2);
+    main.emit({ type: "session_settled" });
+    await drain(runtime);
+    expect(main.prompts[3]?.command.message).toContain("Ongoing follow-up work");
+    main.yield("Follow-up progress");
+    main.result(3);
+    main.emit({ type: "session_settled" });
+    await drain(runtime);
+    worker.yield("Completed follow-up work");
+    worker.result(1);
+    worker.emit({ type: "session_settled" });
+    await drain(runtime);
+    expect(store.input(`report:${followUp.inputId}`)?.route).toEqual(lane.route);
+    expect(main.prompts[4]?.command.message).toContain("Completed follow-up work");
+    main.yield("Follow-up finished");
+    main.result(4);
+    main.emit({ type: "session_settled" });
+    await drain(runtime);
+    expect(messenger.sent.filter(output => /^Follow-up (?:progress|finished)$/.test(output.text)).map(output => output.route))
+      .toEqual([lane.route, lane.route]);
+    expect(messenger.creations).toHaveLength(1);
+  });
+
+  test("resuming a scoped lane goal keeps its new native approval on the original allowed conversation", async () => {
+    const { runtime, store, messenger, hosts, select } = fixture(2, undefined, undefined, { discord: {
+      allowCrossChannelThreads: true, crossChannelThreadScope: "guild", allowedChannelIds: ["4", "6"],
+    } });
+    await runtime.start();
+    const source = headInbound("1197", route(null));
+    await receive(runtime, source);
+    const lane = await runtime.startLane(select(source.id, destination()));
+    await drain(runtime);
+    const worker = hosts.get(lane.socketPath);
+    if (!worker) throw new Error("Expected the scoped lane Host");
+    worker.state.goal = { enabled: true, goal: { id: "existing-goal", status: "active" } };
+    await runtime.pause(lane.id);
+    expect(store.lane(lane.id)?.workState).toBe("paused");
+    expect(worker.state.goal?.goal?.status).toBe("paused");
+
+    const different = headInbound("1198", route(null, { channelId: "6" }), "Resume the existing goal");
+    await receive(runtime, different);
+    await expect(runtime.resume(lane.id, different.id)).rejects.toThrow("requires its original authorized conversation");
+    expect(worker.goalOperations).toEqual(["pause"]);
+    expect(store.input(`resume:${different.id}:${lane.id}`)).toBeNull();
+
+    const resume = headInbound("1199", source.route, "Resume the existing goal");
+    await receive(runtime, resume);
+    await runtime.resume(lane.id, resume.id);
+    await runtime.resume(lane.id, resume.id);
+    const resumed = `resume:${resume.id}:${lane.id}`;
+    expect(store.input(resumed)).toMatchObject({ target: lane.id, state: "submitted", route: lane.route });
+    expect(store.reportApprovalSource(resumed)?.id).toBe(resume.id);
+    expect(worker.goalOperations).toEqual(["pause", "resume"]);
+    expect(worker.prompts).toHaveLength(1);
+    const approval = { type: "extension_ui_request", id: "resume-goal-confirm", method: "confirm", title: "Continue the native goal?" };
+    worker.state.pendingUiRequests = [approval];
+    worker.emit(approval);
+    await drain(runtime);
+    expect(messenger.approvals).toEqual([expect.objectContaining({ target: lane.id, requestId: approval.id, route: source.route })]);
+    expect(store.approvals(lane.id)).toEqual([expect.objectContaining({ requestId: approval.id, route: source.route })]);
   });
 
   test("unlisted guild scope refuses an ineligible thread and cannot be used while disabled", async () => {

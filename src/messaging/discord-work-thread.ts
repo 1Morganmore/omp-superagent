@@ -15,13 +15,22 @@ export function discordWorkThreadKey(threadId: string): string {
   return `discord:work-thread:${threadId}`;
 }
 
-/** Delivery authority for a confirmed native lane thread, never request ingress. */
-export function discordWorkThreadSource(config: Config, store: Pick<StorePort, "getMeta">, route: Route): Route | null {
-  if (config.discord?.crossChannelThreadScope !== "guild" || config.discord.allowCrossChannelThreads !== true
-    || route.platform !== "discord" || !route.threadId || route.topicId !== undefined) return null;
+export function discordWorkThreadOwnerKey(inputId: string): string {
+  return `discord:work-thread-owner:${inputId}`;
+}
+
+/** Read the exact placement receipt without making it current authorization. */
+export function recordedDiscordWorkThreadSource(store: Pick<StorePort, "getMeta">, route: Route): Route | null {
+  if (route.platform !== "discord" || !route.threadId || route.topicId !== undefined) return null;
   const saved = store.getMeta(discordWorkThreadKey(route.threadId));
   if (!saved) return null;
   const binding: { source: Route; route: Route } = JSON.parse(saved);
-  return routeKey(binding.route) === routeKey(route)
-    && guildThreadParent(config, binding.source, { ...route, threadId: null }) ? binding.source : null;
+  return routeKey(binding.route) === routeKey(route) ? binding.source : null;
+}
+
+/** Delivery authority for a confirmed native lane thread, never request ingress. */
+export function discordWorkThreadSource(config: Config, store: Pick<StorePort, "getMeta">, route: Route): Route | null {
+  if (config.discord?.crossChannelThreadScope !== "guild" || config.discord.allowCrossChannelThreads !== true) return null;
+  const source = recordedDiscordWorkThreadSource(store, route);
+  return source && guildThreadParent(config, source, { ...route, threadId: null }) ? source : null;
 }

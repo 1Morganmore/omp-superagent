@@ -474,6 +474,7 @@ export interface StorePort {
   /** Reopen the verified lane and submit its goal resume together, without admitting a prompt. */
   submitGoalResume(input: Inbound, target: string, sourceId: string, owner: {
     requestId: string; generation: number; sessionId: string; sessionFile: string; cursor: string | null; goalId?: string;
+    scopedWorkOwnerId?: string;
   }, priorWorkState?: Lane["workState"]): InputRecord;
   /** Nonterminal native assistant observation; never settles or dispatches its owner. */
   progress(id: string, generation: number, sessionId: string, eventId: string, text: string, editInPlace?: boolean): boolean;
