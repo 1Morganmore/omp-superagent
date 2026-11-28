@@ -191,21 +191,35 @@ export async function verifyNativeWorkerMemory(config: Config, options: {
     expectVectors([f.retained, f.learned]);
     expect(await embeddingLabels(calls)).toEqual(["learn", "retain"]);
 
-    // A changed source page must revisit the old records, not merely use the
-    // no-change shortcut. The normal idle-eviction scan bypasses steady-state cadence.
+    // Let idle eviction finish instead of racing the next input against it.
+    // A new owner must continue the same journal, not recreate its imported facts.
+    await worker.close();
+    worker = undefined;
+    await wait(() => laneForRoute()?.pid === null, "The first worker generation was not released after idle eviction");
+    expect(laneForRoute()).toMatchObject({
+      sessionId: lane.sessionId, sessionFile: lane.sessionFile, generation: lane.generation, runtimeState: "unloaded",
+    });
+    expect(await workerProbe(registration, ref)).toMatchObject({
+      exitGeneration: lane.generation, uncertain: false, socket: false, pidAlive: false, ownerAlive: false,
+      pid: null, sessionFile: true, sessionId: lane.sessionId,
+    });
+
+    const resumedGeneration = lane.generation + 1;
     await send(f.extendId, `In this same lane, learn the final project fact. ${f.extend}`);
     await wait(() => done.get(f.extendId)?.state === "done"
       && messenger.sent.some(output => output.sourceId === f.extendId && output.text === f.laterReport),
       "The bound remote lane did not deliver the follow-up");
     expect(messenger.sent.filter(output => output.sourceId === f.extendId && output.text === f.laterReport))
       .toEqual([expect.objectContaining({ route })]);
-    expect(laneForRoute()).toMatchObject({ sessionId: lane.sessionId, generation: lane.generation });
+    expect(laneForRoute()).toMatchObject({
+      sessionId: lane.sessionId, sessionFile: lane.sessionFile, generation: resumedGeneration, remote: lane.remote,
+    });
     await wait(() => {
       const status = memoryStatus(lane.id);
-      return status?.status === "checked" && status.skipped === 2 && status.indexed === 3;
+      return status?.status === "checked" && status.generation === resumedGeneration && status.skipped === 2 && status.indexed === 3;
     }, "HEAD did not replay the changed page without duplicating existing facts");
     expect(memoryStatus(lane.id)).toMatchObject({
-      generation: lane.generation, status: "checked", cursor: 0, records: 3, inserted: 1, skipped: 2, rejected: 0,
+      generation: resumedGeneration, status: "checked", cursor: 0, records: 3, inserted: 1, skipped: 2, rejected: 0,
       lexical: 3, indexed: 3, disabled: 0, pending: 0,
     });
     const allRows = imported.all();

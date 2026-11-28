@@ -90,8 +90,10 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Some((status, value)) = fixture.responses.lock().unwrap().get(&target) {
-        if method == "PUT" && path.contains("/reactions/")
-            || method == "GET" && (status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS)
+        if method == "PUT" && (path.contains("/reactions/") || path.contains("/thread-members/"))
+            || method == "POST" && path.ends_with("/threads")
+            || method == "GET"
+                && (status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS)
         {
             drop(fixture.emitted.send((path, Value::Null)));
         }
@@ -116,6 +118,11 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
                 "content":body["content"],"timestamp":stamp});
             fixture.emitted.send((path, body)).unwrap();
             result
+        }
+        ("POST", "/channels/88/threads") => {
+            let name = body["name"].clone();
+            fixture.emitted.send((path, body)).unwrap();
+            json!({"id":"92","guild_id":"77","type":11,"parent_id":"88","name":name})
         }
         ("GET", "/channels/89") => json!({"id":"89", "guild_id":"77", "type":0}),
         ("POST", "/channels/89/messages") => {
@@ -171,6 +178,10 @@ async fn rest(AxumState(fixture): AxumState<RestFixture>, request: Request) -> R
             card.clone()
         }
         ("PUT", path) if path.contains("/reactions/") => {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        ("PUT", path) if path.contains("/thread-members/") => {
+            fixture.emitted.send((path.to_owned(), body)).unwrap();
             return StatusCode::NO_CONTENT.into_response();
         }
         _ => return (StatusCode::NOT_FOUND, Json(json!({"code":10003}))).into_response(),
@@ -231,6 +242,12 @@ async fn received(emitted: &mut mpsc::UnboundedReceiver<(String, Value)>, expect
         .expect("Discord REST recorder closed");
     assert_eq!(path, expected);
     body
+}
+
+async fn settled(state: &State) {
+    time::timeout(Duration::from_secs(5), state.rest.settled())
+        .await
+        .expect("detached Discord request never settled");
 }
 
 async fn queued_event(hub: &Hub, store: &Store) -> QueuedEvent {
@@ -1317,6 +1334,103 @@ async fn card_only_progress_and_long_initial_status_edit_in_one_message() {
         .unwrap_err();
     assert_eq!(with_picker.certainty, "rejected");
     assert!(observed.try_recv().is_err());
+
+    hub.stop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn discord_thread_creation_assigns_the_configured_owner_after_confirming_the_new_route() {
+    let temporary = Temp::new();
+    let store = Arc::new(Store::open(&temporary.0).unwrap());
+    let (hub, ws, mut observed, _, server, _, state) =
+        discord_fixture_with_store(json!({"discord":{}}), &store).await;
+    let _socket = addressing_tests::start(&hub, &ws, false).await;
+    let route = addressing_tests::parent();
+    let created = hub
+        .effect("createThread", &[route, json!("owner-only thread")])
+        .await
+        .unwrap();
+    assert_eq!(
+        created,
+        json!({"platform":"discord","accountId":"71","authorityId":"42",
+            "guildId":"77","channelId":"88","threadId":"92"})
+    );
+    let post = received(&mut observed, "/channels/88/threads").await;
+    assert_eq!(post, json!({"name":"owner-only thread","type":11}));
+    // The configured owner, not the creating bot, is the only added member.
+    received(&mut observed, "/channels/92/thread-members/42").await;
+    settled(&state).await;
+    assert!(
+        observed.try_recv().is_err(),
+        "creation sends exactly one thread POST and one owner PUT"
+    );
+
+    hub.stop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn discord_thread_membership_failure_keeps_the_confirmed_route_without_retrying() {
+    let temporary = Temp::new();
+    let store = Arc::new(Store::open(&temporary.0).unwrap());
+    let (hub, ws, mut observed, _, server, responses, state) =
+        discord_fixture_with_store(json!({"discord":{}}), &store).await;
+    let _socket = addressing_tests::start(&hub, &ws, false).await;
+    addressing_tests::respond(
+        &responses,
+        "/channels/92/thread-members/42",
+        StatusCode::FORBIDDEN,
+        json!({"code":50001}),
+    );
+    let route = addressing_tests::parent();
+    let created = hub
+        .effect("createThread", &[route, json!("owner-only thread")])
+        .await
+        .unwrap();
+    assert_eq!(
+        created,
+        json!({"platform":"discord","accountId":"71","authorityId":"42",
+            "guildId":"77","channelId":"88","threadId":"92"}),
+        "membership is best-effort and cannot change the confirmed route"
+    );
+    received(&mut observed, "/channels/88/threads").await;
+    received(&mut observed, "/channels/92/thread-members/42").await;
+    settled(&state).await;
+    assert!(
+        observed.try_recv().is_err(),
+        "a rejected membership must not repeat the POST or the PUT"
+    );
+
+    hub.stop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn discord_thread_creation_failure_sends_no_membership_put_or_repeat_post() {
+    let temporary = Temp::new();
+    let store = Arc::new(Store::open(&temporary.0).unwrap());
+    let (hub, ws, mut observed, _, server, responses, state) =
+        discord_fixture_with_store(json!({"discord":{}}), &store).await;
+    let _socket = addressing_tests::start(&hub, &ws, false).await;
+    addressing_tests::respond(
+        &responses,
+        "/channels/88/threads",
+        StatusCode::FORBIDDEN,
+        json!({"code":50013}),
+    );
+    let route = addressing_tests::parent();
+    let error = hub
+        .effect("createThread", &[route, json!("owner-only thread")])
+        .await
+        .unwrap_err();
+    assert_eq!(error.certainty, "rejected");
+    received(&mut observed, "/channels/88/threads").await;
+    settled(&state).await;
+    assert!(
+        observed.try_recv().is_err(),
+        "a rejected creation must not retry the POST or add the owner"
+    );
 
     hub.stop().await.unwrap();
     server.abort();
